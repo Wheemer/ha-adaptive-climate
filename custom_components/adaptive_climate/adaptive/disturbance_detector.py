@@ -7,6 +7,15 @@ from datetime import datetime
 
 _LOGGER = logging.getLogger(__name__)
 
+# Disturbance detection thresholds
+WIND_LOSS_SPEED_THRESHOLD_MS = 5.0  # Beaufort 3+ — enough to meaningfully increase convective loss
+WIND_LOSS_OUTDOOR_STABILITY_C = 2.0  # Max outdoor temp swing to consider outdoor temp "stable"
+WIND_LOSS_DROP_THRESHOLD_C = 0.5  # Min indoor drop during settling to flag as wind loss
+WIND_LOSS_DROP_RATE_C_PER_H = 1.0  # Min drop rate (°C/h) to distinguish from normal cooling
+SOLAR_GAIN_TEMP_RISE_RATE_C_PER_H = 0.5  # Min temp rise rate during settling to flag solar gain
+SOLAR_GAIN_SETTLING_RISE_C = 0.3  # Min total settling rise to flag solar gain
+OUTDOOR_SWING_THRESHOLD_C = 5.0  # Outdoor temp range that invalidates a learning cycle
+
 
 class DisturbanceDetector:
     """Detects environmental disturbances that invalidate PID learning cycles.
@@ -20,7 +29,6 @@ class DisturbanceDetector:
 
     def __init__(self):
         """Initialize the disturbance detector."""
-        self._logger = _LOGGER
 
     def detect_disturbances(
         self,
@@ -103,15 +111,15 @@ class DisturbanceDetector:
         # Detect solar gain if:
         # 1. Temperature rising faster than 0.5°C/h during settling (heater off)
         # 2. Solar values increased significantly (>100 W/m² or >1000 lux)
-        if temp_rise_rate > 0.5 and solar_increase > 100:
+        if temp_rise_rate > SOLAR_GAIN_TEMP_RISE_RATE_C_PER_H and solar_increase > 100:
             # Check if this occurred during settling phase (heater off)
             if heater_active_periods:
                 last_heater_stop = heater_active_periods[-1][1]
                 settling_temps = [(ts, temp) for ts, temp in temperature_history if ts > last_heater_stop]
                 if len(settling_temps) >= 2:
                     settling_rise = settling_temps[-1][1] - settling_temps[0][1]
-                    if settling_rise > 0.3:  # >0.3°C rise during settling
-                        self._logger.info(
+                    if settling_rise > SOLAR_GAIN_SETTLING_RISE_C:  # >0.3°C rise during settling
+                        _LOGGER.info(
                             "Solar gain detected: temp rose %.2f°C during settling with solar increase %.1f",
                             settling_rise,
                             solar_increase,
@@ -141,14 +149,14 @@ class DisturbanceDetector:
         if len(temperature_history) < 3 or len(outdoor_temps) < 2 or len(wind_speeds) < 2:
             return False
 
-        # Check outdoor temperature stability (< 2°C change)
+        # Check outdoor temperature stability
         outdoor_range = max(t for _, t in outdoor_temps) - min(t for _, t in outdoor_temps)
-        if outdoor_range > 2.0:
+        if outdoor_range > WIND_LOSS_OUTDOOR_STABILITY_C:
             return False  # Outdoor temp not stable
 
-        # Check for high wind (>5 m/s average)
+        # Check for high wind
         avg_wind = sum(speed for _, speed in wind_speeds) / len(wind_speeds)
-        if avg_wind < 5.0:
+        if avg_wind < WIND_LOSS_SPEED_THRESHOLD_MS:
             return False  # Wind not high enough
 
         # Check for indoor temperature drop during heater-off period
@@ -164,9 +172,9 @@ class DisturbanceDetector:
                 # Calculate drop rate to distinguish from normal cooling
                 drop_rate = settling_drop / duration_hours if duration_hours > 0 else 0
 
-                # Wind loss should cause faster-than-normal cooling (>1.0°C/hour)
-                if settling_drop > 0.5 and drop_rate > 1.0:
-                    self._logger.info(
+                # Wind loss causes faster-than-normal cooling
+                if settling_drop > WIND_LOSS_DROP_THRESHOLD_C and drop_rate > WIND_LOSS_DROP_RATE_C_PER_H:
+                    _LOGGER.info(
                         "Wind loss detected: temp dropped %.2f°C (%.2f°C/h) during settling with avg wind %.1f m/s",
                         settling_drop,
                         drop_rate,
@@ -193,8 +201,8 @@ class DisturbanceDetector:
 
         outdoor_range = max(t for _, t in outdoor_temps) - min(t for _, t in outdoor_temps)
 
-        if outdoor_range > 5.0:
-            self._logger.info("Outdoor temperature swing detected: %.2f°C change during cycle", outdoor_range)
+        if outdoor_range > OUTDOOR_SWING_THRESHOLD_C:
+            _LOGGER.info("Outdoor temperature swing detected: %.2f°C change during cycle", outdoor_range)
             return True
 
         return False
@@ -232,7 +240,7 @@ class DisturbanceDetector:
             # This suggests internal heat gains (people, cooking, electronics)
             # Raised threshold from 0.3 to 0.5 to reduce false positives
             if rise_rate > 0.5:
-                self._logger.info(
+                _LOGGER.info(
                     "Occupancy detected: temp rose %.2f°C (%.2f°C/h) during heater-off period", temp_rise, rise_rate
                 )
                 return True

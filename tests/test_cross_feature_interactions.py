@@ -8,7 +8,7 @@ covering interactions between:
 """
 
 import pytest
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock
 
 from custom_components.adaptive_climate.adaptive.humidity_detector import (
@@ -408,7 +408,7 @@ class TestComplexScenarios:
             humidity_detector=detector,
         )
 
-        now = datetime(2024, 1, 1, 12, 0, 0)
+        now = datetime(2024, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
 
         # Activate both
         handler.update_contact_states({"binary_sensor.door": True}, now)

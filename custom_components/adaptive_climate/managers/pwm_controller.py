@@ -398,6 +398,8 @@ class PWMController:
         if 0 < time_off < self._min_closed_time:
             # time_off is too short, increase time_on and time_off
             time_on *= self._min_closed_time / time_off
+            # Clamp time_on to ensure time_off remains at least min_closed_time
+            time_on = min(time_on, self._pwm - self._min_closed_time)
             time_off = self._min_closed_time
 
         is_device_active = heater_controller.is_active(hvac_mode)

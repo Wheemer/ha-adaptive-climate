@@ -8,6 +8,9 @@ import sys
 
 DOMAIN = "adaptive_climate"
 
+# Event names
+EVENT_HEATER_CONTROL_FAILED = f"{DOMAIN}_heater_control_failed"
+
 
 # StrEnum compatibility for Python < 3.11
 if sys.version_info >= (3, 11):
