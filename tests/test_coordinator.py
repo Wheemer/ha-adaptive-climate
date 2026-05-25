@@ -300,21 +300,30 @@ def test_duplicate_registration_warning(coord, caplog):
 
 
 def test_duplicate_registration_preserves_demand_state(coord):
-    """Test that re-registering a zone resets demand state to False."""
+    """Test that re-registering a zone (e.g. config reload) preserves demand state.
+
+    H09: demand state must NOT be wiped on re-registration so an actively-heating
+    zone's demand is preserved across config reloads instead of shutting off the
+    boiler mid-cycle.
+    """
     # Register a zone and set demand
     coord.register_zone("zone1", {"name": "Zone 1"})
     coord.update_zone_demand("zone1", True, "heat")
 
-    # Verify demand is True (now stored as dict)
+    # Verify demand is True
     assert coord._demand_states["zone1"]["demand"] is True
     assert coord._demand_states["zone1"]["mode"] == "heat"
 
-    # Re-register the zone
+    # Re-register the zone (e.g. config reload)
     coord.register_zone("zone1", {"name": "Zone 1 Updated"})
 
-    # Verify demand is reset to False (with new dict structure)
-    assert coord._demand_states["zone1"]["demand"] is False
-    assert coord._demand_states["zone1"]["mode"] is None
+    # Verify demand is PRESERVED (H09 fix)
+    assert coord._demand_states["zone1"]["demand"] is True
+    assert coord._demand_states["zone1"]["mode"] == "heat"
+
+    # But zone_data is still updated to the new data
+    zone = coord.get_zone_data("zone1")
+    assert zone["name"] == "Zone 1 Updated"
 
 
 def test_unregister_all_zones(coord):
@@ -781,10 +790,6 @@ class TestCoordinatorAutoModeSwitching:
             assert call[0][2]["hvac_mode"] == "cool"
 
 
-if __name__ == "__main__":
-    pytest.main([__file__, "-v"])
-
-
 # =============================================================================
 # Worst-Case Transport Delay Tests (for preheat scheduling)
 # =============================================================================
@@ -883,11 +888,14 @@ async def test_outdoor_temp_lagged_ema_filter(hass):
     coord.update_outdoor_temp_lagged(10.0, dt_seconds=0)  # init
     assert coord.outdoor_temp_lagged == 10.0
 
-    # After 1 hour, temp jumps to 20
-    # alpha = 3600 / (4.0 * 3600) = 0.25
-    # lagged = 0.25 * 20 + 0.75 * 10 = 12.5
+    # After 1 hour, temp jumps to 20.
+    # H03: exponential alpha = 1 - exp(-dt/tau) = 1 - exp(-3600/(4*3600)) = 1 - exp(-0.25)
+    import math
+
+    alpha = 1.0 - math.exp(-3600 / (4.0 * 3600))
+    expected = alpha * 20.0 + (1.0 - alpha) * 10.0
     coord.update_outdoor_temp_lagged(20.0, dt_seconds=3600)
-    assert abs(coord.outdoor_temp_lagged - 12.5) < 0.01
+    assert abs(coord.outdoor_temp_lagged - expected) < 0.01
 
 
 @pytest.mark.asyncio
@@ -906,6 +914,168 @@ async def test_outdoor_temp_lagged_tau_from_rating(hass):
     hass.states.get.return_value = None
     coord = coordinator.AdaptiveThermostatCoordinator(hass)
     assert coord.outdoor_temp_tau == 3.0
+
+
+# =============================================================================
+# H09: register_zone preserves demand state on re-registration
+# =============================================================================
+
+
+def test_register_zone_new_zone_initialises_demand(coord):
+    """New zone gets demand state initialised to False/None."""
+    coord.register_zone("zone1", {"name": "Zone 1"})
+    assert coord._demand_states["zone1"] == {"demand": False, "mode": None}
+
+
+def test_register_zone_rereg_preserves_active_demand(coord):
+    """Re-registering an active zone must NOT wipe its demand state (H09)."""
+    coord.register_zone("zone1", {"name": "Zone 1"})
+    coord.update_zone_demand("zone1", True, "heat")
+
+    # Re-register (e.g. config entry reload)
+    coord.register_zone("zone1", {"name": "Zone 1 v2"})
+
+    # Demand state preserved
+    assert coord._demand_states["zone1"]["demand"] is True
+    assert coord._demand_states["zone1"]["mode"] == "heat"
+    # Zone data still updated
+    assert coord.get_zone_data("zone1")["name"] == "Zone 1 v2"
+
+
+def test_register_zone_rereg_preserves_idle_demand(coord):
+    """Re-registering an idle zone keeps it at False/None (H09)."""
+    coord.register_zone("zone1", {"name": "Zone 1"})
+    # No demand update — demand is False
+
+    coord.register_zone("zone1", {"name": "Zone 1 v2"})
+
+    assert coord._demand_states["zone1"]["demand"] is False
+    assert coord._demand_states["zone1"]["mode"] is None
+
+
+# =============================================================================
+# H10: unregister_zone removes zone from thermal_group_manager
+# =============================================================================
+
+
+def test_unregister_zone_calls_thermal_group_remove(coord):
+    """unregister_zone calls remove_zone on thermal_group_manager (H10)."""
+    from unittest.mock import MagicMock
+
+    mock_tgm = MagicMock()
+    coord.set_thermal_group_manager(mock_tgm)
+
+    coord.register_zone("zone1", {"name": "Zone 1"})
+    coord.unregister_zone("zone1")
+
+    mock_tgm.remove_zone.assert_called_once_with("zone1")
+
+
+def test_unregister_zone_no_thermal_group_manager_ok(coord):
+    """unregister_zone works even when no thermal_group_manager is set (H10)."""
+    coord.register_zone("zone1", {"name": "Zone 1"})
+    # No thermal_group_manager set — should not raise
+    coord.unregister_zone("zone1")
+    assert "zone1" not in coord._zones
+
+
+# =============================================================================
+# H04: get_active_zone_setpoints reads user_target_temp from zone_data
+# =============================================================================
+
+
+def test_get_active_zone_setpoints_reads_user_target_temp(coord):
+    """get_active_zone_setpoints uses zone_data['user_target_temp'] (H04)."""
+    from unittest.mock import MagicMock
+
+    # Zone with user_target_temp set (pre-setback value)
+    coord.register_zone("zone1", {"climate_entity_id": "climate.zone1", "user_target_temp": 21.0})
+    coord._demand_states["zone1"] = {"demand": True, "mode": "heat"}
+
+    # HA entity state shows night-setback-reduced value (19.0)
+    mock_state = MagicMock()
+    mock_state.attributes = {"temperature": 19.0}
+    coord.hass.states.get = MagicMock(return_value=mock_state)
+
+    setpoints = coord.get_active_zone_setpoints()
+    # Must return 21.0 (user setpoint), not 19.0 (effective setpoint)
+    assert setpoints == [21.0]
+
+
+def test_get_active_zone_setpoints_falls_back_to_entity_state(coord):
+    """get_active_zone_setpoints falls back to entity state when no user_target_temp (H04)."""
+    from unittest.mock import MagicMock
+
+    coord.register_zone("zone1", {"climate_entity_id": "climate.zone1"})
+    coord._demand_states["zone1"] = {"demand": True, "mode": "heat"}
+
+    mock_state = MagicMock()
+    mock_state.attributes = {"temperature": 20.0}
+    coord.hass.states.get = MagicMock(return_value=mock_state)
+
+    setpoints = coord.get_active_zone_setpoints()
+    assert setpoints == [20.0]
+
+
+def test_get_active_zone_setpoints_excludes_off_zones(coord):
+    """get_active_zone_setpoints skips zones not in an active mode (H04)."""
+    from unittest.mock import MagicMock
+
+    coord.register_zone("zone1", {"climate_entity_id": "climate.zone1", "user_target_temp": 21.0})
+    coord._demand_states["zone1"] = {"demand": False, "mode": "off"}
+
+    coord.register_zone("zone2", {"climate_entity_id": "climate.zone2", "user_target_temp": 20.0})
+    coord._demand_states["zone2"] = {"demand": True, "mode": "heat"}
+
+    setpoints = coord.get_active_zone_setpoints()
+    assert setpoints == [20.0]
+
+
+# =============================================================================
+# H06: _apply_house_mode returns count of zones switched
+# =============================================================================
+
+
+@pytest.mark.asyncio
+async def test_apply_house_mode_returns_switched_count(hass):
+    """_apply_house_mode returns count of zones that received the command (H06)."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    coord = coordinator.AdaptiveThermostatCoordinator(hass, {})
+    hass.services.async_call = AsyncMock()
+
+    coord.register_zone("zone1", {"climate_entity_id": "climate.zone1"})
+    coord.register_zone("zone2", {"climate_entity_id": "climate.zone2"})
+    coord.register_zone("zone3", {"climate_entity_id": "climate.zone3"})  # OFF
+
+    def fake_states_get(entity_id):
+        state_map = {
+            "climate.zone1": MagicMock(state="heat"),
+            "climate.zone2": MagicMock(state="cool"),
+            "climate.zone3": MagicMock(state="off"),
+        }
+        return state_map.get(entity_id)
+
+    hass.states.get = fake_states_get
+
+    count = await coord._apply_house_mode("cool")
+    assert count == 2  # zone1 + zone2, not zone3
+
+
+@pytest.mark.asyncio
+async def test_apply_house_mode_returns_zero_when_all_off(hass):
+    """_apply_house_mode returns 0 when all zones are OFF (H06)."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    coord = coordinator.AdaptiveThermostatCoordinator(hass, {})
+    hass.services.async_call = AsyncMock()
+
+    coord.register_zone("zone1", {"climate_entity_id": "climate.zone1"})
+
+    hass.states.get = MagicMock(return_value=MagicMock(state="off"))
+
+    count = await coord._apply_house_mode("heat")
+    assert count == 0
 
 
 if __name__ == "__main__":

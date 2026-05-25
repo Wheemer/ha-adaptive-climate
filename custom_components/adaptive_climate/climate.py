@@ -1081,7 +1081,7 @@ class AdaptiveThermostat(ClimateControlMixin, ClimateHandlersMixin, ClimateEntit
         """Return extra state attributes to include in entity."""
         return build_state_attributes(self)
 
-    def set_hvac_mode(self, hvac_mode: (HVACMode, str)) -> None:
+    def set_hvac_mode(self, hvac_mode: HVACMode | str) -> None:
         """Set new target hvac mode."""
         if hvac_mode == HVACMode.HEAT:
             self._min_out = self._output_clamp_low
@@ -1110,92 +1110,104 @@ class AdaptiveThermostat(ClimateControlMixin, ClimateHandlersMixin, ClimateEntit
         """Set new target hvac mode."""
         old_mode = self._hvac_mode
 
-        # Reset integral when switching between HEAT and COOL modes
-        # The integral accumulated in one mode is meaningless in the other
-        if self._pid_controller is not None:
-            switching_heat_cool = (old_mode == HVACMode.HEAT and hvac_mode == HVACMode.COOL) or (
-                old_mode == HVACMode.COOL and hvac_mode == HVACMode.HEAT
-            )
-            if switching_heat_cool:
-                _LOGGER.info(
-                    "%s: Resetting integral on HEAT<->COOL switch (was %.2f)",
-                    self.entity_id,
-                    self._pid_controller.integral,
+        # C01: Commit ALL mode mutations under lock BEFORE any I/O awaits to prevent the
+        # control-loop re-entry race. Without the lock, a control-loop tick can fire during
+        # _async_heater_turn_off, observe the old mode, and turn the heater back on.
+        async with self._temp_lock:
+            # Reset integral when switching between HEAT and COOL modes.
+            # The integral accumulated in one mode is meaningless in the other.
+            if self._pid_controller is not None:
+                switching_heat_cool = (old_mode == HVACMode.HEAT and hvac_mode == HVACMode.COOL) or (
+                    old_mode == HVACMode.COOL and hvac_mode == HVACMode.HEAT
                 )
-                self._pid_controller.integral = 0.0
-                self._i = 0.0
-
-        await self._async_heater_turn_off(force=True)
-        if hvac_mode == HVACMode.HEAT:
-            self._min_out = self._output_clamp_low
-            self._max_out = self._output_clamp_high
-            self._hvac_mode = HVACMode.HEAT
-        elif hvac_mode == HVACMode.COOL:
-            self._min_out = -self._output_clamp_high
-            self._max_out = -self._output_clamp_low
-            self._hvac_mode = HVACMode.COOL
-        elif hvac_mode == HVACMode.HEAT_COOL:
-            self._min_out = -self._output_clamp_high
-            self._max_out = self._output_clamp_high
-            self._hvac_mode = HVACMode.HEAT_COOL
-        elif hvac_mode == HVACMode.OFF:
-            self._hvac_mode = HVACMode.OFF
-            self._control_output = self._output_min
-            # Reset duty accumulator when turning OFF
-            if self._heater_controller is not None:
-                self._heater_controller.reset_duty_accumulator()
-            if self._pwm:
-                _LOGGER.debug("%s: Turn OFF heater from async_set_hvac_mode(%s)", self.entity_id, hvac_mode)
-                await self._async_heater_turn_off(force=True)
-            else:
-                _LOGGER.debug(
-                    "%s: Set heater to %s from async_set_hvac_mode(%s)", self.entity_id, self._control_output, hvac_mode
-                )
-                await self._async_set_valve_value(float(self._control_output or 0))
-            # Clear the samples to avoid integrating the off period
-            self._previous_temp = None
-            self._previous_temp_time = None
-            if self._pid_controller is not None:  # pyright: ignore[reportUnnecessaryComparison]
-                self._pid_controller.clear_samples()
-            # Reset PID calc timing to avoid stale dt when turned back on
-            if self._control_output_manager is not None:
-                self._control_output_manager.reset_calc_timing()
-        else:
-            _LOGGER.error("%s: Unrecognized HVAC mode: %s", self.entity_id, hvac_mode)
-            return
-        if self._pid_controller:
-            self._pid_controller.out_max = self._max_out
-            self._pid_controller.out_min = self._min_out
-        if self._hvac_mode != HVACMode.OFF:
-            await self._async_control_heating(calc_pid=True)
-        # Ensure we update the current operation after changing the mode
-        self.async_write_ha_state()
-
-        # Trigger mode sync if configured
-        if self._zone_id and old_mode != self._hvac_mode:
-            mode_sync = self.hass.data.get(DOMAIN, {}).get("mode_sync")
-            if mode_sync:
-                await mode_sync.on_mode_change(
-                    zone_id=self._zone_id,
-                    old_mode=old_mode.value if old_mode else "off",
-                    new_mode=self._hvac_mode.value if self._hvac_mode else "off",
-                    climate_entity_id=self.entity_id,
-                )
-
-        # Emit mode changed event and notify cycle tracker
-        if old_mode != self._hvac_mode:
-            old_mode_str = old_mode.value if old_mode else "off"
-            new_mode_str = self._hvac_mode.value if self._hvac_mode else "off"
-
-            # Emit event
-            if hasattr(self, "_cycle_dispatcher") and self._cycle_dispatcher:
-                self._cycle_dispatcher.emit(
-                    ModeChangedEvent(
-                        timestamp=dt_util.utcnow(),
-                        old_mode=old_mode_str,
-                        new_mode=new_mode_str,
+                if switching_heat_cool:
+                    _LOGGER.info(
+                        "%s: Resetting integral on HEAT<->COOL switch (was %.2f)",
+                        self.entity_id,
+                        self._pid_controller.integral,
                     )
-                )
+                    self._pid_controller.integral = 0.0
+                    self._i = 0.0
+
+            if hvac_mode == HVACMode.HEAT:
+                self._min_out = self._output_clamp_low
+                self._max_out = self._output_clamp_high
+                self._hvac_mode = HVACMode.HEAT
+            elif hvac_mode == HVACMode.COOL:
+                self._min_out = -self._output_clamp_high
+                self._max_out = -self._output_clamp_low
+                self._hvac_mode = HVACMode.COOL
+            elif hvac_mode == HVACMode.HEAT_COOL:
+                self._min_out = -self._output_clamp_high
+                self._max_out = self._output_clamp_high
+                self._hvac_mode = HVACMode.HEAT_COOL
+            elif hvac_mode == HVACMode.OFF:
+                self._hvac_mode = HVACMode.OFF
+                self._control_output = self._output_min
+                # Reset duty accumulator when turning OFF
+                if self._heater_controller is not None:
+                    self._heater_controller.reset_duty_accumulator()
+                # Clear the samples to avoid integrating the off period
+                self._previous_temp = None
+                self._previous_temp_time = None
+                if self._pid_controller is not None:  # pyright: ignore[reportUnnecessaryComparison]
+                    self._pid_controller.clear_samples()
+                # Reset PID calc timing to avoid stale dt when turned back on
+                if self._control_output_manager is not None:
+                    self._control_output_manager.reset_calc_timing()
+            else:
+                _LOGGER.error("%s: Unrecognized HVAC mode: %s", self.entity_id, hvac_mode)
+                return
+
+            if self._pid_controller:
+                self._pid_controller.out_max = self._max_out
+                self._pid_controller.out_min = self._min_out
+
+        # --- Lock released: _hvac_mode is now committed ---
+        # I/O runs below. ModeChangedEvent is in the finally block to survive exceptions (M15).
+        # The initial turn-off passes old_mode so the correct device (heater vs cooler) is stopped.
+        try:
+            await self._async_heater_turn_off(force=True, _effective_mode=old_mode)
+            if hvac_mode == HVACMode.OFF:
+                if self._pwm:
+                    _LOGGER.debug("%s: Turn OFF heater from async_set_hvac_mode(%s)", self.entity_id, hvac_mode)
+                    await self._async_heater_turn_off(force=True)
+                else:
+                    _LOGGER.debug(
+                        "%s: Set heater to %s from async_set_hvac_mode(%s)",
+                        self.entity_id,
+                        self._control_output,
+                        hvac_mode,
+                    )
+                    await self._async_set_valve_value(float(self._control_output or 0))
+            if self._hvac_mode != HVACMode.OFF:
+                await self._async_control_heating(calc_pid=True)
+            # Ensure we update the current operation after changing the mode
+            self.async_write_ha_state()
+
+            # Trigger mode sync if configured
+            if self._zone_id and old_mode != self._hvac_mode:
+                mode_sync = self.hass.data.get(DOMAIN, {}).get("mode_sync")
+                if mode_sync:
+                    await mode_sync.on_mode_change(
+                        zone_id=self._zone_id,
+                        old_mode=old_mode.value if old_mode else "off",
+                        new_mode=self._hvac_mode.value if self._hvac_mode else "off",
+                        climate_entity_id=self.entity_id,
+                    )
+        finally:
+            # M15: Emit ModeChangedEvent unconditionally so subscribers never miss a transition.
+            if old_mode != self._hvac_mode:
+                old_mode_str = old_mode.value if old_mode else "off"
+                new_mode_str = self._hvac_mode.value if self._hvac_mode else "off"
+                if hasattr(self, "_cycle_dispatcher") and self._cycle_dispatcher:
+                    self._cycle_dispatcher.emit(
+                        ModeChangedEvent(
+                            timestamp=dt_util.utcnow(),
+                            old_mode=old_mode_str,
+                            new_mode=new_mode_str,
+                        )
+                    )
 
     async def async_set_temperature(self, **kwargs):
         """Set new target temperature."""
@@ -1225,8 +1237,19 @@ class AdaptiveThermostat(ClimateControlMixin, ClimateHandlersMixin, ClimateEntit
 
     async def clear_integral(self, **kwargs):
         """Clear the integral value."""
-        self._pid_controller.integral = 0.0
-        self._i = self._pid_controller.integral
+        await self.async_set_integral(0.0)
+
+    async def async_set_integral(self, value: float) -> None:
+        """Set the PID integral term under lock to avoid racing the control loop (L17).
+
+        Callers (event handlers, service calls) must use this instead of writing
+        ``_pid_controller.integral`` directly so the mutation is serialised with
+        ``_async_control_heating``, which holds ``_temp_lock`` while reading the integral.
+        """
+        async with self._temp_lock:
+            if self._pid_controller is not None:  # pyright: ignore[reportUnnecessaryComparison]
+                self._pid_controller.integral = value
+                self._i = value
         self.async_write_ha_state()
 
     async def async_reset_pid_to_physics(self, **kwargs):
@@ -1771,6 +1794,14 @@ class AdaptiveThermostat(ClimateControlMixin, ClimateHandlersMixin, ClimateEntit
         # Update target temperature
         self._target_temp = value
 
+        # H04: Mirror user setpoint (pre-setback) into zone_data so the coordinator's
+        # get_active_zone_setpoints returns the daytime target, not the night-setback-
+        # reduced effective target.
+        if self._zone_id and self._coordinator is not None:
+            zone_data = self._coordinator.get_zone_data(self._zone_id)
+            if zone_data is not None:
+                zone_data["user_target_temp"] = value
+
         # Emit setpoint changed event
         if old_temp is not None and old_temp != value:
             # Reset duty accumulator if setpoint changes by more than 0.5°C
@@ -1902,10 +1933,16 @@ class AdaptiveThermostat(ClimateControlMixin, ClimateHandlersMixin, ClimateEntit
             self._transport_delay = None
             _LOGGER.debug("%s: Reset transport delay on heating stop", self.entity_id)
 
-    async def _async_heater_turn_off(self, force=False):
+    async def _async_heater_turn_off(self, force=False, _effective_mode: HVACMode | None = None):
         """Turn heater toggleable device off.
 
         Delegates to HeaterController for the actual turn off operation.
+
+        Args:
+            force: Force turn off regardless of minimum cycle duration.
+            _effective_mode: Override the HVAC mode used for device selection.  Pass the
+                *pre-change* mode when calling during a mode transition so the correct
+                heater/cooler entity is targeted (C01 fix).
         """
         # Reset transport delay when heating stops
         if self._transport_delay is not None:
@@ -1919,7 +1956,7 @@ class AdaptiveThermostat(ClimateControlMixin, ClimateHandlersMixin, ClimateEntit
             self._min_closed_time.seconds,
         )
         await self._heater_controller.async_turn_off(
-            hvac_mode=self.hvac_mode,
+            hvac_mode=_effective_mode if _effective_mode is not None else self.hvac_mode,
             get_cycle_start_time=self._get_cycle_start_time,
             set_is_heating=self._set_is_heating,
             set_last_heat_cycle_time=self._set_last_heat_cycle_time,

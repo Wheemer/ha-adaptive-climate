@@ -685,11 +685,10 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
             return
         for entity_id, integral_value in values.items():
             thermostat = entity_component.get_entity(entity_id)
-            if thermostat and hasattr(thermostat, "_pid_controller") and thermostat._pid_controller:
-                thermostat._pid_controller.integral = float(integral_value)
-                thermostat._i = float(integral_value)
+            if thermostat and hasattr(thermostat, "async_set_integral"):
+                # L17: Use the lock-protected method to avoid racing _async_control_heating.
+                await thermostat.async_set_integral(float(integral_value))
                 _LOGGER.info("%s: Set integral to %.2f via event", entity_id, integral_value)
-                thermostat.async_write_ha_state()
             else:
                 _LOGGER.warning("set_integral: Entity not found or no PID controller: %s", entity_id)
 

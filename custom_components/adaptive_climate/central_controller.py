@@ -74,6 +74,9 @@ class CentralController:
         # Lock to protect startup state from race conditions during concurrent updates
         self._startup_lock = asyncio.Lock()
 
+        # H14: Terminal flag – set in async_cleanup; tasks check before re-acquiring lock.
+        self._closed: bool = False
+
         # Track consecutive failures per switch for health monitoring
         self._consecutive_failures: dict[str, int] = {}
 
@@ -128,7 +131,7 @@ class CentralController:
                     await self._start_heater_with_delay_unlocked()
             else:
                 # No demand - cancel startup and schedule debounced turn-off
-                await self._cancel_heater_startup_unlocked()
+                await self._cancel_heater_startup_locked()
                 self._schedule_heater_turnoff_unlocked()
 
     async def _update_cooler(self, has_demand: bool) -> None:
@@ -149,7 +152,7 @@ class CentralController:
                     await self._start_cooler_with_delay_unlocked()
             else:
                 # No demand - cancel startup and schedule debounced turn-off
-                await self._cancel_cooler_startup_unlocked()
+                await self._cancel_cooler_startup_locked()
                 self._schedule_cooler_turnoff_unlocked()
 
     async def _start_heater_with_delay_unlocked(self) -> None:
@@ -158,7 +161,7 @@ class CentralController:
         Note: Must be called while holding _startup_lock.
         """
         # Cancel any existing startup task
-        await self._cancel_heater_startup_unlocked()
+        await self._cancel_heater_startup_locked()
 
         if self.startup_delay_seconds == 0:
             # No delay - turn on immediately
@@ -175,7 +178,7 @@ class CentralController:
         Note: Must be called while holding _startup_lock.
         """
         # Cancel any existing startup task
-        await self._cancel_cooler_startup_unlocked()
+        await self._cancel_cooler_startup_locked()
 
         if self.startup_delay_seconds == 0:
             # No delay - turn on immediately
@@ -202,9 +205,11 @@ class CentralController:
         except asyncio.CancelledError:
             _LOGGER.debug("Heater startup cancelled")
         finally:
-            async with self._startup_lock:
-                self._heater_waiting_for_startup = False
-                self._heater_startup_task = None
+            # H14: Skip lock if controller is already torn down (async_cleanup sets _closed).
+            if not self._closed:
+                async with self._startup_lock:
+                    self._heater_waiting_for_startup = False
+                    self._heater_startup_task = None
 
     async def _delayed_cooler_startup(self) -> None:
         """Delayed cooler startup task."""
@@ -222,49 +227,69 @@ class CentralController:
         except asyncio.CancelledError:
             _LOGGER.debug("Cooler startup cancelled")
         finally:
-            async with self._startup_lock:
-                self._cooler_waiting_for_startup = False
-                self._cooler_startup_task = None
+            # H14: Skip lock if controller is already torn down (async_cleanup sets _closed).
+            if not self._closed:
+                async with self._startup_lock:
+                    self._cooler_waiting_for_startup = False
+                    self._cooler_startup_task = None
 
-    async def _cancel_heater_startup_unlocked(self) -> None:
+    async def _cancel_heater_startup_locked(self) -> None:
         """Cancel pending heater startup.
 
-        Note: Must be called while holding _startup_lock.
+        Must be called while holding ``_startup_lock``.  Internally releases and
+        reacquires the lock to avoid deadlock with the task's ``finally`` block.
+
+        C07 fix: state fields are pre-cleared *before* the lock is released so that
+        a concurrent ``update()`` call (which checks ``_heater_waiting_for_startup``)
+        never observes stale state during the release window.
         """
-        if self._heater_startup_task and not self._heater_startup_task.done():
-            self._heater_startup_task.cancel()
-            # Release the lock while waiting for cancellation to complete
-            # to avoid deadlock with the task's finally block
-            task = self._heater_startup_task
-            self._startup_lock.release()
+        if not (self._heater_startup_task and not self._heater_startup_task.done()):
+            # No live task – clear state idempotently and return.
+            self._heater_waiting_for_startup = False
+            self._heater_startup_task = None
+            return
+
+        # Pre-clear state BEFORE releasing the lock so concurrent update() sees
+        # a consistent picture (waiting=False) and can start a fresh startup if needed.
+        self._heater_waiting_for_startup = False
+        task = self._heater_startup_task
+        self._heater_startup_task = None  # Nulled so task's finally becomes a no-op.
+
+        # Release lock → cancel + await → reacquire (avoids deadlock with task finally).
+        self._startup_lock.release()
+        try:
+            task.cancel()
             try:
                 await task
             except asyncio.CancelledError:
                 pass
-            finally:
-                await self._startup_lock.acquire()
-        self._heater_waiting_for_startup = False
-        self._heater_startup_task = None
+        finally:
+            await self._startup_lock.acquire()
 
-    async def _cancel_cooler_startup_unlocked(self) -> None:
+    async def _cancel_cooler_startup_locked(self) -> None:
         """Cancel pending cooler startup.
 
-        Note: Must be called while holding _startup_lock.
+        Must be called while holding ``_startup_lock``.  See ``_cancel_heater_startup_locked``
+        for the rationale of the lock-release dance (C07 fix).
         """
-        if self._cooler_startup_task and not self._cooler_startup_task.done():
-            self._cooler_startup_task.cancel()
-            # Release the lock while waiting for cancellation to complete
-            # to avoid deadlock with the task's finally block
-            task = self._cooler_startup_task
-            self._startup_lock.release()
+        if not (self._cooler_startup_task and not self._cooler_startup_task.done()):
+            self._cooler_waiting_for_startup = False
+            self._cooler_startup_task = None
+            return
+
+        self._cooler_waiting_for_startup = False
+        task = self._cooler_startup_task
+        self._cooler_startup_task = None
+
+        self._startup_lock.release()
+        try:
+            task.cancel()
             try:
                 await task
             except asyncio.CancelledError:
                 pass
-            finally:
-                await self._startup_lock.acquire()
-        self._cooler_waiting_for_startup = False
-        self._cooler_startup_task = None
+        finally:
+            await self._startup_lock.acquire()
 
     def _schedule_heater_turnoff_unlocked(self) -> None:
         """Schedule a debounced heater turn-off.
@@ -333,7 +358,11 @@ class CentralController:
         except asyncio.CancelledError:
             _LOGGER.debug("Heater turn-off cancelled")
         finally:
-            self._heater_turnoff_task = None
+            # H08: Acquire lock so the done()-check in _schedule_heater_turnoff_unlocked
+            # cannot race this None-assignment and double-schedule a new turn-off.
+            if not self._closed:
+                async with self._startup_lock:
+                    self._heater_turnoff_task = None
 
     async def _delayed_cooler_turnoff(self) -> None:
         """Delayed cooler turn-off task."""
@@ -358,7 +387,10 @@ class CentralController:
         except asyncio.CancelledError:
             _LOGGER.debug("Cooler turn-off cancelled")
         finally:
-            self._cooler_turnoff_task = None
+            # H08: Same as heater – hold lock during field reset to prevent double-schedule.
+            if not self._closed:
+                async with self._startup_lock:
+                    self._cooler_turnoff_task = None
 
     async def _is_switch_on(self, entity_id: str) -> bool:
         """Check if a switch is currently on.
@@ -634,9 +666,14 @@ class CentralController:
 
         This method should be called when the integration is being unloaded
         to prevent memory leaks from orphaned asyncio tasks.
+
+        H14: Sets ``_closed = True`` first so that task ``finally`` blocks skip
+        their post-cancel lock reacquisition on a torn-down controller.
         """
         tasks_to_cancel = []
         async with self._startup_lock:
+            # Signal all in-flight tasks that the controller is shutting down.
+            self._closed = True
             for task in [
                 self._heater_startup_task,
                 self._cooler_startup_task,

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import timedelta
 import logging
+import math
 import time
 from typing import Any, TYPE_CHECKING
 
@@ -51,6 +52,7 @@ class AdaptiveThermostatCoordinator(DataUpdateCoordinator):
         self._manifold_registry: ManifoldRegistry | None = None
         self._zone_loops: dict[str, int] = {}
         self._update_pending: bool = False
+        self._rerun_pending: bool = False  # C04: re-run guard for demand changes during in-flight update
         self._config = config or {}
         self._outdoor_temp_unsub: CALLBACK_TYPE | None = None
 
@@ -227,15 +229,32 @@ class AdaptiveThermostatCoordinator(DataUpdateCoordinator):
     def update_outdoor_temp_lagged(self, temp: float, dt_seconds: float) -> None:
         """Update the shared outdoor temp EMA filter.
 
+        H02: First-ever call seeds the EMA without filtering so we never overwrite a
+        previously established history when HA replays two events with the same
+        monotonic tick (dt=0).
+
+        H03: Uses exponential discretisation ``alpha = 1 - exp(-dt / tau)`` instead of
+        the Euler approximation ``alpha = dt / tau``.  The Euler form is only stable when
+        ``dt << tau``; a 6-hour gap with the default 4-hour tau gives alpha≈1.5 which
+        overwrites the EMA almost entirely.  The exponential form is always stable and
+        matches the analytical first-order step response for any sampling interval.
+
         Args:
             temp: Current outdoor temperature in °C.
             dt_seconds: Time since last update in seconds.
         """
-        if self._outdoor_temp_lagged is None or dt_seconds <= 0:
+        if self._outdoor_temp_lagged is None:
+            # H02: Seed on the very first update; no filtering needed yet.
             self._outdoor_temp_lagged = temp
+        elif dt_seconds <= 0:
+            # H02: Zero / negative dt (e.g., two events on the same monotonic tick after
+            # an HA replay) – skip to preserve existing EMA history.
+            pass
         else:
-            alpha = dt_seconds / (self._outdoor_temp_tau * 3600.0)
-            alpha = max(0.0, min(1.0, alpha))
+            # H03: Exponential alpha is numerically stable for any dt/tau ratio.
+            # tau is in hours; convert to seconds for the exponent.
+            alpha = 1.0 - math.exp(-dt_seconds / (self._outdoor_temp_tau * 3600.0))
+            alpha = min(1.0, alpha)  # Defensive clamp (already <1 for any finite dt)
             self._outdoor_temp_lagged = alpha * temp + (1.0 - alpha) * self._outdoor_temp_lagged
 
     def _resolve_outdoor_temp_tau(self) -> float:
@@ -308,7 +327,12 @@ class AdaptiveThermostatCoordinator(DataUpdateCoordinator):
                 zone_id,
             )
         self._zones[zone_id] = zone_data
-        self._demand_states[zone_id] = {"demand": False, "mode": None}
+        # H09: Preserve demand state across re-registration so config reloads during
+        # active heating don't wipe demand and shut off the boiler mid-cycle.
+        if zone_id not in self._demand_states:
+            self._demand_states[zone_id] = {"demand": False, "mode": None}
+        else:
+            _LOGGER.debug("Preserved demand state for re-registered zone: %s", zone_id)
         _LOGGER.debug("Registered zone: %s", zone_id)
 
     def unregister_zone(self, zone_id: str) -> None:
@@ -345,6 +369,10 @@ class AdaptiveThermostatCoordinator(DataUpdateCoordinator):
         if mode_sync is not None:
             mode_sync.unregister_zone(zone_id)
 
+        # H10: Remove zone from thermal group manager to prevent stale references
+        if self._thermal_group_manager is not None:
+            self._thermal_group_manager.remove_zone(zone_id)
+
         _LOGGER.info("Unregistered zone: %s", zone_id)
 
     def update_zone_demand(self, zone_id: str, has_demand: bool, hvac_mode: str | None = None) -> None:
@@ -371,11 +399,22 @@ class AdaptiveThermostatCoordinator(DataUpdateCoordinator):
                     hvac_mode,
                 )
 
-                # Trigger central controller with single-flight guard
-                if self._central_controller and not self._update_pending:
-                    _LOGGER.info("Triggering CentralController update")
-                    self._update_pending = True
-                    self.hass.async_create_task(self._update_with_guard())
+                # Trigger central controller with single-flight guard (C04, H01).
+                if self._central_controller:
+                    if not self._update_pending:
+                        _LOGGER.info("Triggering CentralController update")
+                        self._update_pending = True
+                        try:
+                            self.hass.async_create_task(self._update_with_guard())
+                        except Exception:
+                            # H01: Reset flag so future demand changes can still trigger updates.
+                            _LOGGER.warning("Failed to schedule CentralController update; resetting guard")
+                            self._update_pending = False
+                    else:
+                        # C04: Another update is already in flight; request a re-run after it
+                        # completes so demand changes during the task body are not silently dropped.
+                        _LOGGER.debug("Update in flight – marking rerun for zone %s", zone_id)
+                        self._rerun_pending = True
 
     def _is_high_solar_gain(self, check_time: datetime | None = None) -> bool:
         """Check if high solar gain is currently detected.
@@ -516,23 +555,33 @@ class AdaptiveThermostatCoordinator(DataUpdateCoordinator):
         return temps
 
     def get_active_zone_setpoints(self) -> list[float]:
-        """Return setpoints of all non-OFF zones.
+        """Return user setpoints of all non-OFF zones.
+
+        Reads ``zone_data["user_target_temp"]`` (pre-setback, set by the climate
+        entity on every setpoint change) so auto-mode switching uses the daytime
+        target rather than the night-setback-reduced effective target.  Falls back
+        to the entity's ``temperature`` state attribute for zones that have not yet
+        written ``user_target_temp``.
 
         Returns:
             List of target temperatures from zones not in OFF mode.
         """
-        from homeassistant.components.climate import HVACMode
-
         setpoints = []
         for zone_id, zone in self._zones.items():
             demand_state = self._demand_states.get(zone_id, {})
             mode = demand_state.get("mode")
             if mode is not None and mode != HVACMode.OFF:
-                climate_entity_id = zone.get("climate_entity_id")
-                if climate_entity_id:
-                    state = self.hass.states.get(climate_entity_id)
-                    if state and state.attributes.get("temperature") is not None:
-                        setpoints.append(state.attributes["temperature"])
+                # H04: Prefer user_target_temp (pre-setback) stored by climate entity
+                user_target = zone.get("user_target_temp")
+                if user_target is not None:
+                    setpoints.append(user_target)
+                else:
+                    # Fallback for zones that haven't written user_target_temp yet
+                    climate_entity_id = zone.get("climate_entity_id")
+                    if climate_entity_id:
+                        state = self.hass.states.get(climate_entity_id)
+                        if state and state.attributes.get("temperature") is not None:
+                            setpoints.append(state.attributes["temperature"])
         return setpoints
 
     def get_zone_by_climate_entity(self, climate_entity_id: str) -> tuple[str, dict[str, Any]] | None:
@@ -583,12 +632,25 @@ class AdaptiveThermostatCoordinator(DataUpdateCoordinator):
             self._zones[zone_id]["current_temp"] = temperature
 
     async def _update_with_guard(self) -> None:
-        """Update central controller with guard to prevent duplicate tasks."""
+        """Update central controller with guard to prevent duplicate tasks.
+
+        C04: After the update completes, check ``_rerun_pending``.  Demand changes
+        that arrived *during* the update body set this flag so they are not silently
+        dropped; we schedule one further update to pick them up.
+        """
         try:
             if self._central_controller:
                 await self._central_controller.update()
         finally:
             self._update_pending = False
+            if self._rerun_pending and self._central_controller:
+                self._rerun_pending = False
+                self._update_pending = True
+                try:
+                    self.hass.async_create_task(self._update_with_guard())
+                except Exception:
+                    _LOGGER.warning("Failed to reschedule CentralController update after rerun; resetting guard")
+                    self._update_pending = False
 
     def _setup_outdoor_temp_listener(self) -> None:
         """Set up listener for outdoor temperature changes."""
@@ -638,35 +700,62 @@ class AdaptiveThermostatCoordinator(DataUpdateCoordinator):
 
         new_mode = await self._auto_mode_switching.async_evaluate()
         if new_mode:
-            await self._apply_house_mode(new_mode)
+            # H06: Only mark as switched when ≥1 zone actually received the command,
+            # so a no-op (all zones OFF, service errors) doesn't consume the
+            # rate-limit interval.
+            zones_switched = await self._apply_house_mode(new_mode)
+            if zones_switched > 0:
+                self._auto_mode_switching.mark_switched(new_mode)
 
-    async def _apply_house_mode(self, mode: str) -> None:
+    async def _apply_house_mode(self, mode: str) -> int:
         """Apply HVAC mode to all non-OFF zones.
+
+        C05: Temporarily sets ModeSync._sync_in_progress=True for the duration of the
+        loop so that the first zone's state-change callback doesn't trigger a redundant
+        ModeSync fan-out to the remaining N-1 zones before we've reached them ourselves.
 
         Args:
             mode: HVACMode to apply (HEAT or COOL)
+
+        Returns:
+            Number of zones that successfully received the mode command.
         """
-        for zone_id, zone in self._zones.items():
-            climate_entity_id = zone.get("climate_entity_id")
-            if not climate_entity_id:
-                _LOGGER.warning("No climate_entity_id for zone %s", zone_id)
-                continue
-            # Read actual hvac_mode from the climate entity state, not zone data
-            state = self.hass.states.get(climate_entity_id)
-            if state is None:
-                _LOGGER.debug("Zone %s entity not yet available, skipping", zone_id)
-                continue
-            if state.state == HVACMode.OFF:
-                continue
-            try:
-                await self.hass.services.async_call(
-                    "climate",
-                    "set_hvac_mode",
-                    {"entity_id": climate_entity_id, "hvac_mode": mode},
-                    blocking=False,
-                )
-            except Exception:
-                _LOGGER.exception("Failed to set mode %s for zone %s", mode, zone_id)
+        domain_data = self.hass.data.get("adaptive_climate", {})
+        mode_sync = domain_data.get("mode_sync")
+
+        # C05: Suppress ModeSync re-entrancy while we're already iterating zones.
+        if mode_sync is not None:
+            mode_sync._sync_in_progress = True
+
+        zones_switched = 0
+        try:
+            for zone_id, zone in self._zones.items():
+                climate_entity_id = zone.get("climate_entity_id")
+                if not climate_entity_id:
+                    _LOGGER.warning("No climate_entity_id for zone %s", zone_id)
+                    continue
+                # Read actual hvac_mode from the climate entity state, not zone data
+                state = self.hass.states.get(climate_entity_id)
+                if state is None:
+                    _LOGGER.debug("Zone %s entity not yet available, skipping", zone_id)
+                    continue
+                if state.state == HVACMode.OFF:
+                    continue
+                try:
+                    await self.hass.services.async_call(
+                        "climate",
+                        "set_hvac_mode",
+                        {"entity_id": climate_entity_id, "hvac_mode": mode},
+                        blocking=False,
+                    )
+                    zones_switched += 1
+                except Exception:
+                    _LOGGER.exception("Failed to set mode %s for zone %s", mode, zone_id)
+        finally:
+            if mode_sync is not None:
+                mode_sync._sync_in_progress = False
+
+        return zones_switched
 
     async def _async_update_data(self) -> dict[str, Any]:
         """Fetch data from all zones.
