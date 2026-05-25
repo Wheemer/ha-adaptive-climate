@@ -42,6 +42,7 @@ def mock_coordinator():
     coordinator = MagicMock()
     coordinator.weather_entity = "weather.home"
     coordinator.get_active_zone_setpoints = MagicMock(return_value=[20.0, 21.0, 22.0])
+    coordinator.outdoor_temp = None  # Default: no fallback outdoor temp
     return coordinator
 
 
@@ -191,7 +192,10 @@ class TestGetForecastMedian:
 
     @pytest.mark.asyncio
     async def test_returns_median_from_forecast(self, mock_hass, mock_coordinator, default_config):
-        """Test returns correct median from forecast."""
+        """Test returns correct median from forecast using forecast_days entries.
+
+        default_config has CONF_FORECAST_DAYS=3, so only the first 3 entries are used.
+        """
         mock_hass.states.get.return_value = MagicMock()  # Entity exists
         mock_hass.services.async_call = AsyncMock(
             return_value=mock_forecast_response(
@@ -200,8 +204,8 @@ class TestGetForecastMedian:
                     {"temperature": 10.0},
                     {"temperature": 12.0},
                     {"temperature": 8.0},
-                    {"temperature": 15.0},
-                    {"temperature": 11.0},
+                    {"temperature": 15.0},  # Entry 4 - ignored (forecast_days=3)
+                    {"temperature": 11.0},  # Entry 5 - ignored
                 ],
             )
         )
@@ -210,7 +214,7 @@ class TestGetForecastMedian:
 
         result = await manager._async_get_forecast_median()
 
-        assert result == 11.0  # median of [8, 10, 11, 12, 15]
+        assert result == 10.0  # median of [10, 12, 8] (first 3 entries)
 
     @pytest.mark.asyncio
     async def test_returns_none_when_no_weather_entity(self, mock_hass, mock_coordinator, default_config):
@@ -246,8 +250,8 @@ class TestGetForecastMedian:
         assert result is None
 
     @pytest.mark.asyncio
-    async def test_uses_up_to_7_forecast_entries(self, mock_hass, mock_coordinator, default_config):
-        """Test only uses first 7 forecast entries."""
+    async def test_uses_forecast_days_config(self, mock_hass, mock_coordinator, default_config):
+        """Test only uses first forecast_days entries (default_config sets CONF_FORECAST_DAYS=3)."""
         mock_hass.states.get.return_value = MagicMock()
         mock_hass.services.async_call = AsyncMock(
             return_value=mock_forecast_response(
@@ -256,13 +260,8 @@ class TestGetForecastMedian:
                     {"temperature": 10.0},
                     {"temperature": 11.0},
                     {"temperature": 12.0},
-                    {"temperature": 13.0},
-                    {"temperature": 14.0},
-                    {"temperature": 15.0},
-                    {"temperature": 16.0},
-                    {"temperature": 100.0},  # Entry 8 - should be ignored
-                    {"temperature": 100.0},  # Entry 9 - should be ignored
-                    {"temperature": 100.0},  # Entry 10 - should be ignored
+                    {"temperature": 100.0},  # Entry 4 - must be ignored (forecast_days=3)
+                    {"temperature": 100.0},  # Entry 5 - must be ignored
                 ],
             )
         )
@@ -271,7 +270,7 @@ class TestGetForecastMedian:
 
         result = await manager._async_get_forecast_median()
 
-        assert result == 13.0  # median of [10, 11, 12, 13, 14, 15, 16]
+        assert result == 11.0  # median of [10, 11, 12]
 
     @pytest.mark.asyncio
     async def test_skips_entries_without_temperature(self, mock_hass, mock_coordinator, default_config):
@@ -495,23 +494,15 @@ class TestAsyncEvaluate:
         assert result2 is None
 
     @pytest.mark.asyncio
-    async def test_winter_blocks_cool(self, mock_hass, mock_coordinator, default_config):
-        """Test winter season blocks switching to COOL even with warm forecast."""
+    async def test_winter_allows_heat(self, mock_hass, mock_coordinator, default_config):
+        """Test winter season allows switching to HEAT (the permitted direction)."""
         mock_coordinator.get_active_zone_setpoints.return_value = [21.0]
         mock_coordinator.weather_entity = "weather.home"
         mock_hass.states.get.return_value = MagicMock()
-        # Forecast median is 5°C (winter) but one day is 28°C
-        # This tests that season lock prevents COOL in winter
         mock_hass.services.async_call = AsyncMock(
             return_value=mock_forecast_response(
                 "weather.home",
-                [
-                    {"temperature": 5.0},
-                    {"temperature": 5.0},
-                    {"temperature": 5.0},
-                    {"temperature": 5.0},
-                    {"temperature": 5.0},
-                ],
+                [{"temperature": 5.0}, {"temperature": 5.0}, {"temperature": 5.0}],
             )
         )
 
@@ -520,19 +511,66 @@ class TestAsyncEvaluate:
         result = await manager.async_evaluate()
 
         # Forecast median 5°C < 21 - 2 = 19, suggests HEAT
-        # Season is winter (5°C < 12°C)
-        # HEAT is allowed in winter
+        # Season is winter (5°C < 12°C) — HEAT is allowed
         assert result == HVACMode.HEAT
 
     @pytest.mark.asyncio
-    async def test_summer_blocks_heat(self, mock_hass, mock_coordinator, default_config):
-        """Test summer season blocks switching to HEAT."""
+    async def test_winter_blocks_cool(self, mock_hass, mock_coordinator, default_config):
+        """Test winter season blocks switching to COOL even when forecast is warm."""
+        mock_coordinator.get_active_zone_setpoints.return_value = [16.0]
+        mock_coordinator.weather_entity = "weather.home"
+        mock_hass.states.get.return_value = MagicMock()
+        # Season is winter (median 5°C < 12°C) but forecast is above setpoint+threshold
+        # so without the season lock it would suggest COOL.
+        # winter_below=12, summer_above=18 — but median 5°C qualifies as winter.
+        # We force a scenario where season=winter but target_mode=COOL:
+        # setpoint=16, forecast=19 > 16+2=18 → would suggest COOL, blocked by winter lock.
+        # Override winter_below to ensure 5°C median counts as winter.
+        # Use a forecast that yields median > setpoint+threshold.
+        _config = {
+            **default_config,
+            # Lower setpoint via zones so forecast > setpoint + threshold
+        }
+        mock_coordinator.get_active_zone_setpoints.return_value = [10.0]
+        # Forecast median 5°C is winter, 5°C < 10 - 2 = 8 → HEAT suggestion.
+        # Need median > setpoint + threshold to suggest COOL while still being winter.
+        # That's impossible with winter_below=12: if median > summer_above=18 it's summer.
+        # So we set winter_below=30 to make median=5 still "winter" despite being above setpoint.
+        config_winter_lock = {
+            CONF_AUTO_MODE_THRESHOLD: 2.0,
+            CONF_MIN_SWITCH_INTERVAL: 3600,
+            CONF_FORECAST_DAYS: 3,
+            CONF_SEASON_THRESHOLDS: {
+                CONF_WINTER_BELOW: 30.0,  # Everything below 30°C is "winter"
+                CONF_SUMMER_ABOVE: 50.0,  # Unreachable summer threshold
+            },
+        }
+        mock_coordinator.get_active_zone_setpoints.return_value = [15.0]
+        mock_hass.services.async_call = AsyncMock(
+            return_value=mock_forecast_response(
+                "weather.home",
+                [{"temperature": 20.0}, {"temperature": 20.0}, {"temperature": 20.0}],
+            )
+        )
+        manager = AutoModeSwitchingManager(mock_hass, config_winter_lock, mock_coordinator)
+
+        result = await manager.async_evaluate()
+
+        # Forecast median 20°C > 15 + 2 = 17 → suggests COOL
+        # Season is winter (20°C < winter_below=30) → COOL is blocked
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_summer_allows_cool(self, mock_hass, mock_coordinator, default_config):
+        """Test summer season allows switching to COOL (the permitted direction)."""
         mock_coordinator.get_active_zone_setpoints.return_value = [21.0]
         mock_coordinator.weather_entity = "weather.home"
         mock_hass.states.get.return_value = MagicMock()
-        # Forecast shows summer conditions (median > 18°C)
         mock_hass.services.async_call = AsyncMock(
-            return_value=mock_forecast_response("weather.home", [{"temperature": 25.0}])
+            return_value=mock_forecast_response(
+                "weather.home",
+                [{"temperature": 25.0}, {"temperature": 25.0}, {"temperature": 25.0}],
+            )
         )
 
         manager = AutoModeSwitchingManager(mock_hass, default_config, mock_coordinator)
@@ -540,21 +578,68 @@ class TestAsyncEvaluate:
         result = await manager.async_evaluate()
 
         # Forecast 25°C > 21 + 2 = 23, suggests COOL
-        # Season is summer (25°C > 18°C)
-        # COOL is allowed in summer
+        # Season is summer (25°C > 18°C) — COOL is allowed
         assert result == HVACMode.COOL
 
     @pytest.mark.asyncio
-    async def test_returns_none_when_no_forecast(self, mock_hass, mock_coordinator, default_config):
-        """Test returns None when no forecast available."""
+    async def test_summer_blocks_heat(self, mock_hass, mock_coordinator, default_config):
+        """Test summer season blocks switching to HEAT even when forecast is cold."""
+        # Use a config where everything above 0°C is "summer" so a cold forecast
+        # still triggers season=summer, but forecast < setpoint - threshold → HEAT suggestion.
+        config_summer_lock = {
+            CONF_AUTO_MODE_THRESHOLD: 2.0,
+            CONF_MIN_SWITCH_INTERVAL: 3600,
+            CONF_FORECAST_DAYS: 3,
+            CONF_SEASON_THRESHOLDS: {
+                CONF_WINTER_BELOW: -50.0,  # Unreachable winter threshold
+                CONF_SUMMER_ABOVE: 0.0,  # Everything above 0°C is "summer"
+            },
+        }
+        mock_coordinator.get_active_zone_setpoints.return_value = [21.0]
+        mock_coordinator.weather_entity = "weather.home"
+        mock_hass.states.get.return_value = MagicMock()
+        mock_hass.services.async_call = AsyncMock(
+            return_value=mock_forecast_response(
+                "weather.home",
+                [{"temperature": 10.0}, {"temperature": 10.0}, {"temperature": 10.0}],
+            )
+        )
+
+        manager = AutoModeSwitchingManager(mock_hass, config_summer_lock, mock_coordinator)
+
+        result = await manager.async_evaluate()
+
+        # Forecast median 10°C < 21 - 2 = 19 → suggests HEAT
+        # Season is summer (10°C > summer_above=0) → HEAT is blocked
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_returns_none_when_no_forecast_and_no_outdoor_temp(self, mock_hass, mock_coordinator, default_config):
+        """Test returns None when neither forecast nor outdoor temp is available."""
         mock_coordinator.get_active_zone_setpoints.return_value = [21.0]
         mock_coordinator.weather_entity = None
+        mock_coordinator.outdoor_temp = None
 
         manager = AutoModeSwitchingManager(mock_hass, default_config, mock_coordinator)
 
         result = await manager.async_evaluate()
 
         assert result is None
+
+    @pytest.mark.asyncio
+    async def test_falls_back_to_outdoor_temp_when_no_forecast(self, mock_hass, mock_coordinator, default_config):
+        """Test falls back to coordinator.outdoor_temp when forecast is unavailable."""
+        mock_coordinator.get_active_zone_setpoints.return_value = [21.0]
+        mock_coordinator.weather_entity = None
+        # Outdoor temp well below setpoint - threshold → should suggest HEAT
+        mock_coordinator.outdoor_temp = 5.0
+
+        manager = AutoModeSwitchingManager(mock_hass, default_config, mock_coordinator)
+
+        result = await manager.async_evaluate()
+
+        # 5.0 < 21.0 - 2.0 = 19.0 → HEAT
+        assert result == HVACMode.HEAT
 
     @pytest.mark.asyncio
     async def test_returns_none_when_no_active_zones(self, mock_hass, mock_coordinator, default_config):

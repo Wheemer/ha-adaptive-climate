@@ -48,7 +48,9 @@ class AutoModeSwitchingManager:
         # Configuration
         self._threshold = config.get(CONF_AUTO_MODE_THRESHOLD, DEFAULT_AUTO_MODE_THRESHOLD)
         self._min_switch_interval = config.get(CONF_MIN_SWITCH_INTERVAL, DEFAULT_MIN_SWITCH_INTERVAL)
-        self._forecast_days = config.get(CONF_FORECAST_DAYS, DEFAULT_FORECAST_DAYS)
+        # Accept both "forecast_days" (current) and "forecast_hours" (legacy alias).
+        # forecast_days takes precedence when both are present.
+        self._forecast_days = config.get(CONF_FORECAST_DAYS) or config.get("forecast_hours") or DEFAULT_FORECAST_DAYS
 
         season_config = config.get(CONF_SEASON_THRESHOLDS, {})
         self._winter_below = season_config.get(CONF_WINTER_BELOW, DEFAULT_WINTER_BELOW)
@@ -159,7 +161,7 @@ class AutoModeSwitchingManager:
             return None
 
         temps = []
-        for entry in forecast[:7]:
+        for entry in forecast[: self._forecast_days]:
             temp = entry.get("temperature")
             if temp is not None:
                 temps.append(temp)
@@ -202,8 +204,14 @@ class AutoModeSwitchingManager:
         season = await self.async_get_season()
         forecast_median = self._cached_forecast_median
         if forecast_median is None:
-            _LOGGER.debug("No forecast available, skipping evaluation")
-            return None
+            # Forecast unavailable — fall back to current outdoor temperature.
+            # Season defaults to "shoulder" (no locking) when forecast is absent.
+            outdoor_temp = self._coordinator.outdoor_temp
+            if outdoor_temp is None:
+                _LOGGER.debug("No forecast and no outdoor temp available, skipping evaluation")
+                return None
+            _LOGGER.debug("No forecast available, falling back to current outdoor temp %.1f°C", outdoor_temp)
+            forecast_median = outdoor_temp
 
         # Determine target mode based on forecast vs setpoint
         target_mode: str | None = None

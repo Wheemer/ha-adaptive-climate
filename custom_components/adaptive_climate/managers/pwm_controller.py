@@ -227,10 +227,15 @@ class PWMController:
 
         time_passed = time.monotonic() - time_changed
 
-        # Handle zero output - reset accumulator and turn off
-        # Note: In cooling mode, control_output is negative (e.g., -58.6)
-        # so we check abs() == 0, not <= 0
-        if abs(control_output) == 0:
+        # Handle no-demand cases - reset accumulator and turn off
+        # HEAT mode: positive output = demand, zero/negative = no demand
+        # COOL mode: negative output = demand, zero/positive = no demand
+        no_demand = (
+            control_output == 0
+            or (hvac_mode == HVACMode.HEAT and control_output < 0)
+            or (hvac_mode == HVACMode.COOL and control_output > 0)
+        )
+        if no_demand:
             self._duty_accumulator_seconds = 0.0
             self._last_accumulator_calc_time = None
             await heater_controller.async_turn_off(

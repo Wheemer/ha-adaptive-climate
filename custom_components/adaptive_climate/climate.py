@@ -1116,6 +1116,7 @@ class AdaptiveThermostat(ClimateControlMixin, ClimateHandlersMixin, ClimateEntit
                     self._pid_controller.integral,
                 )
                 self._pid_controller.integral = 0.0
+                self._i = 0.0
 
         await self._async_heater_turn_off(force=True)
         if hvac_mode == HVACMode.HEAT:

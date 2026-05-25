@@ -203,6 +203,10 @@ if HAS_HOMEASSISTANT:
             vol.Optional(CONF_AUTO_MODE_THRESHOLD, default=DEFAULT_AUTO_MODE_THRESHOLD): vol.Coerce(float),
             vol.Optional(CONF_MIN_SWITCH_INTERVAL, default=DEFAULT_MIN_SWITCH_INTERVAL): cv.positive_int,
             vol.Optional(CONF_FORECAST_DAYS, default=DEFAULT_FORECAST_DAYS): cv.positive_int,
+            # Backward-compat alias: "forecast_hours" was the original key name.
+            # forecast_days takes precedence; this is accepted to avoid breaking
+            # existing YAML configs.
+            vol.Optional("forecast_hours"): cv.positive_int,
             vol.Optional(CONF_SEASON_THRESHOLDS): vol.Schema(
                 {
                     vol.Optional(CONF_WINTER_BELOW, default=DEFAULT_WINTER_BELOW): vol.Coerce(float),

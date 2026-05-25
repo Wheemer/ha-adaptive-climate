@@ -644,20 +644,26 @@ class AdaptiveThermostatCoordinator(DataUpdateCoordinator):
             mode: HVACMode to apply (HEAT or COOL)
         """
         for zone_id, zone in self._zones.items():
-            if zone.get("hvac_mode") != HVACMode.OFF:
-                climate_entity_id = zone.get("climate_entity_id")
-                if not climate_entity_id:
-                    _LOGGER.warning("No climate_entity_id for zone %s", zone_id)
-                    continue
-                try:
-                    await self.hass.services.async_call(
-                        "climate",
-                        "set_hvac_mode",
-                        {"entity_id": climate_entity_id, "hvac_mode": mode},
-                        blocking=False,
-                    )
-                except Exception:
-                    _LOGGER.exception("Failed to set mode %s for zone %s", mode, zone_id)
+            climate_entity_id = zone.get("climate_entity_id")
+            if not climate_entity_id:
+                _LOGGER.warning("No climate_entity_id for zone %s", zone_id)
+                continue
+            # Read actual hvac_mode from the climate entity state, not zone data
+            state = self.hass.states.get(climate_entity_id)
+            if state is None:
+                _LOGGER.debug("Zone %s entity not yet available, skipping", zone_id)
+                continue
+            if state.state == HVACMode.OFF:
+                continue
+            try:
+                await self.hass.services.async_call(
+                    "climate",
+                    "set_hvac_mode",
+                    {"entity_id": climate_entity_id, "hvac_mode": mode},
+                    blocking=False,
+                )
+            except Exception:
+                _LOGGER.exception("Failed to set mode %s for zone %s", mode, zone_id)
 
     async def _async_update_data(self) -> dict[str, Any]:
         """Fetch data from all zones.

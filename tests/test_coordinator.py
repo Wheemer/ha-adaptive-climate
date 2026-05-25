@@ -591,7 +591,7 @@ def test_get_transport_delay_for_zone_no_active_zones(coord):
     coord.update_zone_demand("zone2", False, "heat")
 
     # Query delay
-    delay = coord.get_transport_delay_for_zone("zone1")
+    _delay = coord.get_transport_delay_for_zone("zone1")
 
     # Verify registry was called with empty active zones dict
     mock_registry.get_transport_delay.assert_called_once()
@@ -618,7 +618,7 @@ def test_get_transport_delay_for_zone_mode_filter(coord):
     coord.update_zone_demand("zone3", True, "heat")
 
     # Query delay
-    delay = coord.get_transport_delay_for_zone("zone1")
+    _delay = coord.get_transport_delay_for_zone("zone1")
 
     # Verify only heating zones are in active list (with entity_id keys)
     call_args = mock_registry.get_transport_delay.call_args
@@ -726,18 +726,34 @@ class TestCoordinatorAutoModeSwitching:
 
     @pytest.mark.asyncio
     async def test_apply_house_mode_calls_service_for_non_off_zones(self, hass):
-        """Test _apply_house_mode calls set_hvac_mode service for non-OFF zones."""
-        from unittest.mock import AsyncMock
+        """Test _apply_house_mode calls set_hvac_mode service for non-OFF zones.
+
+        hvac_mode is read from the climate entity state, not from zone data, so
+        zone data does NOT include hvac_mode.  Zones that are actually OFF in HA
+        must be skipped even though their zone dict has no hvac_mode key.
+        """
+        from unittest.mock import AsyncMock, MagicMock
 
         coord = coordinator.AdaptiveThermostatCoordinator(hass, {})
 
         # Mock async_call to be an async function
         hass.services.async_call = AsyncMock()
 
-        # Register zones with different modes (include climate_entity_id for service calls)
-        coord.register_zone("climate.zone1", {"hvac_mode": "heat", "climate_entity_id": "climate.zone1"})
-        coord.register_zone("climate.zone2", {"hvac_mode": "cool", "climate_entity_id": "climate.zone2"})
-        coord.register_zone("climate.zone3", {"hvac_mode": "off", "climate_entity_id": "climate.zone3"})
+        # Register zones WITHOUT hvac_mode in zone data (matches production)
+        coord.register_zone("climate.zone1", {"climate_entity_id": "climate.zone1"})
+        coord.register_zone("climate.zone2", {"climate_entity_id": "climate.zone2"})
+        coord.register_zone("climate.zone3", {"climate_entity_id": "climate.zone3"})
+
+        # Simulate HA entity states: zone1=heat, zone2=cool, zone3=off
+        def fake_states_get(entity_id):
+            state_map = {
+                "climate.zone1": MagicMock(state="heat"),
+                "climate.zone2": MagicMock(state="cool"),
+                "climate.zone3": MagicMock(state="off"),
+            }
+            return state_map.get(entity_id)
+
+        hass.states.get = fake_states_get
 
         # Apply COOL mode
         await coord._apply_house_mode("cool")
