@@ -298,18 +298,17 @@ class AdaptiveLearner:
         """Backward-compatible alias setter for _heating_auto_apply_count."""
         self._confidence._heating_auto_apply_count = value
 
-    def increment_auto_apply_count(self) -> int:
-        """Increment and return the auto-apply counter.
+    def increment_auto_apply_count(self, mode: HVACMode = None) -> int:
+        """Increment and return the auto-apply counter for the specified mode.
 
-        Use this instead of direct mutation (``learner._auto_apply_count += 1``)
-        to keep the interface clean. Note: currently always increments the heating
-        counter; mode-aware fix tracked in 04-learning/C03.
+        Args:
+            mode: HVACMode (HEAT or COOL) to increment. Defaults to HEAT.
 
         Returns:
             The new counter value after incrementing.
         """
-        self._confidence._heating_auto_apply_count += 1
-        return self._confidence._heating_auto_apply_count
+        self._confidence.increment_auto_apply_count(mode)
+        return self._confidence.get_auto_apply_count(mode)
 
     @property
     def _convergence_confidence(self) -> float:

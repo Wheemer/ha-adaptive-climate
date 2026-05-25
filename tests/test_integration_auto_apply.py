@@ -1576,6 +1576,82 @@ class TestHARestartEdgeCases:
         # (validation completes in 5 cycles, typically <24 hours).
 
 
+class TestModeAwareAutoApplyCounter:
+    """Tests for per-mode auto-apply counter isolation (C03 fix).
+
+    Verifies that HEAT and COOL auto-apply counts are tracked independently
+    so that cooling applies don't burn the heating budget and vice versa.
+    """
+
+    def test_increment_cool_does_not_affect_heat_count(self):
+        """Cool auto-apply increments only the cool counter; heat stays at 0."""
+        from homeassistant.components.climate import HVACMode
+
+        learner = AdaptiveLearner(heating_type="radiator")
+        assert learner.get_auto_apply_count(HVACMode.HEAT) == 0
+        assert learner.get_auto_apply_count(HVACMode.COOL) == 0
+
+        # Two cool auto-applies
+        learner.increment_auto_apply_count(HVACMode.COOL)
+        learner.increment_auto_apply_count(HVACMode.COOL)
+
+        assert learner.get_auto_apply_count(HVACMode.COOL) == 2
+        assert learner.get_auto_apply_count(HVACMode.HEAT) == 0, (
+            "Heat counter should be unchanged after cool auto-applies"
+        )
+
+    def test_increment_heat_does_not_affect_cool_count(self):
+        """Heat auto-apply increments only the heat counter; cool stays at 0."""
+        from homeassistant.components.climate import HVACMode
+
+        learner = AdaptiveLearner(heating_type="radiator")
+
+        learner.increment_auto_apply_count(HVACMode.HEAT)
+        learner.increment_auto_apply_count(HVACMode.HEAT)
+        learner.increment_auto_apply_count(HVACMode.HEAT)
+
+        assert learner.get_auto_apply_count(HVACMode.HEAT) == 3
+        assert learner.get_auto_apply_count(HVACMode.COOL) == 0, (
+            "Cool counter should be unchanged after heat auto-applies"
+        )
+
+    def test_independent_counters_mixed_modes(self):
+        """Heat and cool counters accumulate independently."""
+        from homeassistant.components.climate import HVACMode
+
+        learner = AdaptiveLearner(heating_type="floor_hydronic")
+
+        learner.increment_auto_apply_count(HVACMode.HEAT)
+        learner.increment_auto_apply_count(HVACMode.COOL)
+        learner.increment_auto_apply_count(HVACMode.COOL)
+        learner.increment_auto_apply_count(HVACMode.HEAT)
+        learner.increment_auto_apply_count(HVACMode.COOL)
+
+        assert learner.get_auto_apply_count(HVACMode.HEAT) == 2
+        assert learner.get_auto_apply_count(HVACMode.COOL) == 3
+
+    def test_default_mode_increments_heat(self):
+        """Calling increment_auto_apply_count() with no mode defaults to HEAT."""
+        from homeassistant.components.climate import HVACMode
+
+        learner = AdaptiveLearner(heating_type="radiator")
+        learner.increment_auto_apply_count()  # no mode
+
+        assert learner.get_auto_apply_count(HVACMode.HEAT) == 1
+        assert learner.get_auto_apply_count(HVACMode.COOL) == 0
+
+    def test_returns_new_count(self):
+        """increment_auto_apply_count returns the new count after incrementing."""
+        from homeassistant.components.climate import HVACMode
+
+        learner = AdaptiveLearner(heating_type="convector")
+        count1 = learner.increment_auto_apply_count(HVACMode.COOL)
+        count2 = learner.increment_auto_apply_count(HVACMode.COOL)
+
+        assert count1 == 1
+        assert count2 == 2
+
+
 # Marker test for module existence
 def test_integration_auto_apply_module_exists():
     """Marker test to verify module can be imported."""

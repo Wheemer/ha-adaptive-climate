@@ -386,7 +386,7 @@ async def test_auto_apply_adaptive_pid():
     }
 
     # increment_auto_apply_count should mutate _auto_apply_count and return new value
-    def _mock_increment_auto_apply_count():
+    def _mock_increment_auto_apply_count(mode=None):
         mock_learner._auto_apply_count += 1
         return mock_learner._auto_apply_count
 

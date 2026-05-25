@@ -1320,7 +1320,7 @@ class AdaptiveThermostat(ClimateControlMixin, ClimateHandlersMixin, ClimateEntit
         elif self._ext_temp is not None:
             outdoor_temp = self._ext_temp
 
-        result = await self._pid_tuning_manager.async_auto_apply_adaptive_pid(outdoor_temp)
+        result = await self._pid_tuning_manager.async_auto_apply_adaptive_pid(outdoor_temp, mode=self._hvac_mode)
 
         if result.get("applied"):
             # Send persistent notification about auto-apply

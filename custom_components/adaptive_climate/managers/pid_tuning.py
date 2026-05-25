@@ -13,6 +13,8 @@ from .. import const
 from ..const import VALIDATION_CYCLE_COUNT, PIDChangeReason
 
 if TYPE_CHECKING:
+    from homeassistant.components.climate import HVACMode
+
     from ..pid_controller import PIDController
     from .pid_gains_manager import PIDGainsManager
 
@@ -255,7 +257,11 @@ class PIDTuningManager:
         await self._async_control_heating(calc_pid=True)
         await self._async_write_ha_state()
 
-    async def async_auto_apply_adaptive_pid(self, outdoor_temp: float | None = None) -> dict[str, Any]:
+    async def async_auto_apply_adaptive_pid(
+        self,
+        outdoor_temp: float | None = None,
+        mode: HVACMode = None,
+    ) -> dict[str, Any]:
         """Automatically apply adaptive PID values with safety checks.
 
         Unlike async_apply_adaptive_pid(), this method:
@@ -266,6 +272,8 @@ class PIDTuningManager:
 
         Args:
             outdoor_temp: Current outdoor temperature for seasonal shift detection
+            mode: HVACMode (HEAT or COOL) being tuned. Determines which per-mode
+                  auto-apply counter is incremented. Defaults to HEAT.
 
         Returns:
             Dict with keys:
@@ -305,6 +313,7 @@ class PIDTuningManager:
             pwm_seconds=self._state._pwm,
             check_auto_apply=True,
             outdoor_temp=outdoor_temp,
+            mode=mode,
         )
 
         if recommendation is None:
@@ -337,8 +346,8 @@ class PIDTuningManager:
         # Clear learning history
         adaptive_learner.clear_history()
 
-        # Increment auto-apply count via public method (avoids direct private mutation)
-        new_count = adaptive_learner.increment_auto_apply_count()
+        # Increment per-mode auto-apply count via public method
+        new_count = adaptive_learner.increment_auto_apply_count(mode)
 
         # Sync auto-apply count to PID controller for safety net control
         # The PID controller uses this to disable integral decay safety net after first auto-apply
