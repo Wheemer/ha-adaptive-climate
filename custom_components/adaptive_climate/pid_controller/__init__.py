@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 import math
-from time import time
+from time import monotonic
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -233,8 +233,19 @@ class PID:
 
         Args:
             ff: Feedforward value in % (0-100). Positive values reduce output.
+
+        Raises:
+            TypeError: If ff is not numeric.
+            ValueError: If ff is NaN, Inf, or negative.
         """
-        self._feedforward = ff
+        if not isinstance(ff, (int, float)):
+            raise TypeError(f"Feedforward must be numeric, got {type(ff).__name__!r}")
+        fval = float(ff)
+        if not math.isfinite(fval):
+            raise ValueError(f"Feedforward must be finite, got {fval}")
+        if fval < 0:
+            raise ValueError(f"Feedforward must be >= 0, got {fval}")
+        self._feedforward = fval
 
     @property
     def dt(self):
@@ -321,15 +332,29 @@ class PID:
         Args:
             factor: Decay factor between 0 and 1. The integral is multiplied
                    by this factor. 0.0 clears integral, 1.0 preserves it.
+                   Values outside [0, 1] are clamped silently; NaN raises ValueError.
+
+        Raises:
+            ValueError: If factor is NaN.
         """
-        self._integral *= factor
+        if math.isnan(factor):
+            raise ValueError("Decay factor must not be NaN")
+        # Clamp to [0, 1]: negative would flip sign, >1 would amplify
+        self._integral *= max(0.0, min(1.0, factor))
 
     def scale_integral(self, factor: float) -> None:
         """Scale the integral term by a factor.
 
         Used when adjusting Ki to prevent output spikes.
         When Ki increases, scale integral down: integral *= old_ki / new_ki
+
+        Raises:
+            ValueError: If factor is not finite or <= 0.
         """
+        if not math.isfinite(factor):
+            raise ValueError(f"Scale factor must be finite, got {factor}")
+        if factor <= 0:
+            raise ValueError(f"Scale factor must be > 0, got {factor}")
         self._integral *= factor
 
     def prepare_bumpless_transfer(self):
@@ -380,15 +405,31 @@ class PID:
         self._last_output_before_off = None
 
     def set_pid_param(self, kp=None, ki=None, kd=None, ke=None):
-        """Set PID parameters."""
-        if kp is not None and isinstance(kp, (int, float)):
-            self._Kp = kp
-        if ki is not None and isinstance(ki, (int, float)):
-            self._Ki = ki
-        if kd is not None and isinstance(kd, (int, float)):
-            self._Kd = kd
-        if ke is not None and isinstance(ke, (int, float)):
-            self._Ke = ke
+        """Set PID parameters.
+
+        Raises:
+            TypeError: If any provided gain is not numeric.
+            ValueError: If any provided gain is NaN, Inf, or negative.
+        """
+
+        def _validate_gain(name: str, value: object) -> float:
+            if not isinstance(value, (int, float)):
+                raise TypeError(f"PID gain '{name}' must be numeric, got {type(value).__name__!r}")
+            fval = float(value)
+            if not math.isfinite(fval):
+                raise ValueError(f"PID gain '{name}' must be finite, got {fval}")
+            if fval < 0:
+                raise ValueError(f"PID gain '{name}' must be >= 0, got {fval}")
+            return fval
+
+        if kp is not None:
+            self._Kp = _validate_gain("kp", kp)
+        if ki is not None:
+            self._Ki = _validate_gain("ki", ki)
+        if kd is not None:
+            self._Kd = _validate_gain("kd", kd)
+        if ke is not None:
+            self._Ke = _validate_gain("ke", ke)
 
     def clear_samples(self):
         """Clear the samples values and timestamp to restart PID from clean state after
@@ -511,7 +552,7 @@ class PID:
         if (
             self._sampling_period != 0
             and self._last_input_time is not None
-            and time() - self._last_input_time < self._sampling_period
+            and monotonic() - self._last_input_time < self._sampling_period
         ):
             return self._output, False  # If last sample is too young, keep last output value
 
@@ -530,11 +571,11 @@ class PID:
                     "PID controller in event-driven mode (sampling_period=0) but no "
                     "input_time provided. Using current time as fallback."
                 )
-                self._input_time = time()
+                self._input_time = monotonic()
             else:
                 self._input_time = input_time
         else:
-            self._input_time = time()
+            self._input_time = monotonic()
         self._last_set_point = self._set_point
         self._set_point = set_point
 

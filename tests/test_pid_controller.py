@@ -185,7 +185,7 @@ class TestPIDController:
         # Mock time() to control the timing
         mock_time = 1000.0
 
-        with patch("pid_controller.time", return_value=mock_time):
+        with patch("pid_controller.monotonic", return_value=mock_time):
             # First calculation should always run (no last_input_time yet)
             output1, changed1 = pid.calc(input_val=20.0, set_point=22.0)
             assert changed1 is True
@@ -196,7 +196,7 @@ class TestPIDController:
         # Second call at t=1030 (30s later) - still runs because _last_input_time
         # becomes set after this call (it gets the previous _input_time)
         mock_time = 1030.0
-        with patch("pid_controller.time", return_value=mock_time):
+        with patch("pid_controller.monotonic", return_value=mock_time):
             output2, changed2 = pid.calc(input_val=20.5, set_point=22.0)
             assert changed2 is True  # Runs because _last_input_time was still None
             assert pid._last_input_time == 1000.0  # Now set from previous _input_time
@@ -205,7 +205,7 @@ class TestPIDController:
         # Third call at t=1040 (10s after second call) - should be SKIPPED
         # because 10s < 60s sampling period
         mock_time = 1040.0
-        with patch("pid_controller.time", return_value=mock_time):
+        with patch("pid_controller.monotonic", return_value=mock_time):
             output3, changed3 = pid.calc(input_val=21.0, set_point=22.0)
             assert changed3 is False  # Skipped - too soon
             assert output3 == output2  # Returns cached output
@@ -216,7 +216,7 @@ class TestPIDController:
         # Fourth call at t=1100 (70s after second call's _last_input_time)
         # Should run: 1100 - 1000 = 100s > 60s sampling period
         mock_time = 1100.0
-        with patch("pid_controller.time", return_value=mock_time):
+        with patch("pid_controller.monotonic", return_value=mock_time):
             output4, changed4 = pid.calc(input_val=21.5, set_point=22.0)
             assert changed4 is True
             # Error is now 0.5 (22 - 21.5)
@@ -1426,9 +1426,9 @@ class TestPIDFeedforward:
         pid.set_feedforward(0.0)
         assert pid.feedforward == 0.0
 
-        # Negative feedforward (edge case)
-        pid.set_feedforward(-2.0)
-        assert pid.feedforward == -2.0
+        # Negative feedforward is rejected (no physical meaning for coupling compensation)
+        with pytest.raises(ValueError):
+            pid.set_feedforward(-2.0)
 
     def test_pid_output_includes_feedforward(self):
         """Test output = P + I + D + E - F (feedforward subtracts from output)."""

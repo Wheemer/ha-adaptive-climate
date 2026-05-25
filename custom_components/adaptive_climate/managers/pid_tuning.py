@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import statistics
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
@@ -64,12 +65,27 @@ class PIDTuningManager:
 
         Args:
             **kwargs: PID parameters to set (kp, ki, kd, ke)
+
+        Raises:
+            ValueError: If any provided gain is not numeric, not finite, or negative.
         """
         # Extract gains from kwargs
         kp = kwargs.get("kp")
         ki = kwargs.get("ki")
         kd = kwargs.get("kd")
         ke = kwargs.get("ke")
+
+        # Validate at service boundary for clear user-facing error messages
+        for _name, _raw in (("kp", kp), ("ki", ki), ("kd", kd), ("ke", ke)):
+            if _raw is not None:
+                try:
+                    _val = float(_raw)
+                except (TypeError, ValueError) as exc:
+                    raise ValueError(f"PID parameter '{_name}' must be numeric, got {_raw!r}") from exc
+                if not math.isfinite(_val):
+                    raise ValueError(f"PID parameter '{_name}' must be finite, got {_val}")
+                if _val < 0:
+                    raise ValueError(f"PID parameter '{_name}' must be >= 0, got {_val}")
 
         # Use PIDGainsManager to set gains and record to history
         self._gains_manager.set_gains(
@@ -320,12 +336,12 @@ class PIDTuningManager:
         # Clear learning history
         adaptive_learner.clear_history()
 
-        # Increment auto-apply count
-        adaptive_learner._auto_apply_count += 1
+        # Increment auto-apply count via public method (avoids direct private mutation)
+        new_count = adaptive_learner.increment_auto_apply_count()
 
         # Sync auto-apply count to PID controller for safety net control
         # The PID controller uses this to disable integral decay safety net after first auto-apply
-        self._pid_controller.set_auto_apply_count(adaptive_learner._auto_apply_count)
+        self._pid_controller.set_auto_apply_count(new_count)
 
         # Start validation mode
         adaptive_learner.start_validation_mode(baseline_overshoot)
@@ -335,7 +351,7 @@ class PIDTuningManager:
             "Kp=%.4f→%.4f, Ki=%.5f→%.5f, Kd=%.3f→%.3f. "
             "Entering validation mode for %d cycles.",
             self._state.entity_id,
-            adaptive_learner._auto_apply_count,
+            new_count,
             old_kp,
             recommendation["kp"],
             old_ki,

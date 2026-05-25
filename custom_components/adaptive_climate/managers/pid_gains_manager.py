@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Callable
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
@@ -132,6 +133,16 @@ class PIDGainsManager:
             mode: HVAC mode (defaults to current mode via callback).
             metrics: Optional metrics to include in snapshot.
         """
+        # Validate gains before any state mutation to avoid partial updates
+        for _gain_name, _gain_val in (("kp", kp), ("ki", ki), ("kd", kd), ("ke", ke)):
+            if _gain_val is not None:
+                if not isinstance(_gain_val, (int, float)):
+                    raise TypeError(f"Invalid gain {_gain_name}={_gain_val!r}: must be numeric")
+                if not math.isfinite(float(_gain_val)):
+                    raise ValueError(f"Invalid gain {_gain_name}={_gain_val}: must be finite")
+                if float(_gain_val) < 0:
+                    raise ValueError(f"Invalid gain {_gain_name}={_gain_val}: must be >= 0")
+
         resolved_mode = self._resolve_mode(mode)
         current_gains = self._get_gains_for_mode(resolved_mode)
 

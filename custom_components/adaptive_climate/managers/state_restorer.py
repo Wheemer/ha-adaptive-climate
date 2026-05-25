@@ -65,7 +65,7 @@ class StateRestorer:
         """
         # Import here to avoid circular imports
         from homeassistant.const import ATTR_TEMPERATURE
-        from homeassistant.components.climate import ATTR_PRESET_MODE
+        from homeassistant.components.climate import ATTR_PRESET_MODE, HVACMode
 
         thermostat = self._thermostat
 
@@ -95,9 +95,23 @@ class StateRestorer:
                         saved_target_temp=thermostat._saved_target_temp,
                     )
 
-            # Restore HVAC mode
+            # Restore HVAC mode — guard against "unavailable"/"unknown" on restore
             if not thermostat._hvac_mode and old_state.state:
-                thermostat.set_hvac_mode(old_state.state)
+                # Build valid mode set from class attributes (works with StrEnum and test mocks)
+                _valid_modes = frozenset(
+                    v
+                    for m in ("OFF", "HEAT", "COOL", "HEAT_COOL", "AUTO", "DRY", "FAN_ONLY")
+                    if isinstance(v := getattr(HVACMode, m, None), str)
+                )
+                if old_state.state in _valid_modes:
+                    thermostat.set_hvac_mode(old_state.state)
+                else:
+                    _LOGGER.warning(
+                        "%s: Ignoring invalid HVAC mode %r on restore, falling back to OFF",
+                        thermostat.entity_id,
+                        old_state.state,
+                    )
+                    thermostat.set_hvac_mode(HVACMode.OFF)
         else:
             # No previous state, set defaults
             if thermostat._target_temp is None:
