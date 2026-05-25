@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import TYPE_CHECKING, Any, Callable
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any
 
 # These imports are only needed when running in Home Assistant
 try:
@@ -62,7 +63,7 @@ except ImportError:
     HomeAssistantError = Exception
     ServiceNotFound = Exception
 
-from ..const import DOMAIN, MIN_OUTPUT_THRESHOLD
+from ..const import EVENT_HEATER_CONTROL_FAILED, MIN_OUTPUT_THRESHOLD
 from .events import (
     CycleEventDispatcher,
     CycleStartedEvent,
@@ -580,7 +581,7 @@ class HeaterController:
             error: Error message
         """
         self._hass.bus.async_fire(
-            f"{DOMAIN}_heater_control_failed",
+            EVENT_HEATER_CONTROL_FAILED,
             {
                 "climate_entity_id": self._thermostat.entity_id,
                 "heater_entity_id": entity_id,
@@ -693,7 +694,7 @@ class HeaterController:
 
         if is_device_active:
             # It's a state refresh call from control interval, just force switch ON
-            _LOGGER.info("%s: Refresh state ON %s", thermostat_entity_id, ", ".join(entities))
+            _LOGGER.debug("%s: Refresh state ON %s", thermostat_entity_id, ", ".join(entities))
             # Handle restart case: device already on but cycle not tracked
             if not self._cycle_active and self._has_demand:
                 self._cycle_active = True
@@ -781,7 +782,7 @@ class HeaterController:
 
         if not is_device_active:
             # It's a state refresh call from control interval, just force switch OFF
-            _LOGGER.info("%s: Refresh state OFF %s", thermostat_entity_id, ", ".join(entities))
+            _LOGGER.debug("%s: Refresh state OFF %s", thermostat_entity_id, ", ".join(entities))
             # Device already in correct state - skip redundant service call
             return
         elif time.monotonic() - get_cycle_start_time() >= self.effective_min_open_time or force:

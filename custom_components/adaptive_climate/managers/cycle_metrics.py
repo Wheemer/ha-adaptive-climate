@@ -525,7 +525,9 @@ class CycleMetricsRecorder:
                 if self._on_validation_failed is not None:
                     self._logger.warning("Validation failed, triggering rollback callback")
                     # Schedule callback as async task
-                    self._hass.async_create_task(self._on_validation_failed())
+                    self._hass.async_create_background_task(
+                        self._on_validation_failed(), "adaptive_climate_validation_failed"
+                    )
                 else:
                     self._logger.warning("Validation failed but no rollback callback configured")
             elif validation_result == "success":
@@ -548,7 +550,7 @@ class CycleMetricsRecorder:
 
         # Trigger auto-apply check if callback configured (and not in validation mode)
         if self._on_auto_apply_check is not None and not self._adaptive_learner.is_in_validation_mode():
-            self._hass.async_create_task(self._on_auto_apply_check())
+            self._hass.async_create_background_task(self._on_auto_apply_check(), "adaptive_climate_auto_apply_check")
 
         # Schedule debounced save of learning data
         self._schedule_learning_save()
