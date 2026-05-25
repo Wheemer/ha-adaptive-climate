@@ -71,15 +71,19 @@ from .const import (
     CONF_AUTO_MODE_SWITCHING,
     CONF_AUTO_MODE_THRESHOLD,
     CONF_MIN_SWITCH_INTERVAL,
-    CONF_FORECAST_HOURS,
+    CONF_FORECAST_DAYS,
     CONF_SEASON_THRESHOLDS,
     CONF_WINTER_BELOW,
     CONF_SUMMER_ABOVE,
     DEFAULT_AUTO_MODE_THRESHOLD,
     DEFAULT_MIN_SWITCH_INTERVAL,
-    DEFAULT_FORECAST_HOURS,
+    DEFAULT_FORECAST_DAYS,
     DEFAULT_WINTER_BELOW,
     DEFAULT_SUMMER_ABOVE,
+    # Cooling supply temperature
+    CONF_COOLING_SUPPLY_TEMP,
+    CONF_COOLING_SUPPLY_MARGIN,
+    DEFAULT_COOLING_SUPPLY_MARGIN,
     # Climate settings (domain-level defaults with per-entity override)
     CONF_MIN_TEMP,
     CONF_MAX_TEMP,
@@ -198,13 +202,16 @@ if HAS_HOMEASSISTANT:
             vol.Required("enabled"): cv.boolean,
             vol.Optional(CONF_AUTO_MODE_THRESHOLD, default=DEFAULT_AUTO_MODE_THRESHOLD): vol.Coerce(float),
             vol.Optional(CONF_MIN_SWITCH_INTERVAL, default=DEFAULT_MIN_SWITCH_INTERVAL): cv.positive_int,
-            vol.Optional(CONF_FORECAST_HOURS, default=DEFAULT_FORECAST_HOURS): cv.positive_int,
+            vol.Optional(CONF_FORECAST_DAYS, default=DEFAULT_FORECAST_DAYS): cv.positive_int,
             vol.Optional(CONF_SEASON_THRESHOLDS): vol.Schema(
                 {
                     vol.Optional(CONF_WINTER_BELOW, default=DEFAULT_WINTER_BELOW): vol.Coerce(float),
                     vol.Optional(CONF_SUMMER_ABOVE, default=DEFAULT_SUMMER_ABOVE): vol.Coerce(float),
                 }
             ),
+            # Cooling supply temperature clamp (for floor cooling with limited supply temp)
+            vol.Optional(CONF_COOLING_SUPPLY_TEMP): vol.Coerce(float),
+            vol.Optional(CONF_COOLING_SUPPLY_MARGIN, default=DEFAULT_COOLING_SUPPLY_MARGIN): vol.Coerce(float),
         }
     )
 
@@ -288,6 +295,9 @@ if HAS_HOMEASSISTANT:
                     vol.Optional(CONF_MANIFOLDS): vol.All(cv.ensure_list, [MANIFOLD_SCHEMA]),
                     # Auto mode switching for heat/cool based on outdoor temperature
                     vol.Optional(CONF_AUTO_MODE_SWITCHING): AUTO_MODE_SWITCHING_SCHEMA,
+                    # Cooling supply temperature clamp (for floor cooling with limited supply temp)
+                    vol.Optional(CONF_COOLING_SUPPLY_TEMP): vol.Coerce(float),
+                    vol.Optional(CONF_COOLING_SUPPLY_MARGIN, default=DEFAULT_COOLING_SUPPLY_MARGIN): vol.Coerce(float),
                 }
             )
         },

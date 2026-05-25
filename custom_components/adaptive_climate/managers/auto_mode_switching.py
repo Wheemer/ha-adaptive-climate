@@ -14,13 +14,13 @@ from homeassistant.util import dt as dt_util
 
 from ..const import (
     CONF_AUTO_MODE_THRESHOLD,
-    CONF_FORECAST_HOURS,
+    CONF_FORECAST_DAYS,
     CONF_MIN_SWITCH_INTERVAL,
     CONF_SEASON_THRESHOLDS,
     CONF_SUMMER_ABOVE,
     CONF_WINTER_BELOW,
     DEFAULT_AUTO_MODE_THRESHOLD,
-    DEFAULT_FORECAST_HOURS,
+    DEFAULT_FORECAST_DAYS,
     DEFAULT_MIN_SWITCH_INTERVAL,
     DEFAULT_SUMMER_ABOVE,
     DEFAULT_WINTER_BELOW,
@@ -48,7 +48,7 @@ class AutoModeSwitchingManager:
         # Configuration
         self._threshold = config.get(CONF_AUTO_MODE_THRESHOLD, DEFAULT_AUTO_MODE_THRESHOLD)
         self._min_switch_interval = config.get(CONF_MIN_SWITCH_INTERVAL, DEFAULT_MIN_SWITCH_INTERVAL)
-        self._forecast_hours = config.get(CONF_FORECAST_HOURS, DEFAULT_FORECAST_HOURS)
+        self._forecast_days = config.get(CONF_FORECAST_DAYS, DEFAULT_FORECAST_DAYS)
 
         season_config = config.get(CONF_SEASON_THRESHOLDS, {})
         self._winter_below = season_config.get(CONF_WINTER_BELOW, DEFAULT_WINTER_BELOW)
@@ -57,6 +57,8 @@ class AutoModeSwitchingManager:
         # State
         self._current_mode: str | None = None
         self._last_switch: float = 0.0  # monotonic timestamp
+        self._cached_season: str = "shoulder"
+        self._cached_forecast_median: float | None = None
 
     @property
     def current_mode(self) -> str | None:
@@ -80,7 +82,7 @@ class AutoModeSwitchingManager:
             return None
         return statistics.median(setpoints)
 
-    def get_season(self) -> str:
+    async def async_get_season(self) -> str:
         """Get current season based on forecast median temperature.
 
         Returns:
@@ -89,28 +91,29 @@ class AutoModeSwitchingManager:
             - summer: forecast median > summer_above threshold
             - shoulder: in between (both modes allowed)
         """
-        forecast_median = self._get_forecast_median()
+        forecast_median = await self._async_get_forecast_median()
+        self._cached_forecast_median = forecast_median
 
         if forecast_median is None:
-            # No forecast available, assume shoulder season (both modes allowed)
             _LOGGER.debug("No forecast available, assuming shoulder season")
+            self._cached_season = "shoulder"
             return "shoulder"
 
         if forecast_median < self._winter_below:
+            self._cached_season = "winter"
             return "winter"
         elif forecast_median > self._summer_above:
+            self._cached_season = "summer"
             return "summer"
         else:
+            self._cached_season = "shoulder"
             return "shoulder"
 
-    def _get_forecast_median(self) -> float | None:
-        """Get median temperature from weather forecast.
-
-        Uses the weather entity configured in coordinator to get forecast
-        and calculates median of high temperatures over the next 7 days.
+    async def _async_get_daily_forecast(self) -> list[dict] | None:
+        """Fetch daily forecast using weather.get_forecasts service.
 
         Returns:
-            Median forecast temperature, or None if forecast unavailable.
+            List of forecast entries, or None if unavailable.
         """
         weather_entity = self._coordinator.weather_entity
         if not weather_entity:
@@ -122,15 +125,41 @@ class AutoModeSwitchingManager:
             _LOGGER.warning("Weather entity %s not found", weather_entity)
             return None
 
-        forecast = state.attributes.get("forecast", [])
-        if not forecast:
-            _LOGGER.debug("No forecast data available from %s", weather_entity)
+        try:
+            result = await self._hass.services.async_call(
+                "weather",
+                "get_forecasts",
+                {"entity_id": weather_entity, "type": "daily"},
+                blocking=True,
+                return_response=True,
+            )
+            if not result or weather_entity not in result:
+                _LOGGER.debug("No forecast response from %s", weather_entity)
+                return None
+            forecast = result[weather_entity].get("forecast", [])
+            if not forecast:
+                _LOGGER.debug("Empty forecast from %s", weather_entity)
+                return None
+            return forecast
+        except Exception as err:
+            _LOGGER.warning("Failed to get forecast from %s: %s", weather_entity, err)
             return None
 
-        # Get temps from forecast (up to 7 days/entries)
+    async def _async_get_forecast_median(self) -> float | None:
+        """Get median temperature from daily weather forecast.
+
+        Uses weather.get_forecasts service with type "daily" and calculates
+        median of high temperatures over the next 7 days.
+
+        Returns:
+            Median forecast temperature, or None if forecast unavailable.
+        """
+        forecast = await self._async_get_daily_forecast()
+        if not forecast:
+            return None
+
         temps = []
         for entry in forecast[:7]:
-            # Try 'temperature' (daily high) first, then 'templow' fallback
             temp = entry.get("temperature")
             if temp is not None:
                 temps.append(temp)
@@ -141,69 +170,14 @@ class AutoModeSwitchingManager:
 
         return statistics.median(temps)
 
-    async def _check_forecast(self) -> str | None:
-        """Check if forecast suggests proactive mode switch.
-
-        Looks at forecast for the next N hours (configured by forecast_hours)
-        and returns a mode if weather is trending past the threshold.
-
-        Returns:
-            HVACMode.HEAT if cold weather coming,
-            HVACMode.COOL if hot weather coming,
-            None if no proactive switch needed.
-        """
-        weather_entity = self._coordinator.weather_entity
-        if not weather_entity:
-            return None
-
-        state = self._hass.states.get(weather_entity)
-        if state is None:
-            return None
-
-        forecast = state.attributes.get("forecast", [])
-        if not forecast:
-            return None
-
-        median_setpoint = self.get_median_setpoint()
-        if median_setpoint is None:
-            return None
-
-        # Check forecast entries within forecast_hours window
-        # Home Assistant forecasts may be hourly or daily, check timestamp if available
-        for entry in forecast[: self._forecast_hours]:
-            temp = entry.get("temperature")
-            if temp is None:
-                continue
-
-            # Check if forecast temp crosses thresholds
-            if temp > median_setpoint + self._threshold:
-                _LOGGER.debug(
-                    "Forecast shows hot weather (%.1f°C > %.1f°C + %.1f°C), suggesting COOL",
-                    temp,
-                    median_setpoint,
-                    self._threshold,
-                )
-                return HVACMode.COOL
-            if temp < median_setpoint - self._threshold:
-                _LOGGER.debug(
-                    "Forecast shows cold weather (%.1f°C < %.1f°C - %.1f°C), suggesting HEAT",
-                    temp,
-                    median_setpoint,
-                    self._threshold,
-                )
-                return HVACMode.HEAT
-
-        return None
-
     async def async_evaluate(self) -> str | None:
         """Evaluate and return new mode if switch needed.
 
         Logic:
         1. Check min_switch_interval
-        2. Get outdoor temp, median setpoint, season
+        2. Get forecast median and median setpoint
         3. Apply season locking (winter = only HEAT, summer = only COOL)
-        4. Check forecast for proactive switching
-        5. Apply hysteresis logic (outdoor vs median setpoint)
+        4. Compare forecast vs setpoint to decide mode
 
         Returns:
             HVACMode.HEAT or HVACMode.COOL if switch needed,
@@ -218,40 +192,42 @@ class AutoModeSwitchingManager:
                 _LOGGER.debug("Min switch interval not met (%.0fs < %ds)", elapsed, self._min_switch_interval)
                 return None
 
-        # Get outdoor temperature from coordinator
-        outdoor_temp = self._coordinator.outdoor_temp
-        if outdoor_temp is None:
-            _LOGGER.debug("No outdoor temperature available")
-            return None
-
         # Get median setpoint from active zones
         median_setpoint = self.get_median_setpoint()
         if median_setpoint is None:
             _LOGGER.debug("No active zones, skipping evaluation")
             return None
 
-        # Get current season for locking
-        season = self.get_season()
+        # Get forecast median (also caches season)
+        season = await self.async_get_season()
+        forecast_median = self._cached_forecast_median
+        if forecast_median is None:
+            _LOGGER.debug("No forecast available, skipping evaluation")
+            return None
 
-        # Determine target mode based on outdoor temp vs setpoint
+        # Determine target mode based on forecast vs setpoint
         target_mode: str | None = None
 
-        if outdoor_temp < median_setpoint - self._threshold:
+        if forecast_median < median_setpoint - self._threshold:
             target_mode = HVACMode.HEAT
-        elif outdoor_temp > median_setpoint + self._threshold:
-            target_mode = HVACMode.COOL
-        else:
-            # In hysteresis zone - check forecast for proactive switching
-            forecast_mode = await self._check_forecast()
-            if forecast_mode:
-                target_mode = forecast_mode
-                _LOGGER.debug("Forecast suggests proactive switch to %s", target_mode)
-
-        # If no mode determined (in hysteresis with no forecast), keep current
-        if target_mode is None:
             _LOGGER.debug(
-                "Outdoor temp %.1f°C in hysteresis zone (%.1f°C ± %.1f°C), keeping current mode",
-                outdoor_temp,
+                "Forecast %.1f°C < setpoint %.1f°C - %.1f°C, suggesting HEAT",
+                forecast_median,
+                median_setpoint,
+                self._threshold,
+            )
+        elif forecast_median > median_setpoint + self._threshold:
+            target_mode = HVACMode.COOL
+            _LOGGER.debug(
+                "Forecast %.1f°C > setpoint %.1f°C + %.1f°C, suggesting COOL",
+                forecast_median,
+                median_setpoint,
+                self._threshold,
+            )
+        else:
+            _LOGGER.debug(
+                "Forecast %.1f°C in hysteresis zone (%.1f°C ± %.1f°C), keeping current mode",
+                forecast_median,
                 median_setpoint,
                 self._threshold,
             )
@@ -271,10 +247,10 @@ class AutoModeSwitchingManager:
 
         # Update state and return new mode
         _LOGGER.info(
-            "Auto mode switching: %s -> %s (outdoor=%.1f°C, setpoint=%.1f°C, season=%s)",
+            "Auto mode switching: %s -> %s (forecast=%.1f°C, setpoint=%.1f°C, season=%s)",
             self._current_mode,
             target_mode,
-            outdoor_temp,
+            forecast_median,
             median_setpoint,
             season,
         )
@@ -300,15 +276,11 @@ class AutoModeSwitchingManager:
         if not debug:
             return attrs
 
-        # Debug-only attributes
-        season = self.get_season()
-        forecast_median = self._get_forecast_median()
-        median_setpoint = self.get_median_setpoint()
-
+        # Debug-only attributes (use cached values from last evaluation)
         attrs["auto_mode_switching"] = {
-            "current_season": season,
-            "forecast_median_temp": forecast_median,
-            "median_setpoint": median_setpoint,
+            "current_season": self._cached_season,
+            "forecast_median_temp": self._cached_forecast_median,
+            "median_setpoint": self.get_median_setpoint(),
         }
 
         # Include last switch time if we've switched

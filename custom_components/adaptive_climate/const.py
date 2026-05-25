@@ -66,6 +66,7 @@ class OverrideType(StrEnum):
     PREHEATING = "preheating"
     NIGHT_SETBACK = "night_setback"
     LEARNING_GRACE = "learning_grace"
+    COOLING_SUPPLY_CLAMP = "cooling_supply_clamp"
 
 
 # Override priority order (highest first)
@@ -73,6 +74,7 @@ OVERRIDE_PRIORITY = [
     OverrideType.CONTACT_OPEN,
     OverrideType.HUMIDITY,
     OverrideType.OPEN_WINDOW,
+    OverrideType.COOLING_SUPPLY_CLAMP,
     OverrideType.PREHEATING,
     OverrideType.NIGHT_SETBACK,
     OverrideType.LEARNING_GRACE,
@@ -1088,7 +1090,7 @@ HEATING_TYPE_BOOST_FACTORS: dict[HeatingType, tuple[float, float]] = {
 CONF_AUTO_MODE_SWITCHING = "auto_mode_switching"
 CONF_AUTO_MODE_THRESHOLD = "threshold"
 CONF_MIN_SWITCH_INTERVAL = "min_switch_interval"
-CONF_FORECAST_HOURS = "forecast_hours"
+CONF_FORECAST_DAYS = "forecast_days"
 CONF_SEASON_THRESHOLDS = "season_thresholds"
 CONF_WINTER_BELOW = "winter_below"
 CONF_SUMMER_ABOVE = "summer_above"
@@ -1096,9 +1098,14 @@ CONF_SUMMER_ABOVE = "summer_above"
 # Auto mode switching defaults
 DEFAULT_AUTO_MODE_THRESHOLD = 2.0
 DEFAULT_MIN_SWITCH_INTERVAL = 3600  # seconds (1 hour)
-DEFAULT_FORECAST_HOURS = 6
+DEFAULT_FORECAST_DAYS = 3
 DEFAULT_WINTER_BELOW = 12.0  # °C
 DEFAULT_SUMMER_ABOVE = 18.0  # °C
+
+# Cooling supply temperature (for floor cooling with limited supply temp)
+CONF_COOLING_SUPPLY_TEMP = "cooling_supply_temp"
+CONF_COOLING_SUPPLY_MARGIN = "cooling_supply_margin"
+DEFAULT_COOLING_SUPPLY_MARGIN = 1.5  # °C above supply temp
 
 # PWM cycle tracking
 # Output below this threshold (%) is treated as a maintenance/low-output cycle.

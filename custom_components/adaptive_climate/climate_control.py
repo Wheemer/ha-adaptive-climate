@@ -65,7 +65,8 @@ class ClimateControlMixin:
             coordinator = self.hass.data.get(DOMAIN, {}).get("coordinator") if self._zone_id else None
 
             # Unified pause check (contact sensors, humidity detection, etc.)
-            if self._status_manager.is_paused():
+            hvac_mode_str = self._hvac_mode.value if self._hvac_mode else None
+            if self._status_manager.is_paused(hvac_mode_str):
                 _LOGGER.info("%s: Heating paused", self.entity_id)
 
                 # Discard any active heating rate session on override
@@ -227,7 +228,7 @@ class ClimateControlMixin:
 
                             if (
                                 heating_rate_learner._active_session is None
-                                and not self._status_manager.is_paused()
+                                and not self._status_manager.is_paused(hvac_mode_str)
                                 and not in_night_setback
                                 and self._ext_temp is not None
                             ):

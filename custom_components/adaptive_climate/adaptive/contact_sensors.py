@@ -141,12 +141,21 @@ class ContactSensorHandler:
         delay_end = self._contact_opened_at + timedelta(seconds=self.contact_delay_seconds)
         return current_time >= delay_end
 
-    def get_action(self) -> ContactAction:
-        """Get the configured action type.
+    def get_action(self, hvac_mode: str | None = None) -> ContactAction:
+        """Get the action type based on HVAC mode.
+
+        In cooling mode, FROST_PROTECTION doesn't make sense (you wouldn't
+        cool to 5°C to protect from frost). So we always return PAUSE for cooling.
+
+        Args:
+            hvac_mode: Current HVAC mode ("heat", "cool", etc.) or None
 
         Returns:
-            ContactAction enum value
+            ContactAction enum value (PAUSE in cool mode regardless of config)
         """
+        # In cooling mode, always pause - frost protection is heating-only
+        if hvac_mode == "cool" and self.action == ContactAction.FROST_PROTECTION:
+            return ContactAction.PAUSE
         return self.action
 
     def get_adjusted_setpoint(self, base_setpoint: float, current_time: datetime | None = None) -> float | None:

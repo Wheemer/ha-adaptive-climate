@@ -11,7 +11,7 @@ from homeassistant.core import HomeAssistant, Event, callback
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from homeassistant.util import dt as dt_util
 from homeassistant.components.climate import HVACMode
-from homeassistant.helpers.event import async_track_state_change_event
+from homeassistant.helpers.event import async_call_later, async_track_state_change_event
 
 try:
     from .const import DOMAIN
@@ -72,6 +72,17 @@ class AdaptiveThermostatCoordinator(DataUpdateCoordinator):
         if initial_temp is not None:
             self._outdoor_temp_lagged = initial_temp
             self._last_outdoor_temp_update = time.monotonic()
+
+        # Schedule startup evaluation for auto mode switching (30s delay for zones to register)
+        if self._auto_mode_switching:
+            self._startup_eval_unsub = async_call_later(hass, 30, self._async_startup_auto_mode_eval)
+        else:
+            self._startup_eval_unsub = None
+
+    async def _async_startup_auto_mode_eval(self, _now: Any) -> None:
+        """Run initial auto mode evaluation after startup delay."""
+        _LOGGER.debug("Running startup auto mode evaluation")
+        await self._async_evaluate_auto_mode()
 
     def set_central_controller(self, controller: CentralController) -> None:
         """Set the central controller reference for push-based updates."""
@@ -250,6 +261,36 @@ class AdaptiveThermostatCoordinator(DataUpdateCoordinator):
     def auto_mode_switching(self) -> AutoModeSwitchingManager | None:
         """Return the auto mode switching manager."""
         return self._auto_mode_switching
+
+    @property
+    def cooling_supply_temp(self) -> float | None:
+        """Return the cooling supply temperature if configured.
+
+        Looks in auto_mode_switching config first (typical location),
+        then falls back to top-level domain config.
+        """
+        auto_mode_config = self._config.get("auto_mode_switching", {})
+        return auto_mode_config.get("cooling_supply_temp") or self._config.get("cooling_supply_temp")
+
+    @property
+    def cooling_supply_margin(self) -> float:
+        """Return the margin above cooling supply temp for minimum target.
+
+        Looks in auto_mode_switching config first, then falls back to top-level.
+        """
+        auto_mode_config = self._config.get("auto_mode_switching", {})
+        margin = auto_mode_config.get("cooling_supply_margin")
+        if margin is not None:
+            return margin
+        return self._config.get("cooling_supply_margin", 1.5)
+
+    @property
+    def min_cooling_target(self) -> float | None:
+        """Return the minimum cooling target (supply_temp + margin), or None if not configured."""
+        supply_temp = self.cooling_supply_temp
+        if supply_temp is None:
+            return None
+        return supply_temp + self.cooling_supply_margin
 
     def register_zone(self, zone_id: str, zone_data: dict[str, Any]) -> None:
         """Register a zone with the coordinator.
@@ -480,11 +521,15 @@ class AdaptiveThermostatCoordinator(DataUpdateCoordinator):
         from homeassistant.components.climate import HVACMode
 
         setpoints = []
-        for _zone_id, zone in self._zones.items():
-            if zone.get("hvac_mode") != HVACMode.OFF:
-                target = zone.get("target_temp")
-                if target is not None:
-                    setpoints.append(target)
+        for zone_id, zone in self._zones.items():
+            demand_state = self._demand_states.get(zone_id, {})
+            mode = demand_state.get("mode")
+            if mode is not None and mode != HVACMode.OFF:
+                climate_entity_id = zone.get("climate_entity_id")
+                if climate_entity_id:
+                    state = self.hass.states.get(climate_entity_id)
+                    if state and state.attributes.get("temperature") is not None:
+                        setpoints.append(state.attributes["temperature"])
         return setpoints
 
     def get_zone_by_climate_entity(self, climate_entity_id: str) -> tuple[str, dict[str, Any]] | None:
@@ -600,11 +645,15 @@ class AdaptiveThermostatCoordinator(DataUpdateCoordinator):
         """
         for zone_id, zone in self._zones.items():
             if zone.get("hvac_mode") != HVACMode.OFF:
+                climate_entity_id = zone.get("climate_entity_id")
+                if not climate_entity_id:
+                    _LOGGER.warning("No climate_entity_id for zone %s", zone_id)
+                    continue
                 try:
                     await self.hass.services.async_call(
                         "climate",
                         "set_hvac_mode",
-                        {"entity_id": zone_id, "hvac_mode": mode},
+                        {"entity_id": climate_entity_id, "hvac_mode": mode},
                         blocking=False,
                     )
                 except Exception:
@@ -629,6 +678,11 @@ class AdaptiveThermostatCoordinator(DataUpdateCoordinator):
 
     async def async_cleanup(self) -> None:
         """Clean up coordinator resources."""
+        # Cancel startup evaluation timer if still pending
+        if self._startup_eval_unsub is not None:
+            self._startup_eval_unsub()
+            self._startup_eval_unsub = None
+
         # Cancel outdoor temperature listener
         if self._outdoor_temp_unsub is not None:
             self._outdoor_temp_unsub()

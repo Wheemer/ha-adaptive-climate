@@ -138,11 +138,9 @@ def _get_physics_baseline_ki_from_history(pid_history: list[dict]) -> float | No
             if ki is not None:
                 return float(ki)
 
-    # Fallback: use first entry's Ki (oldest known baseline)
-    first_ki = pid_history[0].get("ki")
-    if first_ki is not None:
-        return float(first_ki)
-
+    # No fallback - if no physics entry exists, return None
+    # This forces the cap logic to use cumulative_ki_multiplier instead
+    # of a potentially-boosted "baseline" from truncated history
     return None
 
 
@@ -1417,6 +1415,12 @@ class AdaptiveLearner:
         Returns:
             New Ki value if adjustment was applied, None otherwise
         """
+        # Skip undershoot detection in COOL mode - the detector logic is heating-only
+        # In cooling mode, "undershoot" would mean failing to cool (temp above setpoint),
+        # but the detector tracks temp below setpoint, which is the opposite
+        if mode == get_hvac_cool_mode():
+            return None
+
         # Extract last boost time from PID history (checks both reason strings)
         last_boost_utc = None
         physics_baseline_ki: float | None = None

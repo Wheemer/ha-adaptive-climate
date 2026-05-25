@@ -644,13 +644,13 @@ def _build_status_attribute(thermostat: SmartThermostat) -> dict[str, Any]:
     if thermostat._night_setback_controller:
         status_manager.set_night_setback_controller(thermostat._night_setback_controller)
 
-    # Determine if heating is paused
-    is_paused = status_manager.is_paused()
-
-    # Get HVAC mode
+    # Get HVAC mode (needed for mode-aware pause check)
     hvac_mode = thermostat.hvac_mode if hasattr(thermostat, "hvac_mode") else "off"
     if hasattr(hvac_mode, "value"):
         hvac_mode = hvac_mode.value
+
+    # Determine if heating/cooling is paused (mode-aware for contact sensors)
+    is_paused = status_manager.is_paused(hvac_mode)
 
     # Get heater/cooler state
     heater_on = False
@@ -762,6 +762,23 @@ def _build_status_attribute(thermostat: SmartThermostat) -> dict[str, Any]:
         except (TypeError, AttributeError):
             pass
 
+    # === Cooling supply clamp override data ===
+    cooling_clamp_active = False
+    cooling_clamp_original = None
+    cooling_clamp_effective = None
+    cooling_clamp_supply_temp = None
+    try:
+        # Get the cooling clamp info from the effective target calculation
+        _, _, effective_info = thermostat._calculate_night_setback_adjustment()
+        clamp_info = effective_info.get("cooling_supply_clamp")
+        if clamp_info:
+            cooling_clamp_active = True
+            cooling_clamp_original = clamp_info.get("original_target")
+            cooling_clamp_effective = clamp_info.get("effective_target")
+            cooling_clamp_supply_temp = clamp_info.get("supply_temp")
+    except (TypeError, AttributeError, ValueError):
+        pass
+
     # Build status using StatusManager
     return status_manager.build_status(
         hvac_mode=hvac_mode,
@@ -789,4 +806,8 @@ def _build_status_attribute(thermostat: SmartThermostat) -> dict[str, Any]:
         night_setback_limited_to=night_setback_limited_to,
         learning_grace_active=learning_grace_active,
         learning_grace_until=learning_grace_until,
+        cooling_clamp_active=cooling_clamp_active,
+        cooling_clamp_original=cooling_clamp_original,
+        cooling_clamp_effective=cooling_clamp_effective,
+        cooling_clamp_supply_temp=cooling_clamp_supply_temp,
     )

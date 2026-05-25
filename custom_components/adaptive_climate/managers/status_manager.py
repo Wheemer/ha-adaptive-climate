@@ -104,6 +104,11 @@ class StatusManager:
         # Learning grace override
         learning_grace_active: bool = False,
         learning_grace_until: str | None = None,
+        # Cooling supply clamp override
+        cooling_clamp_active: bool = False,
+        cooling_clamp_original: float | None = None,
+        cooling_clamp_effective: float | None = None,
+        cooling_clamp_supply_temp: float | None = None,
     ) -> StatusInfo:
         """Build complete status attribute.
 
@@ -138,6 +143,10 @@ class StatusManager:
             night_setback_limited_to=night_setback_limited_to,
             learning_grace_active=learning_grace_active,
             learning_grace_until=learning_grace_until,
+            cooling_clamp_active=cooling_clamp_active,
+            cooling_clamp_original=cooling_clamp_original,
+            cooling_clamp_effective=cooling_clamp_effective,
+            cooling_clamp_supply_temp=cooling_clamp_supply_temp,
         )
 
         return {
@@ -145,11 +154,14 @@ class StatusManager:
             "overrides": overrides,
         }
 
-    def is_paused(self) -> bool:
-        """Check if heating should be paused.
+    def is_paused(self, hvac_mode: str | None = None) -> bool:
+        """Check if heating/cooling should be paused.
 
         Note: This only checks contact sensors and humidity detection.
         Night setback is not considered a pause (it adjusts setpoint instead).
+
+        Args:
+            hvac_mode: Current HVAC mode ("heat", "cool", etc.) for mode-aware actions
 
         Returns:
             True if any pause mechanism is active
@@ -158,7 +170,7 @@ class StatusManager:
         if self._contact_sensor_handler and self._contact_sensor_handler.should_take_action():
             from ..adaptive.contact_sensors import ContactAction
 
-            action = self._contact_sensor_handler.get_action()
+            action = self._contact_sensor_handler.get_action(hvac_mode)
             if action == ContactAction.PAUSE:
                 return True
 
@@ -352,6 +364,11 @@ def build_overrides(
     # Learning grace
     learning_grace_active: bool = False,
     learning_grace_until: str | None = None,
+    # Cooling supply clamp
+    cooling_clamp_active: bool = False,
+    cooling_clamp_original: float | None = None,
+    cooling_clamp_effective: float | None = None,
+    cooling_clamp_supply_temp: float | None = None,
 ) -> list[dict[str, Any]]:
     """Build priority-ordered list of active overrides.
 
@@ -359,9 +376,10 @@ def build_overrides(
     1. contact_open
     2. humidity
     3. open_window
-    4. preheating
-    5. night_setback
-    6. learning_grace
+    4. cooling_supply_clamp
+    5. preheating
+    6. night_setback
+    7. learning_grace
 
     Returns:
         List of override dicts, ordered by priority
@@ -398,7 +416,18 @@ def build_overrides(
             )
         )
 
-    # 4. Preheating
+    # 4. Cooling supply clamp
+    if cooling_clamp_active:
+        overrides.append(
+            build_override(
+                OverrideType.COOLING_SUPPLY_CLAMP,
+                original_target=cooling_clamp_original,
+                effective_target=cooling_clamp_effective,
+                supply_temp=cooling_clamp_supply_temp,
+            )
+        )
+
+    # 5. Preheating
     if preheating_active:
         overrides.append(
             build_override(
@@ -409,7 +438,7 @@ def build_overrides(
             )
         )
 
-    # 5. Night setback
+    # 6. Night setback
     if night_setback_active:
         overrides.append(
             build_override(
@@ -420,7 +449,7 @@ def build_overrides(
             )
         )
 
-    # 6. Learning grace (lowest priority)
+    # 7. Learning grace (lowest priority)
     if learning_grace_active:
         overrides.append(
             build_override(

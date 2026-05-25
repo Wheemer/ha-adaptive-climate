@@ -265,13 +265,15 @@ class UndershootDetector:
             return False
 
         # Shared gate: Respect cumulative safety cap
-        # Use physics-based cap if both values are provided, else fall back to cumulative tracking
+        # Always check cumulative multiplier (tracks total boosts across restarts)
+        if self.cumulative_ki_multiplier >= MAX_UNDERSHOOT_KI_MULTIPLIER:
+            return False
+
+        # Additional check: physics-based cap when baseline is available
         if current_ki is not None and physics_baseline_ki is not None and physics_baseline_ki > 0:
             actual_ratio = current_ki / physics_baseline_ki
             if actual_ratio >= MAX_UNDERSHOOT_KI_MULTIPLIER:
                 return False
-        elif self.cumulative_ki_multiplier >= MAX_UNDERSHOOT_KI_MULTIPLIER:
-            return False
 
         # Check real-time mode
         realtime_triggered = self._check_realtime_mode(cycles_completed)

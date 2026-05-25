@@ -734,10 +734,10 @@ class TestCoordinatorAutoModeSwitching:
         # Mock async_call to be an async function
         hass.services.async_call = AsyncMock()
 
-        # Register zones with different modes
-        coord.register_zone("climate.zone1", {"hvac_mode": "heat"})
-        coord.register_zone("climate.zone2", {"hvac_mode": "cool"})
-        coord.register_zone("climate.zone3", {"hvac_mode": "off"})
+        # Register zones with different modes (include climate_entity_id for service calls)
+        coord.register_zone("climate.zone1", {"hvac_mode": "heat", "climate_entity_id": "climate.zone1"})
+        coord.register_zone("climate.zone2", {"hvac_mode": "cool", "climate_entity_id": "climate.zone2"})
+        coord.register_zone("climate.zone3", {"hvac_mode": "off", "climate_entity_id": "climate.zone3"})
 
         # Apply COOL mode
         await coord._apply_house_mode("cool")

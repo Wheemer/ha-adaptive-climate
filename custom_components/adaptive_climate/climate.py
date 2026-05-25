@@ -949,9 +949,10 @@ class AdaptiveThermostat(ClimateControlMixin, ClimateHandlersMixin, ClimateEntit
             self._night_setback_controller.set_learning_grace_period(minutes)
 
     def _calculate_night_setback_adjustment(self, current_time=None):
-        """Calculate night setback adjustment for effective target temperature.
+        """Calculate effective target temperature with night setback and cooling clamp.
 
-        Delegates to NightSetbackManager for all calculation logic.
+        Delegates to NightSetbackManager for night setback logic, then applies
+        cooling supply temperature clamp when in COOL mode.
 
         Args:
             current_time: Optional datetime for testing; defaults to dt_util.utcnow()
@@ -962,13 +963,32 @@ class AdaptiveThermostat(ClimateControlMixin, ClimateHandlersMixin, ClimateEntit
             - in_night_period: Whether we are currently in the night setback period
             - night_setback_info: Dict with additional info for state attributes
         """
-        # Delegate to controller if available
+        # Get night setback adjustment
         if self._night_setback_controller:
-            return self._night_setback_controller.calculate_night_setback_adjustment(current_time)
+            effective_target, in_night, info = self._night_setback_controller.calculate_night_setback_adjustment(
+                current_time
+            )
+        else:
+            # Fallback when controller not yet initialized
+            effective_target = self._target_temp
+            in_night = False
+            info = {"night_setback_active": False}
 
-        # Fallback: return defaults when controller not yet initialized
-        # (e.g., before async_added_to_hass is called)
-        return self._target_temp, False, {"night_setback_active": False}
+        # Apply cooling supply temperature clamp when in COOL mode
+        if self._hvac_mode == HVACMode.COOL:
+            coordinator = self._coordinator
+            if coordinator and coordinator.min_cooling_target is not None:
+                min_target = coordinator.min_cooling_target
+                if effective_target < min_target:
+                    info["cooling_supply_clamp"] = {
+                        "original_target": effective_target,
+                        "effective_target": min_target,
+                        "supply_temp": coordinator.cooling_supply_temp,
+                        "margin": coordinator.cooling_supply_margin,
+                    }
+                    effective_target = min_target
+
+        return effective_target, in_night, info
 
     @property
     def _min_open_time(self):
@@ -1082,6 +1102,20 @@ class AdaptiveThermostat(ClimateControlMixin, ClimateHandlersMixin, ClimateEntit
     async def async_set_hvac_mode(self, hvac_mode: HVACMode) -> None:
         """Set new target hvac mode."""
         old_mode = self._hvac_mode
+
+        # Reset integral when switching between HEAT and COOL modes
+        # The integral accumulated in one mode is meaningless in the other
+        if self._pid_controller is not None:
+            switching_heat_cool = (old_mode == HVACMode.HEAT and hvac_mode == HVACMode.COOL) or (
+                old_mode == HVACMode.COOL and hvac_mode == HVACMode.HEAT
+            )
+            if switching_heat_cool:
+                _LOGGER.info(
+                    "%s: Resetting integral on HEAT<->COOL switch (was %.2f)",
+                    self.entity_id,
+                    self._pid_controller.integral,
+                )
+                self._pid_controller.integral = 0.0
 
         await self._async_heater_turn_off(force=True)
         if hvac_mode == HVACMode.HEAT:
