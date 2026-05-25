@@ -256,7 +256,7 @@ class TestAutoLearningSetbackCooldown:
         manager._days_at_maintenance_cap = 7
 
         # Set last auto setback to 5 days ago
-        manager._last_auto_setback = datetime.utcnow() - timedelta(days=5)
+        manager._last_auto_setback = dt_util.utcnow() - timedelta(days=5)
 
         # Should not trigger
         assert manager.should_apply_auto_learning_setback() is False
@@ -273,7 +273,7 @@ class TestAutoLearningSetbackCooldown:
         manager._days_at_maintenance_cap = 7
 
         # Set last auto setback to 8 days ago
-        manager._last_auto_setback = datetime.utcnow() - timedelta(days=8)
+        manager._last_auto_setback = dt_util.utcnow() - timedelta(days=8)
 
         # Should trigger
         assert manager.should_apply_auto_learning_setback() is True

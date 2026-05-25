@@ -1,6 +1,6 @@
 """Tests for NotificationManager."""
 
-from datetime import datetime, timedelta
+import time
 from unittest.mock import AsyncMock, MagicMock
 import pytest
 
@@ -114,7 +114,7 @@ async def test_cooldown_expires(manager, mock_hass):
         ios_message="M",
         cooldown_hours=1.0,
     )
-    manager._cooldowns["cd_test"] = datetime.now() - timedelta(hours=2)
+    manager._cooldowns["cd_test"] = time.monotonic() - 7200  # 2 hours ago
     result = await manager.async_send(
         notification_id="cd_test",
         title="T",
