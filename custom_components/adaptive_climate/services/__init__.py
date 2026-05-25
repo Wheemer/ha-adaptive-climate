@@ -406,15 +406,12 @@ def async_register_services(
     )
     hass.services.async_register(DOMAIN, SERVICE_WEEKLY_REPORT, _weekly_report_handler)
 
-    services_count = 2
+    # Always register learning/recommendation services — they are advertised in services.yaml
+    # and users get "service not found" errors when debug=False gates them (H05 fix).
+    hass.services.async_register(DOMAIN, SERVICE_RUN_LEARNING, _run_learning_handler)
+    hass.services.async_register(DOMAIN, SERVICE_PID_RECOMMENDATIONS, _pid_recommendations_handler)
 
-    # Register debug-only services
-    if debug:
-        hass.services.async_register(DOMAIN, SERVICE_RUN_LEARNING, _run_learning_handler)
-        hass.services.async_register(DOMAIN, SERVICE_PID_RECOMMENDATIONS, _pid_recommendations_handler)
-        services_count += 2
-
-    _LOGGER.debug("Registered %d services for %s domain (debug=%s)", services_count, DOMAIN, debug)
+    _LOGGER.debug("Registered 4 services for %s domain (debug=%s)", DOMAIN, debug)
 
 
 def async_unregister_services(hass: HomeAssistant) -> None:
@@ -423,26 +420,15 @@ def async_unregister_services(hass: HomeAssistant) -> None:
     Args:
         hass: Home Assistant instance
     """
-    # Public services (always registered)
     services_to_remove = [
         SERVICE_SET_VACATION_MODE,
         SERVICE_WEEKLY_REPORT,
-    ]
-
-    # Debug-only services (conditionally registered)
-    debug_services = [
         SERVICE_RUN_LEARNING,
         SERVICE_PID_RECOMMENDATIONS,
     ]
 
     services_removed = 0
     for service in services_to_remove:
-        if hass.services.has_service(DOMAIN, service):
-            hass.services.async_remove(DOMAIN, service)
-            services_removed += 1
-
-    # Only unregister debug services if they were registered
-    for service in debug_services:
         if hass.services.has_service(DOMAIN, service):
             hass.services.async_remove(DOMAIN, service)
             services_removed += 1

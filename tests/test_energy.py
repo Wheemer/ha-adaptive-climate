@@ -395,6 +395,7 @@ class TestWeekBoundaryReset:
 
         with patch("custom_components.adaptive_climate.sensors.energy.dt_util") as mock_dt_util:
             mock_dt_util.utcnow.return_value = week3_date
+            mock_dt_util.now.return_value = week3_date  # local time (naive, same for UTC comparison)
 
             import asyncio
 
@@ -423,6 +424,7 @@ class TestWeekBoundaryReset:
 
         with patch("custom_components.adaptive_climate.sensors.energy.dt_util") as mock_dt_util:
             mock_dt_util.utcnow.return_value = friday
+            mock_dt_util.now.return_value = friday
 
             import asyncio
 
@@ -450,6 +452,7 @@ class TestWeekBoundaryReset:
 
         with patch("custom_components.adaptive_climate.sensors.energy.dt_util") as mock_dt_util:
             mock_dt_util.utcnow.return_value = new_week
+            mock_dt_util.now.return_value = new_week
 
             import asyncio
 
@@ -477,6 +480,7 @@ class TestWeekBoundaryReset:
 
         with patch("custom_components.adaptive_climate.sensors.energy.dt_util") as mock_dt_util:
             mock_dt_util.utcnow.return_value = new_year
+            mock_dt_util.now.return_value = new_year
 
             import asyncio
 

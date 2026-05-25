@@ -36,6 +36,204 @@ from .performance import AdaptiveThermostatSensor
 
 _LOGGER = logging.getLogger(__name__)
 
+# Map currency symbols to ISO 4217 codes (required by SensorDeviceClass.MONETARY)
+_CURRENCY_SYMBOL_TO_ISO: dict[str, str] = {
+    "$": "USD",
+    "€": "EUR",
+    "£": "GBP",
+    "¥": "JPY",
+    "₹": "INR",
+    "₩": "KRW",
+    "₽": "RUB",
+    "Fr": "CHF",
+    "kr": "SEK",  # Ambiguous (SEK/NOK/DKK); SEK most common in HA context
+    "Ft": "HUF",
+    "zł": "PLN",
+    "Kč": "CZK",
+}
+
+# Valid ISO 4217 codes accepted by HA for MONETARY device class (common subset)
+_ISO_4217_CODES: frozenset[str] = frozenset(
+    {
+        "AED",
+        "AFN",
+        "ALL",
+        "AMD",
+        "ANG",
+        "AOA",
+        "ARS",
+        "AUD",
+        "AWG",
+        "AZN",
+        "BAM",
+        "BBD",
+        "BDT",
+        "BGN",
+        "BHD",
+        "BIF",
+        "BMD",
+        "BND",
+        "BOB",
+        "BRL",
+        "BSD",
+        "BTN",
+        "BWP",
+        "BYN",
+        "BZD",
+        "CAD",
+        "CDF",
+        "CHF",
+        "CLP",
+        "CNY",
+        "COP",
+        "CRC",
+        "CUP",
+        "CVE",
+        "CZK",
+        "DJF",
+        "DKK",
+        "DOP",
+        "DZD",
+        "EGP",
+        "ERN",
+        "ETB",
+        "EUR",
+        "FJD",
+        "FKP",
+        "GBP",
+        "GEL",
+        "GHS",
+        "GIP",
+        "GMD",
+        "GNF",
+        "GTQ",
+        "GYD",
+        "HKD",
+        "HNL",
+        "HRK",
+        "HTG",
+        "HUF",
+        "IDR",
+        "ILS",
+        "INR",
+        "IQD",
+        "IRR",
+        "ISK",
+        "JMD",
+        "JOD",
+        "JPY",
+        "KES",
+        "KGS",
+        "KHR",
+        "KMF",
+        "KPW",
+        "KRW",
+        "KWD",
+        "KYD",
+        "KZT",
+        "LAK",
+        "LBP",
+        "LKR",
+        "LRD",
+        "LSL",
+        "LYD",
+        "MAD",
+        "MDL",
+        "MGA",
+        "MKD",
+        "MMK",
+        "MNT",
+        "MOP",
+        "MRU",
+        "MUR",
+        "MVR",
+        "MWK",
+        "MXN",
+        "MYR",
+        "MZN",
+        "NAD",
+        "NGN",
+        "NIO",
+        "NOK",
+        "NPR",
+        "NZD",
+        "OMR",
+        "PAB",
+        "PEN",
+        "PGK",
+        "PHP",
+        "PKR",
+        "PLN",
+        "PYG",
+        "QAR",
+        "RON",
+        "RSD",
+        "RUB",
+        "RWF",
+        "SAR",
+        "SBD",
+        "SCR",
+        "SDG",
+        "SEK",
+        "SGD",
+        "SHP",
+        "SLE",
+        "SLL",
+        "SOS",
+        "SRD",
+        "STN",
+        "SVC",
+        "SYP",
+        "SZL",
+        "THB",
+        "TJS",
+        "TMT",
+        "TND",
+        "TOP",
+        "TRY",
+        "TTD",
+        "TWD",
+        "TZS",
+        "UAH",
+        "UGX",
+        "USD",
+        "UYU",
+        "UZS",
+        "VES",
+        "VND",
+        "VUV",
+        "WST",
+        "XAF",
+        "XCD",
+        "XOF",
+        "XPF",
+        "YER",
+        "ZAR",
+        "ZMW",
+        "ZWL",
+    }
+)
+
+
+def _parse_iso_currency(raw: str) -> str | None:
+    """Convert a raw currency string (symbol or ISO code) to an ISO 4217 code.
+
+    Args:
+        raw: Currency string from a UoM attribute, e.g. "$", "EUR", "€/kWh"
+
+    Returns:
+        ISO 4217 code, or None if unmappable.
+    """
+    if not raw:
+        return None
+    candidate = raw.strip()
+    upper = candidate.upper()
+    if upper in _ISO_4217_CODES:
+        return upper
+    if candidate in _CURRENCY_SYMBOL_TO_ISO:
+        return _CURRENCY_SYMBOL_TO_ISO[candidate]
+    return None
+
 
 class PowerPerM2Sensor(AdaptiveThermostatSensor):
     """Sensor for power consumption per square meter."""
@@ -385,6 +583,7 @@ class WeeklyCostSensor(SensorEntity, RestoreEntity):
         self._weekly_energy_kwh = 0.0
         self._price_per_kwh: float | None = None
         self._currency = "EUR"
+        self._currency_locked = False  # Once set from cost entity, freeze to avoid HA stat invalidation
         # Week tracking state
         self._week_start_reading: float | None = None
         self._week_start_timestamp: datetime | None = None
@@ -436,6 +635,12 @@ class WeeklyCostSensor(SensorEntity, RestoreEntity):
                 except (ValueError, TypeError):
                     pass
 
+            # Restore persisted currency (prevents ISO stat invalidation on restart)
+            restored_currency = attrs.get("currency")
+            if restored_currency and restored_currency in _ISO_4217_CODES:
+                self._currency = restored_currency
+                self._currency_locked = True
+
             _LOGGER.debug(
                 "Restored WeeklyCostSensor state: week_start_reading=%.2f, "
                 "week_start_timestamp=%s, weekly_energy_kwh=%.2f",
@@ -445,23 +650,39 @@ class WeeklyCostSensor(SensorEntity, RestoreEntity):
             )
 
     def _check_week_boundary(self, current_reading: float) -> None:
-        """Check if we've crossed into a new week and reset if needed.
+        """Check if we've crossed into a new ISO week and reset if needed.
 
-        Resets on Sunday midnight (start of new week).
+        Resets on Monday midnight (local time). Uses local time so that users
+        in negative-UTC offsets (e.g. UTC-5) don't experience a Sunday-afternoon
+        reset due to UTC advancing past Monday midnight before local does.
         """
-        now = dt_util.utcnow()
+        now_utc = dt_util.utcnow()
 
         if self._week_start_timestamp is None:
-            # First run or no previous data - initialize
-            self._start_new_week(current_reading, now)
+            # First run or no previous data - initialize with UTC for storage
+            self._start_new_week(current_reading, now_utc)
             return
 
-        # Check if we're in a new week (ISO week-based)
-        # Week number changed means new week
-        current_week = now.isocalendar()[1]
-        stored_week = self._week_start_timestamp.isocalendar()[1]
-        current_year = now.isocalendar()[0]
-        stored_year = self._week_start_timestamp.isocalendar()[0]
+        # Compare in local time so that week boundaries align with the user's clock.
+        # Stored timestamps are UTC-aware (from utcnow); convert to local for correct
+        # ISO week comparison. Falls back to UTC comparison if conversion fails
+        # (e.g. test environments with mock datetime objects).
+        try:
+            now_local = dt_util.now()  # same moment, local timezone
+            stored = self._week_start_timestamp
+            if stored.tzinfo is not None and now_local.tzinfo is not None:
+                stored_local = stored.astimezone(now_local.tzinfo)
+            else:
+                stored_local = stored  # naive datetime: compare directly
+            current_year, current_week, _ = now_local.isocalendar()
+            stored_year, stored_week, _ = stored_local.isocalendar()
+        except (TypeError, AttributeError, ValueError):
+            # Fallback: UTC comparison (pre-fix behavior; also used by test mocks)
+            try:
+                current_year, current_week, _ = now_utc.isocalendar()
+                stored_year, stored_week, _ = self._week_start_timestamp.isocalendar()
+            except (TypeError, AttributeError, ValueError):
+                return  # Cannot compare — assume same week, skip reset
 
         if current_year != stored_year or current_week != stored_week:
             _LOGGER.info(
@@ -473,7 +694,7 @@ class WeeklyCostSensor(SensorEntity, RestoreEntity):
                 self._weekly_energy_kwh,
                 self._value,
             )
-            self._start_new_week(current_reading, now)
+            self._start_new_week(current_reading, now_utc)
 
     def _start_new_week(self, current_reading: float, now: datetime) -> None:
         """Reset week tracking with new start reading."""
@@ -502,6 +723,7 @@ class WeeklyCostSensor(SensorEntity, RestoreEntity):
         return {
             "weekly_energy_kwh": round(self._weekly_energy_kwh, 2),
             "price_per_kwh": self._price_per_kwh,
+            "currency": self._currency,  # Persisted to survive HA restarts without stat invalidation
             "energy_meter_entity": self._energy_meter_entity,
             "cost_entity": self._energy_cost_entity,
             # Persistence attributes
@@ -522,10 +744,34 @@ class WeeklyCostSensor(SensorEntity, RestoreEntity):
             if cost_state and cost_state.state not in ("unknown", "unavailable"):
                 try:
                     self._price_per_kwh = float(cost_state.state)
-                    # Try to get currency from unit_of_measurement
+                    # Parse currency from UoM only if not yet locked (M04: freeze after first read)
                     uom = cost_state.attributes.get("unit_of_measurement", "")
-                    if "/" in uom:
-                        self._currency = uom.split("/")[0]
+                    raw_currency = uom.split("/")[0].strip() if "/" in uom else uom.strip()
+                    if not self._currency_locked:
+                        iso = _parse_iso_currency(raw_currency)
+                        if iso:
+                            self._currency = iso
+                            self._currency_locked = True
+                            _LOGGER.debug("WeeklyCostSensor: currency locked to %s (from UoM %r)", iso, uom)
+                        elif raw_currency:
+                            _LOGGER.warning(
+                                "WeeklyCostSensor: unrecognised currency %r from %s UoM %r; "
+                                "keeping %s. SensorDeviceClass.MONETARY requires ISO 4217.",
+                                raw_currency,
+                                self._energy_cost_entity,
+                                uom,
+                                self._currency,
+                            )
+                    else:
+                        new_iso = _parse_iso_currency(raw_currency)
+                        if new_iso and new_iso != self._currency:
+                            _LOGGER.warning(
+                                "WeeklyCostSensor: cost entity %s now reports currency %s "
+                                "(locked to %s). Ignoring to preserve historical statistics.",
+                                self._energy_cost_entity,
+                                new_iso,
+                                self._currency,
+                            )
                 except (ValueError, TypeError):
                     pass
 
@@ -541,23 +787,32 @@ class WeeklyCostSensor(SensorEntity, RestoreEntity):
             current_reading = float(meter_state.state)
             unit = meter_state.attributes.get("unit_of_measurement", "kWh").upper()
 
-            # Convert to kWh
+            # Convert to kWh — raise ValueError on unknown unit (no silent 1.0× fallback)
             from ..analytics.energy import UNIT_CONVERSIONS
 
-            conversion = UNIT_CONVERSIONS.get(unit, 1.0)
+            conversion = UNIT_CONVERSIONS.get(unit)
+            if conversion is None:
+                raise ValueError(
+                    f"Unsupported energy unit {unit!r} from {self._energy_meter_entity}. "
+                    f"Supported: {', '.join(UNIT_CONVERSIONS)}"
+                )
             current_kwh = current_reading * conversion
 
             # Check for week boundary reset
             self._check_week_boundary(current_kwh)
 
-            # Handle meter reset scenarios (current reading less than week start)
+            # Handle meter reset scenarios (H10: compare against last reading, not week start alone)
+            # Using week_start alone misclassifies 6-digit meter rollovers (999999→0).
+            # When last_meter_reading is available use it; fall back to week_start when no prior reading.
             if self._week_start_reading is not None:
-                if current_kwh < self._week_start_reading:
-                    # Meter reset detected - likely replacement or rollover
+                reset_reference = (
+                    self._last_meter_reading if self._last_meter_reading is not None else self._week_start_reading
+                )
+                if current_kwh < reset_reference:
                     _LOGGER.warning(
-                        "Meter reset detected: week_start=%.2f kWh, current=%.2f kWh. "
+                        "Meter reset detected: reference=%.2f kWh, current=%.2f kWh. "
                         "Resetting week start to current reading.",
-                        self._week_start_reading,
+                        reset_reference,
                         current_kwh,
                     )
                     self._week_start_reading = current_kwh

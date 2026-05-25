@@ -90,14 +90,16 @@ class TestServiceRegistration:
     def test_public_services_registered_without_debug(
         self, mock_hass, mock_coordinator, mock_vacation_mode, mock_notification_funcs
     ):
-        """Verify only public services are registered when debug=False."""
+        """Verify all 4 services are always registered, regardless of debug flag."""
         from custom_components.adaptive_climate.services import (
             async_register_services,
             SERVICE_WEEKLY_REPORT,
             SERVICE_SET_VACATION_MODE,
+            SERVICE_RUN_LEARNING,
+            SERVICE_PID_RECOMMENDATIONS,
         )
 
-        # Register services with debug=False (default)
+        # Register services with debug=False
         async_register_services(
             hass=mock_hass,
             coordinator=mock_coordinator,
@@ -111,19 +113,17 @@ class TestServiceRegistration:
             debug=False,
         )
 
-        # Verify only 2 public services were registered
-        assert mock_hass.services.async_register.call_count == 2
+        # All 4 services are always registered (H05 fix: removed debug gate)
+        assert mock_hass.services.async_register.call_count == 4
 
-        # Get all registered service names
         registered_services = [call[0][1] for call in mock_hass.services.async_register.call_args_list]
-
-        # Verify each public service was registered
-        expected_services = [
+        for service in [
             SERVICE_SET_VACATION_MODE,
             SERVICE_WEEKLY_REPORT,
-        ]
-        for service in expected_services:
-            assert service in registered_services, f"Public service {service} not registered"
+            SERVICE_RUN_LEARNING,
+            SERVICE_PID_RECOMMENDATIONS,
+        ]:
+            assert service in registered_services, f"Service {service} not registered"
 
     def test_all_services_registered_with_debug(
         self, mock_hass, mock_coordinator, mock_vacation_mode, mock_notification_funcs
@@ -167,17 +167,17 @@ class TestServiceRegistration:
         for service in expected_services:
             assert service in registered_services, f"Service {service} not registered"
 
-    def test_debug_services_not_registered_without_debug(
+    def test_learning_services_always_registered(
         self, mock_hass, mock_coordinator, mock_vacation_mode, mock_notification_funcs
     ):
-        """Verify debug services are NOT registered when debug=False."""
+        """Verify learning/recommendation services are always registered (H05: removed debug gate)."""
         from custom_components.adaptive_climate.services import (
             async_register_services,
             SERVICE_RUN_LEARNING,
             SERVICE_PID_RECOMMENDATIONS,
         )
 
-        # Register services with debug=False
+        # Register services with debug=False (no gate)
         async_register_services(
             hass=mock_hass,
             coordinator=mock_coordinator,
@@ -191,14 +191,11 @@ class TestServiceRegistration:
             debug=False,
         )
 
-        # Get all registered service names
         registered_services = [call[0][1] for call in mock_hass.services.async_register.call_args_list]
 
-        # Verify debug services were NOT registered
-        assert SERVICE_RUN_LEARNING not in registered_services, "Debug service run_learning should not be registered"
-        assert SERVICE_PID_RECOMMENDATIONS not in registered_services, (
-            "Debug service pid_recommendations should not be registered"
-        )
+        # H05: both services are always registered, regardless of debug flag
+        assert SERVICE_RUN_LEARNING in registered_services, "run_learning must always be registered"
+        assert SERVICE_PID_RECOMMENDATIONS in registered_services, "pid_recommendations must always be registered"
 
     def test_services_registered_with_correct_domain(
         self, mock_hass, mock_coordinator, mock_vacation_mode, mock_notification_funcs

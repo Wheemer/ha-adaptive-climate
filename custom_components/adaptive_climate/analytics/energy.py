@@ -11,6 +11,9 @@ UNIT_CONVERSIONS = {
     "KWH": 1.0,  # 1 kWh = 1 kWh
     "MWH": 1000.0,  # 1 MWh = 1000 kWh
     "WH": 0.001,  # 1 Wh = 0.001 kWh
+    "BTU": 0.000293071,  # 1 BTU = 0.000293071 kWh
+    "THERM": 29.3071,  # 1 therm = 29.3071 kWh (100,000 BTU)
+    "MMBTU": 293.071,  # 1 MMBtu = 293.071 kWh (1,000,000 BTU)
 }
 
 
