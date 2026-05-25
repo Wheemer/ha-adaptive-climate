@@ -1,6 +1,20 @@
 # CHANGELOG
 
 
+## v0.64.6 (2026-05-25)
+
+### Bug Fixes
+
+- **cooling**: Address code review findings
+  ([`b909aa9`](https://github.com/afewyards/ha-adaptive-climate/commit/b909aa9e532dd7a9a4d102a22523efed17432345))
+
+- PWM controller: proper no-demand check for HEAT/COOL modes - Auto mode switching: get hvac_mode
+  from entity state, not zone data - Auto mode switching: fall back to outdoor_temp when forecast
+  unavailable - Auto mode switching: respect forecast_days config instead of hardcoded 7 - Config:
+  accept legacy forecast_hours for backward compatibility - Climate: sync self._i when resetting
+  integral on mode switch - Tests: improve season-lock coverage, fix assertions
+
+
 ## v0.64.5 (2026-05-25)
 
 ### Bug Fixes

@@ -110,9 +110,10 @@ reportUnusedFunction = false
 [tool.pyright.defineConstant]
 TYPE_CHECKING = true
 
+
 [project]
 name = "adaptive-climate"
-version = "0.64.5"
+version = "0.64.6"
 description = "Home Assistant custom component for PID-based thermostat control with adaptive learning"
 readme = "README.md"
 license = {text = "MIT"}
