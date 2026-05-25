@@ -1,6 +1,18 @@
 # CHANGELOG
 
 
+## v0.64.7 (2026-05-25)
+
+### Bug Fixes
+
+- **contact**: Respect contact_delay before resetting duty accumulator
+  ([`d929da5`](https://github.com/afewyards/ha-adaptive-climate/commit/d929da5cd478177cd438c10bc48b49a5b4f7541b))
+
+Previously the duty accumulator was reset immediately when a door opened, bypassing the
+  contact_delay setting. Now the accumulator is only reset when the pause actually begins (after
+  contact_delay elapses).
+
+
 ## v0.64.6 (2026-05-25)
 
 ### Bug Fixes
