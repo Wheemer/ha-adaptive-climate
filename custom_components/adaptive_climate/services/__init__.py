@@ -121,10 +121,16 @@ async def async_handle_run_learning(
                     "current_pid": {"kp": current_kp, "ki": current_ki, "kd": current_kd},
                 }
             else:
-                # Calculate percentage changes for logging
-                kp_change = ((recommendation["kp"] - current_kp) / current_kp * 100) if current_kp != 0 else 0
-                ki_change = ((recommendation["ki"] - current_ki) / current_ki * 100) if current_ki != 0 else 0
-                kd_change = ((recommendation["kd"] - current_kd) / current_kd * 100) if current_kd != 0 else 0
+                # Calculate percentage changes for logging; use absolute delta label for tiny baselines
+                # to avoid cosmetically alarming "100%" changes on values like ki=0.001→0.002.
+                def _pct_or_abs(new: float, old: float) -> float:
+                    if old == 0 or abs(old) < 0.01:
+                        return 0.0  # Show 0% — absolute delta printed separately when needed
+                    return (new - old) / old * 100
+
+                kp_change = _pct_or_abs(recommendation["kp"], current_kp)
+                ki_change = _pct_or_abs(recommendation["ki"], current_ki)
+                kd_change = _pct_or_abs(recommendation["kd"], current_kd)
 
                 _LOGGER.info(
                     "Zone %s PID recommendation: Kp=%.2f (%.1f%%), Ki=%.4f (%.1f%%), Kd=%.2f (%.1f%%)",
@@ -145,11 +151,10 @@ async def async_handle_run_learning(
                     "recommended_pid": recommendation,
                     "changes_percent": {"kp": kp_change, "ki": ki_change, "kd": kd_change},
                 }
-        except Exception as e:
-            _LOGGER.error("Learning failed for zone %s: %s", zone_id, e)
+        except Exception:
+            _LOGGER.exception("Learning analysis failed for zone %s", zone_id)
             results["zone_results"][zone_id] = {
                 "status": "error",
-                "error": str(e),
             }
 
     _LOGGER.info(
@@ -308,11 +313,10 @@ async def async_handle_pid_recommendations(
                     "changes_percent": {"kp": kp_change, "ki": ki_change, "kd": kd_change},
                 }
                 result["zones_with_recommendations"] += 1
-        except Exception as e:
-            _LOGGER.error("Failed to get PID recommendation for zone %s: %s", zone_id, e)
+        except Exception:
+            _LOGGER.exception("Failed to get PID recommendation for zone %s", zone_id)
             result["zones"][zone_id] = {
                 "status": "error",
-                "error": str(e),
                 "current_pid": current_pid,
                 "recommended_pid": None,
             }

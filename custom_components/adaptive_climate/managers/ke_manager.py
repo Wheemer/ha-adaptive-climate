@@ -47,17 +47,17 @@ class KeManager:
         async_write_ha_state: Callable[[], Any] | None = None,
         # Backward compatibility parameters
         thermostat: AdaptiveThermostat | None = None,
-        get_hvac_mode: callable | None = None,
-        get_current_temp: callable | None = None,
-        get_target_temp: callable | None = None,
-        get_ext_temp: callable | None = None,
-        get_control_output: callable | None = None,
-        get_cold_tolerance: callable | None = None,
-        get_hot_tolerance: callable | None = None,
-        get_ke: callable | None = None,
-        set_ke: callable | None = None,
-        get_pid_controller: callable | None = None,
-        get_is_pid_converged: callable | None = None,
+        get_hvac_mode: Callable[..., Any] | None = None,
+        get_current_temp: Callable[..., Any] | None = None,
+        get_target_temp: Callable[..., Any] | None = None,
+        get_ext_temp: Callable[..., Any] | None = None,
+        get_control_output: Callable[..., Any] | None = None,
+        get_cold_tolerance: Callable[..., Any] | None = None,
+        get_hot_tolerance: Callable[..., Any] | None = None,
+        get_ke: Callable[..., Any] | None = None,
+        set_ke: Callable[..., Any] | None = None,
+        get_pid_controller: Callable[..., Any] | None = None,
+        get_is_pid_converged: Callable[..., Any] | None = None,
     ):
         """Initialize the KeManager.
 

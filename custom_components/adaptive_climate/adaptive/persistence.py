@@ -35,7 +35,7 @@ class LearningDataStore:
         """
         self.hass = hass
         self._store = None
-        self._data = {"version": 5, "zones": {}}
+        self._data = {"version": STORAGE_VERSION, "zones": {}}
         self._save_lock = None  # Lazily initialized in async context
 
     def _validate_data(self, data: Any) -> bool:
@@ -110,13 +110,13 @@ class LearningDataStore:
 
         if data is None:
             # No existing data - return default structure
-            self._data = {"version": 5, "zones": {}}
+            self._data = {"version": STORAGE_VERSION, "zones": {}}
             return self._data
 
         # Validate loaded data
         if not self._validate_data(data):
             _LOGGER.warning("Persisted learning data failed validation, using default structure")
-            self._data = {"version": 5, "zones": {}}
+            self._data = {"version": STORAGE_VERSION, "zones": {}}
             return self._data
 
         self._data = data
@@ -207,7 +207,10 @@ class LearningDataStore:
 
         # Schedule delayed save with 30-second delay
         # The Store helper handles debouncing - multiple calls within the delay
-        # period will reset the timer, ensuring only one save occurs
+        # period will reset the timer, ensuring only one save occurs.
+        # Late binding is intentional: the lambda captures self._data by reference so
+        # that if update_zone_data() is called again before the timer fires, the most
+        # recent data is written (not a stale snapshot).
         self._store.async_delay_save(lambda: self._data, SAVE_DELAY_SECONDS)
 
         _LOGGER.debug(f"Scheduled zone save with {SAVE_DELAY_SECONDS}s delay")

@@ -14,6 +14,7 @@ from ..const import VALIDATION_CYCLE_COUNT, PIDChangeReason
 
 if TYPE_CHECKING:
     from ..pid_controller import PIDController
+    from .pid_gains_manager import PIDGainsManager
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -39,7 +40,7 @@ class PIDTuningManager:
         self,
         thermostat_state: PIDTuningManagerState,
         pid_controller: PIDController,
-        gains_manager: Any,  # PIDGainsManager
+        gains_manager: PIDGainsManager,
         async_control_heating: Callable[..., Awaitable[None]],
         async_write_ha_state: Callable[[], Any],
     ):

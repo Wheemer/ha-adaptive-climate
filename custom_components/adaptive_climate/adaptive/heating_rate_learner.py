@@ -7,6 +7,8 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import ClassVar
 
+from homeassistant.util import dt as dt_util
+
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -131,8 +133,6 @@ class HeatingRateLearner:
             outdoor_temp: Outdoor temperature at session start
             timestamp: Observation timestamp (defaults to now)
         """
-        from homeassistant.util import dt as dt_util
-
         if timestamp is None:
             timestamp = dt_util.utcnow()
 
@@ -209,8 +209,6 @@ class HeatingRateLearner:
             outdoor_temp: Current outdoor temperature
             timestamp: Session start time (defaults to now)
         """
-        from homeassistant.util import dt as dt_util
-
         if timestamp is None:
             timestamp = dt_util.utcnow()
 
@@ -238,8 +236,6 @@ class HeatingRateLearner:
         Returns:
             HeatingRateObservation if session was valid and banked, None if discarded
         """
-        from homeassistant.util import dt as dt_util
-
         if self._active_session is None:
             return None
 
@@ -517,11 +513,26 @@ class HeatingRateLearner:
         }
 
     @classmethod
-    def from_dict(cls, data: dict) -> HeatingRateLearner:
-        """Restore learner from serialized state."""
+    def from_dict(cls, data: dict, heating_type: str | None = None) -> HeatingRateLearner:
+        """Restore learner from serialized state.
+
+        Args:
+            data: Serialized state dict
+            heating_type: Zone's current heating type. Takes precedence over any persisted
+                          value; logs a warning when the two differ so mismatches surface early.
+        """
         from datetime import datetime
 
-        heating_type = data.get("heating_type", "radiator")
+        persisted_type = data.get("heating_type", "radiator")
+        if heating_type is None:
+            heating_type = persisted_type
+        elif heating_type != persisted_type:
+            _LOGGER.warning(
+                "heating_rate_learner: persisted heating_type %r does not match zone config %r; "
+                "using zone config value",
+                persisted_type,
+                heating_type,
+            )
         learner = cls(heating_type)
 
         # Restore bins

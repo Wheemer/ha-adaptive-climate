@@ -141,7 +141,7 @@ class StateRestorer:
         integral_value = old_state.attributes.get("integral")
         if integral_value is None:
             integral_value = old_state.attributes.get("pid_i")  # Legacy name
-        if isinstance(integral_value, (float, int)):
+        if isinstance(integral_value, (float, int)) and not isinstance(integral_value, bool):
             thermostat._i = float(integral_value)
             thermostat._pid_controller.integral = thermostat._i
             _LOGGER.info("%s: Restored integral=%.2f", thermostat.entity_id, thermostat._i)

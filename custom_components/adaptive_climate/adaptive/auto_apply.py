@@ -46,6 +46,11 @@ def get_auto_apply_thresholds(heating_type: str | None = None) -> dict[str, floa
     """
     if heating_type and heating_type in AUTO_APPLY_THRESHOLDS:
         return AUTO_APPLY_THRESHOLDS[heating_type]
+    if heating_type:
+        _LOGGER.warning(
+            "Unknown heating_type %r; falling back to convector auto-apply thresholds",
+            heating_type,
+        )
     return AUTO_APPLY_THRESHOLDS[HeatingType.CONVECTOR]
 
 

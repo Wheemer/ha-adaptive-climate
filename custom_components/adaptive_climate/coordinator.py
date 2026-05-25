@@ -2,27 +2,30 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import timedelta
 import logging
 import time
 from typing import Any, TYPE_CHECKING
 
-from homeassistant.core import HomeAssistant, Event, callback
+from homeassistant.core import HomeAssistant, Event, callback, CALLBACK_TYPE
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from homeassistant.util import dt as dt_util
 from homeassistant.components.climate import HVACMode
 from homeassistant.helpers.event import async_call_later, async_track_state_change_event
 
+# Relative imports are used in production (HA loads as a package); the absolute fallback
+# is for running tests without a full HA installation (e.g. pytest with stub modules).
 try:
     from .const import DOMAIN
     from .adaptive.sun_position import SunPositionCalculator, ORIENTATION_AZIMUTH
     from .managers.auto_mode_switching import AutoModeSwitchingManager
 except ImportError:
-    from const import DOMAIN
-    from adaptive.sun_position import SunPositionCalculator, ORIENTATION_AZIMUTH
-    from managers.auto_mode_switching import AutoModeSwitchingManager
+    from const import DOMAIN  # type: ignore[no-redef]
+    from adaptive.sun_position import SunPositionCalculator, ORIENTATION_AZIMUTH  # type: ignore[no-redef]
+    from managers.auto_mode_switching import AutoModeSwitchingManager  # type: ignore[no-redef]
 
 if TYPE_CHECKING:
+    from datetime import datetime
     from .adaptive.manifold_registry import ManifoldRegistry
     from .central_controller import CentralController
 
@@ -49,7 +52,7 @@ class AdaptiveThermostatCoordinator(DataUpdateCoordinator):
         self._zone_loops: dict[str, int] = {}
         self._update_pending: bool = False
         self._config = config or {}
-        self._outdoor_temp_unsub = None
+        self._outdoor_temp_unsub: CALLBACK_TYPE | None = None
 
         # Shared outdoor temperature EMA filter
         self._outdoor_temp_lagged: float | None = None

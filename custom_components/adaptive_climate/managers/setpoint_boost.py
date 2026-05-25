@@ -115,13 +115,13 @@ class SetpointBoostManager:
             self._debounce_seconds,
         )
 
-    async def _apply_boost(self, _now: datetime) -> None:
+    async def _apply_boost(self, _scheduled_at: datetime) -> None:
         """Apply accumulated boost or decay after debounce period.
 
         Timer callback - applies integral boost for increases or decay for decreases.
 
         Args:
-            _now: Current datetime (unused, required by async_call_later)
+            _scheduled_at: Scheduled fire time passed by async_call_later (unused)
         """
         if not self._enabled:
             self._pending_delta = 0.0

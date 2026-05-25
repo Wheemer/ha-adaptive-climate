@@ -12,6 +12,19 @@ COMFORT_DROP_THRESHOLD = 15
 MIN_SAMPLES_FOR_DETECTION = 12
 
 
+def _pluralize(n: int, word: str, plural: str | None = None) -> str:
+    """Return ``word`` or its plural form based on *n*.
+
+    Args:
+        n: Count value
+        word: Singular form
+        plural: Plural form; defaults to ``word + 's'``
+    """
+    if n == 1:
+        return word
+    return plural if plural is not None else f"{word}s"
+
+
 class ComfortDegradationDetector:
     """Detects significant comfort score degradation.
 
@@ -65,7 +78,7 @@ class ComfortDegradationDetector:
         """
         causes = []
         if contact_pauses > 0:
-            causes.append(f"{contact_pauses} contact sensor pause{'s' if contact_pauses != 1 else ''}")
+            causes.append(f"{contact_pauses} contact sensor {_pluralize(contact_pauses, 'pause')}")
         if humidity_pauses > 0:
-            causes.append(f"{humidity_pauses} humidity pause{'s' if humidity_pauses != 1 else ''}")
+            causes.append(f"{humidity_pauses} humidity {_pluralize(humidity_pauses, 'pause')}")
         return " · ".join(causes)

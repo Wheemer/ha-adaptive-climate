@@ -276,10 +276,9 @@ class AutoModeSwitchingManager:
         Returns:
             Dictionary of state attributes.
         """
-        attrs = {}
-
-        # Always include enabled status
-        attrs["auto_mode_switching_enabled"] = True
+        attrs: dict = {
+            "auto_mode_switching_enabled": True,
+        }
 
         if not debug:
             return attrs

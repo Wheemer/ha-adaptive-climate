@@ -64,7 +64,7 @@ class SystemHealthSensor(SensorEntity):
             "zone_issues": {
                 zone: [
                     {
-                        "severity": issue.severity.value,
+                        "severity": getattr(issue.severity, "value", issue.severity),
                         "type": issue.issue_type,
                         "message": issue.message,
                     }

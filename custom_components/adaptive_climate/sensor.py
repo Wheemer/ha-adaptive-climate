@@ -16,15 +16,15 @@ from homeassistant.helpers.event import async_track_time_interval
 
 from .const import DEFAULT_FALLBACK_FLOW_RATE
 from .sensors.performance import (
-    AdaptiveThermostatSensor,
+    AdaptiveThermostatSensor as AdaptiveThermostatSensor,  # re-exported for test and external consumers
     DutyCycleSensor,
     CycleTimeSensor,
+    HeaterStateChange as HeaterStateChange,  # re-exported for test and external consumers
     OvershootSensor,
     SettlingTimeSensor,
     OscillationsSensor,
-    HeaterStateChange,
-    DEFAULT_DUTY_CYCLE_WINDOW,
-    DEFAULT_ROLLING_AVERAGE_SIZE,
+    DEFAULT_DUTY_CYCLE_WINDOW as DEFAULT_DUTY_CYCLE_WINDOW,  # re-exported for test and external consumers
+    DEFAULT_ROLLING_AVERAGE_SIZE as DEFAULT_ROLLING_AVERAGE_SIZE,  # re-exported for test and external consumers
 )
 from .sensors.energy import (
     PowerPerM2Sensor,
@@ -32,7 +32,6 @@ from .sensors.energy import (
     TotalPowerSensor,
     WeeklyCostSensor,
 )
-from .sensors.health import SystemHealthSensor
 from .sensors.comfort import (
     TimeAtTargetSensor,
     ComfortScoreSensor,
@@ -155,11 +154,14 @@ async def async_setup_platform(
     async_add_entities(sensors, True)
 
     # Schedule updates every 5 minutes
-    async def async_update_sensors(now):
-        """Update all sensors."""
+    async def async_update_sensors(_now=None):
+        """Update all sensors, isolating failures so one bad sensor doesn't block others."""
         for sensor in sensors:
-            await sensor.async_update()
-            sensor.async_write_ha_state()
+            try:
+                await sensor.async_update()
+                sensor.async_write_ha_state()
+            except Exception:
+                _LOGGER.exception("Error updating sensor %s", getattr(sensor, "entity_id", repr(sensor)))
 
     # Store unsub handle for cleanup during unload (C2 fix)
     unsub = async_track_time_interval(hass, async_update_sensors, UPDATE_INTERVAL)

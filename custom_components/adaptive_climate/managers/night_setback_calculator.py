@@ -29,6 +29,15 @@ if TYPE_CHECKING:
 
 _LOGGER = logging.getLogger(__name__)
 
+# Dynamic night-end time offsets (minutes) — all relative to sunrise
+SUNRISE_BASE_OFFSET_MIN = 60  # Time for sun to rise high enough to warm windows
+ORIENTATION_SOUTH_OFFSET_MIN = 30  # South windows benefit from higher afternoon sun — wait longer
+ORIENTATION_EAST_OFFSET_MIN = 15  # East windows get morning sun fairly quickly
+ORIENTATION_WEST_OFFSET_MIN = -30  # West windows receive no morning sun — heat earlier
+ORIENTATION_NORTH_OFFSET_MIN = -45  # North windows have minimal direct sun — heat earliest
+WEATHER_CLOUDY_OFFSET_MIN = -30  # No solar gain expected — end setback sooner
+WEATHER_CLEAR_OFFSET_MIN = 15  # Good solar gain — delay start of active heating
+
 
 class NightSetbackCalculator:
     """Calculator for night setback temperature adjustments.
@@ -132,19 +141,15 @@ class NightSetbackCalculator:
         if not sunrise:
             return None
 
-        # Base: sunrise + 60 min (sun needs to rise high enough to provide heat)
-        end_time = sunrise + timedelta(minutes=60)
+        # Base: sunrise + buffer (sun needs to rise high enough to provide heat)
+        end_time = sunrise + timedelta(minutes=SUNRISE_BASE_OFFSET_MIN)
 
         # Orientation offsets - when does direct sun actually hit these windows?
-        # South: sun hits when higher in sky, can rely on solar gain longer
-        # East: gets early morning sun, moderate delay
-        # West: no morning sun at all, need active heating
-        # North: minimal direct sun ever, need active heating
         orientation_offsets = {
-            "south": +30,  # Wait longer - sun will heat this room well once high enough
-            "east": +15,  # Gets morning sun fairly soon
-            "west": -30,  # No morning sun - start heating earlier
-            "north": -45,  # No direct sun - need heating earliest
+            "south": ORIENTATION_SOUTH_OFFSET_MIN,
+            "east": ORIENTATION_EAST_OFFSET_MIN,
+            "west": ORIENTATION_WEST_OFFSET_MIN,
+            "north": ORIENTATION_NORTH_OFFSET_MIN,
         }
 
         if self._window_orientation:
@@ -157,10 +162,10 @@ class NightSetbackCalculator:
             weather_lower = weather.lower().replace("-", "").replace("_", "")
             if any(c in weather_lower for c in ["cloud", "rain", "snow", "fog", "hail", "storm"]):
                 # Cloudy: no solar gain expected - end setback earlier to allow heating
-                end_time = end_time - timedelta(minutes=30)
+                end_time = end_time + timedelta(minutes=WEATHER_CLOUDY_OFFSET_MIN)
             elif any(c in weather_lower for c in ["sunny", "clear"]):
                 # Clear: good solar gain - can delay heating longer
-                end_time = end_time + timedelta(minutes=15)
+                end_time = end_time + timedelta(minutes=WEATHER_CLEAR_OFFSET_MIN)
 
         return end_time.time()
 
@@ -338,7 +343,7 @@ class NightSetbackCalculator:
 
             if in_night_period:
                 effective_target = target_temp - self._night_setback_config["delta"]
-                _LOGGER.info("%s: Night setback active, effective_target=%s", self._entity_id, effective_target)
+                _LOGGER.debug("%s: Night setback active, effective_target=%s", self._entity_id, effective_target)
 
         info["night_setback_active"] = in_night_period
 

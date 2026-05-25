@@ -67,13 +67,21 @@ class AdaptiveThermostatSensor(SensorEntity):
         self._attr_should_poll = False
         self._attr_available = True
         self._attr_entity_registry_visible_default = False
+        self.__coordinator = None  # Cached after first successful lookup
 
     @property
     def _coordinator(self):
-        """Return the coordinator instance (cached lookup)."""
+        """Return the coordinator instance, caching the result after first hit.
+
+        The cache is valid for the lifetime of the entity; if the coordinator is
+        replaced (e.g. on reload), HA recreates the entity, which resets the cache.
+        """
+        if self.__coordinator is not None:
+            return self.__coordinator
         from ..const import DOMAIN
 
-        return self.hass.data.get(DOMAIN, {}).get("coordinator")
+        self.__coordinator = self.hass.data.get(DOMAIN, {}).get("coordinator")
+        return self.__coordinator
 
 
 class DutyCycleSensor(AdaptiveThermostatSensor):
@@ -152,6 +160,12 @@ class DutyCycleSensor(AdaptiveThermostatSensor):
             if heater_ids:
                 # heater_entity_id can be a list or single entity
                 if isinstance(heater_ids, list) and heater_ids:
+                    if len(heater_ids) > 1:
+                        _LOGGER.warning(
+                            "heater_entity_id has %d entries; tracking only the first: %s",
+                            len(heater_ids),
+                            heater_ids[0],
+                        )
                     self._heater_entity_id = heater_ids[0]
                 elif isinstance(heater_ids, str):
                     self._heater_entity_id = heater_ids
@@ -570,8 +584,10 @@ class OvershootSensor(AdaptiveThermostatSensor):
         if not hasattr(adaptive_learner, "cycle_history") or not adaptive_learner.cycle_history:
             return 0.0
 
-        # Calculate average overshoot from recent cycles
-        overshoots = [cycle.overshoot for cycle in adaptive_learner.cycle_history if cycle.overshoot is not None]
+        # Calculate average overshoot from the most recent cycles only (cap at 20 to avoid
+        # iterating 1000+ entries on every 5-minute sensor tick).
+        recent_cycles = adaptive_learner.cycle_history[-20:]
+        overshoots = [cycle.overshoot for cycle in recent_cycles if cycle.overshoot is not None]
 
         if not overshoots:
             return 0.0

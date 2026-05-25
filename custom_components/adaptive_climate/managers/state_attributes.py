@@ -285,7 +285,10 @@ def _add_learning_object(thermostat: SmartThermostat, attrs: dict[str, Any]) -> 
     # Fire milestone check (fire-and-forget)
     milestone_tracker = zone_data.get("milestone_tracker")
     if milestone_tracker:
-        thermostat.hass.async_create_task(milestone_tracker.async_check_milestone(learning_status, confidence_pct))
+        thermostat.hass.async_create_background_task(
+            milestone_tracker.async_check_milestone(learning_status, confidence_pct),
+            "adaptive_climate_milestone_check",
+        )
 
 
 def _add_debug_object(thermostat: SmartThermostat, attrs: dict[str, Any]) -> None:
@@ -360,11 +363,14 @@ def _add_preheat_attributes(thermostat: SmartThermostat, attrs: dict[str, Any]) 
         target_temp = thermostat._get_target_temp() if hasattr(thermostat, "_get_target_temp") else None
         outdoor_temp = getattr(thermostat, "_outdoor_sensor_temp", None)
 
-        # Ensure we have valid numeric values (not MagicMock)
+        # Validate that we have real numeric values before arithmetic
         if (
             isinstance(current_temp, (int, float))
+            and not isinstance(current_temp, bool)
             and isinstance(target_temp, (int, float))
+            and not isinstance(target_temp, bool)
             and isinstance(outdoor_temp, (int, float))
+            and not isinstance(outdoor_temp, bool)
         ):
             delta = target_temp - current_temp
             if delta > 0:

@@ -6,11 +6,6 @@ including lazy imports and string conversions.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    pass
-
 
 def mode_to_str(mode):
     """Convert mode to string (handles both enum and string).

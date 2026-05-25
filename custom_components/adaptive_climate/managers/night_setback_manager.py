@@ -6,16 +6,10 @@ import logging
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any, Callable
 
-# These imports are only needed when running in Home Assistant
-try:
-    from homeassistant.core import HomeAssistant
-    from homeassistant.util import dt as dt_util
+from homeassistant.util import dt as dt_util
 
-    HAS_HOMEASSISTANT = True
-except ImportError:
-    HAS_HOMEASSISTANT = False
-    HomeAssistant = Any
-    dt_util = None
+if TYPE_CHECKING:
+    from homeassistant.core import HomeAssistant
 
 from ..adaptive.night_setback import NightSetback
 from .night_setback_calculator import NightSetbackCalculator
@@ -26,9 +20,6 @@ from ..const import (
     AUTO_LEARNING_SETBACK_TRIGGER_DAYS,
     AUTO_LEARNING_SETBACK_COOLDOWN_DAYS,
 )
-
-if TYPE_CHECKING:
-    pass
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -162,6 +153,11 @@ class NightSetbackManager:
 
     def update_days_at_maintenance_cap(self, at_cap: bool) -> None:
         """Update tracking of days stuck at maintenance cap.
+
+        **Contract:** Must be called exactly once per day (e.g. from the nightly
+        setback evaluation that runs on schedule, not on every coordinator tick).
+        Calling more often will double-count days and trigger the auto-setback
+        prematurely.
 
         Args:
             at_cap: Whether the zone is currently stuck at the maintenance cap

@@ -14,8 +14,8 @@ from homeassistant.components.sensor import (
     SensorStateClass,
 )
 from homeassistant.const import PERCENTAGE
-from homeassistant.core import HomeAssistant, callback
-from homeassistant.helpers.event import async_track_state_change_event
+from homeassistant.core import HomeAssistant, CALLBACK_TYPE, callback
+from homeassistant.helpers.event import async_call_later, async_track_state_change_event
 
 from ..const import (
     DOMAIN,
@@ -24,6 +24,9 @@ from ..const import (
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+# Debounce window for rapid state changes (e.g. PWM cycling at high frequency)
+_DEBOUNCE_SECONDS = 5.0
 
 
 class ActuatorWearSensor(SensorEntity):
@@ -76,6 +79,8 @@ class ActuatorWearSensor(SensorEntity):
         self._wear_percentage: float = 0.0
         self._maintenance_status: str = "ok"  # ok, maintenance_soon, maintenance_due
         self._state_listener_unsub = None
+        # Debounce handle — coalesces rapid state-change events into a single update
+        self._update_cancel: CALLBACK_TYPE | None = None
 
     @property
     def native_value(self) -> float | None:
@@ -119,11 +124,25 @@ class ActuatorWearSensor(SensorEntity):
         if self._state_listener_unsub:
             self._state_listener_unsub()
             self._state_listener_unsub = None
+        if self._update_cancel:
+            self._update_cancel()
+            self._update_cancel = None
 
     @callback
-    def _async_climate_state_changed(self, event) -> None:
-        """Handle climate entity state changes."""
-        self.hass.async_create_task(self._async_update_from_climate_state())
+    def _async_climate_state_changed(self, _event=None) -> None:
+        """Handle climate entity state changes.
+
+        Debounces rapid events (e.g. PWM switching) so only one update runs per
+        coalesce window (_DEBOUNCE_SECONDS).
+        """
+        if self._update_cancel:
+            self._update_cancel()
+
+        async def _do_update(_now=None):
+            self._update_cancel = None
+            await self._async_update_from_climate_state()
+
+        self._update_cancel = async_call_later(self.hass, _DEBOUNCE_SECONDS, _do_update)
 
     async def _async_update_from_climate_state(self) -> None:
         """Update sensor state from climate entity attributes."""

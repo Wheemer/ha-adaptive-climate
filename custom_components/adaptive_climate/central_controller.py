@@ -62,14 +62,14 @@ class CentralController:
         self.startup_delay_seconds = startup_delay_seconds
 
         # Track startup delay state
-        self._heater_startup_task: asyncio.Task | None = None
-        self._cooler_startup_task: asyncio.Task | None = None
+        self._heater_startup_task: asyncio.Task[None] | None = None
+        self._cooler_startup_task: asyncio.Task[None] | None = None
         self._heater_waiting_for_startup = False
         self._cooler_waiting_for_startup = False
 
         # Track turn-off debounce state
-        self._heater_turnoff_task: asyncio.Task | None = None
-        self._cooler_turnoff_task: asyncio.Task | None = None
+        self._heater_turnoff_task: asyncio.Task[None] | None = None
+        self._cooler_turnoff_task: asyncio.Task[None] | None = None
 
         # Lock to protect startup state from race conditions during concurrent updates
         self._startup_lock = asyncio.Lock()

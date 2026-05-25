@@ -11,8 +11,12 @@ try:
         floor_registry as fr,
     )
 except ImportError:
-    # For testing without full HA installation
-    pass
+    # For testing without full HA installation — define stub names so that later
+    # references in this module don't raise NameError on import.
+    HomeAssistant = object  # type: ignore[assignment,misc]
+    er = None  # type: ignore[assignment]
+    ar = None  # type: ignore[assignment]
+    fr = None  # type: ignore[assignment]
 
 
 def discover_zone_floors(hass: HomeAssistant, zone_entity_ids: list[str]) -> dict[str, int | None]:

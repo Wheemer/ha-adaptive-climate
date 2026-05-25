@@ -24,6 +24,10 @@ from .performance import AdaptiveThermostatSensor
 
 _LOGGER = logging.getLogger(__name__)
 
+# Oscillation score penalty: each extra oscillation over baseline costs this many points.
+# With 10.0, a cycle with 10+ oscillations scores 0 (fully penalized).
+OSCILLATION_PENALTY_PER_CYCLE = 10.0
+
 # Temperature tolerance band for "at target" (± this value)
 DEFAULT_TARGET_TOLERANCE = 0.5  # °C
 
@@ -234,7 +238,7 @@ class ComfortScoreSensor(AdaptiveThermostatSensor):
         # Get oscillation score (inverse of oscillation count)
         oscillations = await self._get_oscillations()
         # Convert oscillations to score: 0 oscillations = 100, 10+ = 0
-        self._oscillation_score = max(0.0, 100.0 - (oscillations * 10.0))
+        self._oscillation_score = max(0.0, 100.0 - (oscillations * OSCILLATION_PENALTY_PER_CYCLE))
 
         # Weighted combination
         score = self._time_at_target_score * 0.60 + self._deviation_score * 0.25 + self._oscillation_score * 0.15

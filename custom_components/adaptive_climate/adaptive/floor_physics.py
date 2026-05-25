@@ -94,7 +94,7 @@ def validate_floor_construction(floor_config: dict) -> list[str]:
             errors.append(f"Layer {i} ({layer_type}): thickness_mm must be a positive number, got {thickness_mm}")
         else:
             # Check thickness range for layer type
-            min_thickness, max_thickness = FLOOR_THICKNESS_LIMITS[layer_type]
+            min_thickness, max_thickness = FLOOR_THICKNESS_LIMITS.get(layer_type, (0, 1000))
             if thickness_mm < min_thickness or thickness_mm > max_thickness:
                 errors.append(
                     f"Layer {i} ({layer_type}): thickness_mm must be between "

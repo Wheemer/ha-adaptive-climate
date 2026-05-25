@@ -220,7 +220,7 @@ class WeeklyReport:
         if highlights:
             lines.append(" · ".join(highlights[:3]))
         else:
-            lines.append("All zones progressing normally")
+            lines.append("All zones progressing normally")  # TODO: i18n when HA translation framework adopted
 
         zone_str = f"{self.active_zones} zone{'s' if self.active_zones != 1 else ''} active"
         lines.append(f"{zone_str} · System {self.health_status}")
