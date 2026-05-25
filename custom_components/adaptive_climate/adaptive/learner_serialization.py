@@ -85,9 +85,12 @@ def learner_to_dict(
     # Serialize unified undershoot detector state (v8 format)
     undershoot_state = {}
     if undershoot_detector is not None:
+        # Serialize last_adjustment_time as ISO string (C10: monotonic floats are meaningless across restarts)
+        last_adj = undershoot_detector.last_adjustment_time
+        last_adj_iso = last_adj.isoformat() if last_adj is not None else None
         undershoot_state = {
             "cumulative_ki_multiplier": undershoot_detector.cumulative_ki_multiplier,
-            "last_adjustment_time": undershoot_detector.last_adjustment_time,
+            "last_adjustment_time": last_adj_iso,
             "time_below_target": undershoot_detector._time_below_target,
             "thermal_debt": undershoot_detector._thermal_debt,
             "consecutive_failures": undershoot_detector._consecutive_failures,
