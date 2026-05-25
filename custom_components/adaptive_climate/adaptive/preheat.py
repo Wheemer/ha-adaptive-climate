@@ -6,12 +6,15 @@ then estimates time-to-target for early start scheduling.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING
 import statistics
 
 from homeassistant.util import dt as dt_util
+
+_LOGGER = logging.getLogger(__name__)
 
 from ..const import (
     HEATING_TYPE_PREHEAT_CONFIG,
@@ -372,13 +375,21 @@ class PreheatLearner:
         # Restore observations
         for obs_data in data["observations"]:
             bin_key = tuple(obs_data["bin_key"])
+            try:
+                timestamp = datetime.fromisoformat(obs_data["timestamp"])
+            except (ValueError, TypeError):
+                _LOGGER.warning(
+                    "Could not parse preheat observation timestamp: %s — skipping",
+                    obs_data.get("timestamp"),
+                )
+                continue
             obs = HeatingObservation(
                 start_temp=obs_data["start_temp"],
                 end_temp=obs_data["end_temp"],
                 outdoor_temp=obs_data["outdoor_temp"],
                 duration_minutes=obs_data["duration_minutes"],
                 rate=obs_data["rate"],
-                timestamp=datetime.fromisoformat(obs_data["timestamp"]),
+                timestamp=timestamp,
             )
 
             if bin_key not in learner._observations:

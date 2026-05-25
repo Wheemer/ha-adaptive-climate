@@ -106,7 +106,11 @@ def _get_last_adjustment_time_from_history(
             timestamp_str = entry.get("timestamp")
             if timestamp_str:
                 # PID history uses ISO format from dt_util.utcnow().isoformat()
-                dt = datetime.fromisoformat(timestamp_str)
+                try:
+                    dt = datetime.fromisoformat(timestamp_str)
+                except (ValueError, TypeError):
+                    _LOGGER.warning("Could not parse PID history timestamp: %s", timestamp_str)
+                    continue
                 # Ensure timezone-aware (dt_util.utcnow() is UTC)
                 if dt.tzinfo is None:
                     dt = dt.replace(tzinfo=timezone.utc)
@@ -1145,10 +1149,12 @@ class AdaptiveLearner:
         ):
             outcome = CycleOutcome.UNDERSHOOT
         elif is_recovery and metrics.rise_time is None:
-            # Recovery cycle that failed to reach target
+            # Recovery cycle that stalled without reaching target (rise_time=None means
+            # the setpoint was never crossed). Classified as undershoot so weight/Ki rules
+            # can treat it as a persistent deficit rather than a one-off miss.
             outcome = CycleOutcome.UNDERSHOOT
         else:
-            # Shouldn't reach here, but default to clean
+            # Maintenance cycle with no clear overshoot/undershoot signal — treat as clean.
             outcome = CycleOutcome.CLEAN
 
         # Calculate weight for this cycle (requires starting_delta)
@@ -1647,6 +1653,18 @@ class AdaptiveLearner:
             self._undershoot_detector._consecutive_failures = undershoot_state.get("consecutive_failures", 0)
             # Shared state
             self._undershoot_detector.cumulative_ki_multiplier = undershoot_state.get("cumulative_ki_multiplier", 1.0)
+            # Restore cooldown timestamp (C09/C10): stored as ISO string; ignore old monotonic floats
+            last_adj_raw = undershoot_state.get("last_adjustment_time")
+            if isinstance(last_adj_raw, str):
+                try:
+                    adj_dt = datetime.fromisoformat(last_adj_raw)
+                    if adj_dt.tzinfo is None:
+                        adj_dt = adj_dt.replace(tzinfo=timezone.utc)
+                    if adj_dt <= dt_util.utcnow():  # Clamp to not-in-future
+                        self._undershoot_detector.last_adjustment_time = adj_dt
+                except (ValueError, TypeError):
+                    _LOGGER.info("Could not parse undershoot last_adjustment_time: %s — cooldown reset", last_adj_raw)
+            # else: None or old monotonic float — leave as None (reset cooldown)
 
         # Restore contribution tracker state (serialization module handles v8->v9 migration)
         contribution_state = restored.get("contribution_tracker_state", {})

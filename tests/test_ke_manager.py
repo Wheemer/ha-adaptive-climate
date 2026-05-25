@@ -671,7 +671,11 @@ class TestKeManagerStateRestoration:
         )
 
     def test_restore_state_full(self, manager):
-        """Test restoring all state values."""
+        """Test that restore_state always resets monotonic timestamps to None (M25).
+
+        Monotonic timestamps are meaningless after a process restart; steady-state
+        tracking must restart fresh regardless of any values passed in.
+        """
         steady_start = time.monotonic() - 100
         observation_time = time.monotonic() - 50
 
@@ -680,16 +684,17 @@ class TestKeManagerStateRestoration:
             last_ke_observation_time=observation_time,
         )
 
-        assert manager.steady_state_start == steady_start
-        assert manager.last_ke_observation_time == observation_time
+        # Both must always be reset to None — monotonic timestamps are invalid post-restart
+        assert manager.steady_state_start is None
+        assert manager.last_ke_observation_time is None
 
     def test_restore_state_partial(self, manager):
-        """Test restoring only some state values."""
+        """Test that restore_state resets all timestamps even when partially supplied."""
         steady_start = time.monotonic() - 100
 
         manager.restore_state(steady_state_start=steady_start)
 
-        assert manager.steady_state_start == steady_start
+        assert manager.steady_state_start is None
         assert manager.last_ke_observation_time is None
 
     def test_restore_state_none_values(self, manager):

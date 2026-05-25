@@ -267,7 +267,11 @@ def restore_learner_from_dict(data: dict[str, Any]) -> dict[str, Any]:
     # Restore shared fields
     last_adj_time = data.get("last_adjustment_time")
     if last_adj_time is not None and isinstance(last_adj_time, str):
-        last_adjustment_time = datetime.fromisoformat(last_adj_time)
+        try:
+            last_adjustment_time = datetime.fromisoformat(last_adj_time)
+        except (ValueError, TypeError):
+            _LOGGER.warning("Could not parse last_adjustment_time: %s — using None", last_adj_time)
+            last_adjustment_time = None
     else:
         last_adjustment_time = None
 

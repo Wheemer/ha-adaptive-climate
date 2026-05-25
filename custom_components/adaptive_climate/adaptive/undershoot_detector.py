@@ -20,7 +20,6 @@ prevent runaway integral gain.
 from __future__ import annotations
 
 import logging
-import time
 from datetime import datetime
 from typing import TYPE_CHECKING
 
@@ -52,7 +51,7 @@ class UndershootDetector:
 
     Shared state:
         cumulative_ki_multiplier: Total Ki increases from both modes (starts at 1.0).
-        last_adjustment_time: Monotonic time of last adjustment for cooldown.
+        last_adjustment_time: Wall-clock datetime of last adjustment for cooldown (persists across restarts).
 
     Real-time state:
         time_below_target: Seconds spent below (setpoint - cold_tolerance).
@@ -73,7 +72,7 @@ class UndershootDetector:
 
         # Shared state
         self.cumulative_ki_multiplier: float = 1.0
-        self.last_adjustment_time: float | None = None
+        self.last_adjustment_time: datetime | None = None
 
         # Real-time mode state
         self._time_below_target: float = 0.0
@@ -376,8 +375,8 @@ class UndershootDetector:
         # Update shared cumulative multiplier
         self.cumulative_ki_multiplier *= multiplier
 
-        # Record adjustment time for cooldown enforcement
-        self.last_adjustment_time = time.monotonic()
+        # Record adjustment time for cooldown enforcement (wall-clock, survives restarts)
+        self.last_adjustment_time = dt_util.utcnow()
 
         # Reset both modes
         # Real-time: Partial debt reset - continue monitoring but reduce debt by 50%
@@ -402,26 +401,28 @@ class UndershootDetector:
         """Check if detector is in cooldown period.
 
         Cooldown prevents rapid-fire adjustments by enforcing a minimum time
-        interval between Ki increases. Checks both monotonic time (within-session)
-        and history datetime (cross-restart).
+        interval between Ki increases. Uses wall-clock datetime for both in-session
+        and cross-restart checks.
 
         Args:
-            last_history_adjustment_utc: Timestamp of last Ki adjustment from PID history.
+            last_history_adjustment_utc: Timestamp of last Ki adjustment from PID history
+                (fallback for backward compat when last_adjustment_time is None).
 
         Returns:
             True if in cooldown period, False otherwise.
         """
         cooldown_seconds = self._thresholds["cooldown_hours"] * 3600.0
+        now = dt_util.utcnow()
 
-        # Check monotonic (within-session)
+        # Check in-session / persisted wall-clock timestamp (survives restarts via C09)
         if self.last_adjustment_time is not None:
-            elapsed = time.monotonic() - self.last_adjustment_time
+            elapsed = (now - self.last_adjustment_time).total_seconds()
             if elapsed < cooldown_seconds:
                 return True
 
-        # Check history datetime (cross-restart)
+        # Fallback: check history datetime for backward compat (pre-C09 restores)
         if last_history_adjustment_utc is not None:
-            elapsed = (dt_util.utcnow() - last_history_adjustment_utc).total_seconds()
+            elapsed = (now - last_history_adjustment_utc).total_seconds()
             if elapsed < cooldown_seconds:
                 remaining_hours = (cooldown_seconds - elapsed) / 3600.0
                 _LOGGER.debug(
@@ -554,8 +555,8 @@ class UndershootDetector:
         # Update shared cumulative multiplier
         self.cumulative_ki_multiplier *= multiplier
 
-        # Record adjustment time for cooldown enforcement
-        self.last_adjustment_time = time.monotonic()
+        # Record adjustment time for cooldown enforcement (wall-clock, survives restarts)
+        self.last_adjustment_time = dt_util.utcnow()
 
         # Acknowledge boost in heating rate learner (resets stall counter)
         if self._heating_rate_learner is not None:

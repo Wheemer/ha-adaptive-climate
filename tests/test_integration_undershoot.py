@@ -313,7 +313,9 @@ class TestUndershootDetectionCooldown:
         assert not detector.should_adjust_ki(cycles_completed=0)
 
         # Fast-forward time past cooldown (floor_hydronic: 24 hours)
-        detector.last_adjustment_time = time.monotonic() - (24.5 * 3600.0)
+        from datetime import timezone
+
+        detector.last_adjustment_time = datetime.now(timezone.utc) - timedelta(hours=24.5)
 
         # Should be allowed now
         assert detector.should_adjust_ki(cycles_completed=0)
@@ -405,7 +407,9 @@ class TestPersistentUndershootCatch22:
         assert new_ki is None, "Expected cooldown to block immediate second adjustment"
 
         # Fast-forward past cooldown (24 hours for floor_hydronic)
-        detector.last_adjustment_time = time.monotonic() - (25 * 3600.0)
+        from datetime import timezone
+
+        detector.last_adjustment_time = datetime.now(timezone.utc) - timedelta(hours=25)
 
         # Now should allow adjustment
         new_ki = learner.check_undershoot_adjustment(cycles_completed=15, current_ki=11.5)

@@ -20,10 +20,10 @@ mock_util = MagicMock()
 mock_util.slugify = lambda x: x.lower().replace(" ", "_")
 
 # Mock homeassistant.util.dt for timestamp operations
-from datetime import datetime
+from datetime import datetime, timezone
 
 mock_dt = MagicMock()
-mock_dt.utcnow = lambda: datetime.utcnow()
+mock_dt.utcnow = lambda: datetime.now(timezone.utc)
 
 
 # Add parse_datetime for manifold persistence

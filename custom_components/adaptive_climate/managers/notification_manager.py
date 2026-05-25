@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta
+import time
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -19,6 +19,9 @@ class NotificationManager:
     Supports per-notification-id cooldowns to prevent spam.
     """
 
+    # Suppress service after this many consecutive failures to avoid log spam
+    _MAX_CONSECUTIVE_FAILURES = 3
+
     def __init__(
         self,
         hass: HomeAssistant,
@@ -28,7 +31,17 @@ class NotificationManager:
         self._hass = hass
         self._notify_service = notify_service
         self._persistent = persistent_notification
-        self._cooldowns: dict[str, datetime] = {}
+        self._cooldowns: dict[str, float] = {}
+        self._consecutive_failures: dict[str, int] = {}
+
+        # Warn early if the user included the "notify." domain prefix — it will still work
+        # (the code strips it) but it's easy to misconfigure and good to surface early.
+        if notify_service and notify_service.startswith("notify."):
+            _LOGGER.warning(
+                "notify_service %r starts with 'notify.' — the domain prefix will be stripped "
+                "automatically, but consider removing it from your config to avoid confusion",
+                notify_service,
+            )
 
     async def async_send(
         self,
@@ -58,42 +71,77 @@ class NotificationManager:
 
         # Send iOS notification
         if self._notify_service:
-            try:
-                if "." in self._notify_service:
-                    _, service_name = self._notify_service.split(".", 1)
-                else:
-                    service_name = self._notify_service
-
-                await self._hass.services.async_call(
-                    "notify",
-                    service_name,
-                    {"title": title, "message": ios_message},
-                    blocking=True,
+            ios_key = f"ios:{self._notify_service}"
+            ios_failures = self._consecutive_failures.get(ios_key, 0)
+            if ios_failures >= self._MAX_CONSECUTIVE_FAILURES:
+                _LOGGER.debug(
+                    "iOS notification via %r suppressed after %d consecutive failures",
+                    self._notify_service,
+                    ios_failures,
                 )
-                sent_any = True
-            except Exception:
-                _LOGGER.exception("Failed to send iOS notification")
+            else:
+                try:
+                    if "." in self._notify_service:
+                        _, service_name = self._notify_service.split(".", 1)
+                    else:
+                        service_name = self._notify_service
+
+                    await self._hass.services.async_call(
+                        "notify",
+                        service_name,
+                        {"title": title, "message": ios_message},
+                        blocking=True,
+                    )
+                    sent_any = True
+                    self._consecutive_failures[ios_key] = 0
+                except Exception:
+                    count = ios_failures + 1
+                    self._consecutive_failures[ios_key] = count
+                    if count >= self._MAX_CONSECUTIVE_FAILURES:
+                        _LOGGER.warning(
+                            "iOS notification via %r has failed %d times in a row; "
+                            "further attempts will be suppressed. Check your notify_service config.",
+                            self._notify_service,
+                            count,
+                        )
+                    else:
+                        _LOGGER.exception("Failed to send iOS notification")
 
         # Send persistent notification
         if self._persistent:
-            try:
-                await self._hass.services.async_call(
-                    "persistent_notification",
-                    "create",
-                    {
-                        "notification_id": notification_id,
-                        "title": title,
-                        "message": persistent_message or ios_message,
-                    },
-                    blocking=True,
-                )
-                sent_any = True
-            except Exception:
-                _LOGGER.exception("Failed to send persistent notification")
+            persistent_key = "persistent"
+            persistent_failures = self._consecutive_failures.get(persistent_key, 0)
+            if persistent_failures >= self._MAX_CONSECUTIVE_FAILURES:
+                _LOGGER.debug("Persistent notification suppressed after %d consecutive failures", persistent_failures)
+            else:
+                try:
+                    await self._hass.services.async_call(
+                        "persistent_notification",
+                        "create",
+                        {
+                            "notification_id": notification_id,
+                            "title": title,
+                            "message": persistent_message or ios_message,
+                        },
+                        blocking=True,
+                    )
+                    sent_any = True
+                    self._consecutive_failures[persistent_key] = 0
+                except Exception:
+                    count = persistent_failures + 1
+                    self._consecutive_failures[persistent_key] = count
+                    if count >= self._MAX_CONSECUTIVE_FAILURES:
+                        _LOGGER.warning(
+                            "Persistent notification has failed %d times in a row; "
+                            "further attempts will be suppressed.",
+                            count,
+                        )
+                    else:
+                        _LOGGER.exception("Failed to send persistent notification")
 
         # Record cooldown
         if cooldown_hours > 0 and sent_any:
-            self._cooldowns[notification_id] = datetime.now()
+            self._cooldowns[notification_id] = time.monotonic()
 
         return sent_any
 
@@ -102,5 +150,5 @@ class NotificationManager:
         last_sent = self._cooldowns.get(notification_id)
         if last_sent is None:
             return True
-        elapsed = datetime.now() - last_sent
-        return elapsed >= timedelta(hours=cooldown_hours)
+        elapsed = time.monotonic() - last_sent
+        return elapsed >= cooldown_hours * 3600

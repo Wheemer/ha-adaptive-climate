@@ -369,9 +369,14 @@ class KeManager:
     ) -> None:
         """Restore state from saved data.
 
+        Note: Both timestamps are monotonic-based and meaningless after a process
+        restart. They are always reset to None so steady-state and observation-rate
+        tracking restart fresh on the next temperature update.
+
         Args:
-            steady_state_start: Restored steady state start timestamp
-            last_ke_observation_time: Restored last Ke observation timestamp
+            steady_state_start: Ignored (monotonic timestamp, meaningless after restart).
+            last_ke_observation_time: Ignored (monotonic timestamp, meaningless after restart).
         """
-        self._steady_state_start = steady_state_start
-        self._last_ke_observation_time = last_ke_observation_time
+        # Monotonic timestamps are invalid after process restart; reset to fresh state.
+        self._steady_state_start = None
+        self._last_ke_observation_time = None

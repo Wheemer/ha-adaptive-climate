@@ -1,6 +1,6 @@
 """Tests for UndershootDetector."""
 
-import time
+from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
 import pytest
@@ -103,7 +103,7 @@ class TestResetOnOvershoot:
     def test_resets_preserve_other_state(self, detector):
         """Test that reset doesn't affect cumulative multiplier or cooldown."""
         detector.cumulative_ki_multiplier = 1.3
-        detector.last_adjustment_time = time.monotonic()
+        detector.last_adjustment_time = datetime.now(timezone.utc)
 
         # Trigger reset
         detector.update(temp=20.5, setpoint=20.0, dt_seconds=60.0, cold_tolerance=0.5)
@@ -201,13 +201,13 @@ class TestCooldownEnforcement:
         # Immediately check again - should be in cooldown
         assert detector.should_adjust_ki(cycles_completed=0) is False
 
-    @patch("custom_components.adaptive_climate.adaptive.undershoot_detector.time.monotonic")
-    def test_can_adjust_after_cooldown_expires(self, mock_time, detector):
+    @patch("custom_components.adaptive_climate.adaptive.undershoot_detector.dt_util.utcnow")
+    def test_can_adjust_after_cooldown_expires(self, mock_utcnow, detector):
         """Test that adjustment is allowed after cooldown expires."""
-        # Set initial time
-        mock_time.return_value = 1000.0
+        base_time = datetime(2024, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
 
-        # Trigger adjustment
+        # Trigger adjustment at base_time
+        mock_utcnow.return_value = base_time
         detector.update(temp=18.0, setpoint=20.0, dt_seconds=14400.0, cold_tolerance=0.5)
         detector.apply_adjustment()
 
@@ -215,11 +215,11 @@ class TestCooldownEnforcement:
         detector.update(temp=18.0, setpoint=20.0, dt_seconds=14400.0, cold_tolerance=0.5)
 
         # Still in cooldown (24h for floor_hydronic)
-        mock_time.return_value = 1000.0 + 23 * 3600  # 23 hours later
+        mock_utcnow.return_value = base_time + timedelta(hours=23)
         assert detector.should_adjust_ki(cycles_completed=0) is False
 
         # After cooldown expires
-        mock_time.return_value = 1000.0 + 25 * 3600  # 25 hours later
+        mock_utcnow.return_value = base_time + timedelta(hours=25)
         assert detector.should_adjust_ki(cycles_completed=0) is True
 
 
@@ -507,14 +507,15 @@ class TestApplyAdjustment:
         assert detector.cumulative_ki_multiplier == pytest.approx(expected, abs=0.001)
 
     def test_records_adjustment_time(self, detector):
-        """Test that adjustment time is recorded for cooldown."""
+        """Test that adjustment time is recorded as wall-clock datetime for cooldown."""
         assert detector.last_adjustment_time is None
 
-        before = time.monotonic()
+        before = datetime.now(timezone.utc)
         detector.apply_adjustment()
-        after = time.monotonic()
+        after = datetime.now(timezone.utc)
 
         assert detector.last_adjustment_time is not None
+        assert isinstance(detector.last_adjustment_time, datetime)
         assert before <= detector.last_adjustment_time <= after
 
     def test_returns_applied_multiplier(self, detector):
