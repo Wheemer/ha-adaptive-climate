@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
+from math import exp
 from typing import TYPE_CHECKING
 
 from homeassistant.util import dt as dt_util
@@ -36,6 +37,7 @@ from ..const import (
     MIN_CYCLES_FOR_LEARNING,
     SEVERE_UNDERSHOOT_MULTIPLIER,
     UNDERSHOOT_THRESHOLDS,
+    UNDERSHOOT_TBT_DECAY_TAU,
 )
 from .cycle_analysis import CycleMetrics
 
@@ -130,17 +132,27 @@ class UndershootDetector:
         """
         error = setpoint - temp
 
+        # Exponential decay on every call — stale accumulation fades when system is stable.
+        # This prevents a one-off cold night from triggering a Ki boost days later.
+        # tau is thermal-mass-scaled: floor 4h, radiator 2h, convector 1h, forced_air 30min.
+        tau = UNDERSHOOT_TBT_DECAY_TAU[self.heating_type]
+        decay = exp(-dt_seconds / tau)
+        self._time_below_target *= decay
+        self._thermal_debt *= decay
+
         if error > cold_tolerance:
             # Below acceptable range - accumulate time and debt
             self._time_below_target += dt_seconds
             # Convert to °C·hours for debt accumulation
             self._thermal_debt += error * (dt_seconds / 3600.0)
-            # Cap thermal debt to prevent runaway
-            self._thermal_debt = min(self._thermal_debt, 10.0)
+            # Cap thermal debt per heating type: 2 × SEVERE multiplier × threshold
+            # (e.g. floor_hydronic: 2 × 2.0 × 2.0 = 8.0 °C·h; forced_air: 2 × 2.0 × 0.5 = 2.0 °C·h)
+            debt_cap = SEVERE_UNDERSHOOT_MULTIPLIER * 2.0 * self._thresholds["debt_threshold"]
+            self._thermal_debt = min(self._thermal_debt, debt_cap)
         elif error < 0:
-            # Above setpoint - full reset
+            # Above setpoint - full reset (decay already applied above, explicit reset clears remainder)
             self.reset_realtime()
-        # else: within tolerance band (0 <= error <= cold_tolerance) - hold state
+        # else: within tolerance band (0 <= error <= cold_tolerance) - decay only, no accumulation
 
     def update(
         self,
@@ -188,9 +200,20 @@ class UndershootDetector:
                 cycle.undershoot or 0.0,
             )
         else:
-            # Reset on any successful cycle (has rise_time)
-            if cycle.rise_time is not None and self._consecutive_failures > 0:
-                _LOGGER.debug("Cycle reached setpoint, resetting consecutive failures counter")
+            # Reset only on a *clean* successful cycle: reached setpoint AND acceptable undershoot.
+            # A cycle that barely crossed the setpoint but with large undershoot still indicates
+            # chronic heating weakness — don't clear the failure streak.
+            undershoot_threshold = self._thresholds["undershoot_threshold"]
+            clean_success = cycle.rise_time is not None and (
+                cycle.undershoot is None or cycle.undershoot < undershoot_threshold
+            )
+            if clean_success and self._consecutive_failures > 0:
+                _LOGGER.debug(
+                    "Cycle reached setpoint cleanly (undershoot=%.2f°C < %.2f°C threshold), "
+                    "resetting consecutive failures counter",
+                    cycle.undershoot or 0.0,
+                    undershoot_threshold,
+                )
                 self._consecutive_failures = 0
 
     def _is_chronic_approach_failure(
@@ -273,6 +296,15 @@ class UndershootDetector:
             actual_ratio = current_ki / physics_baseline_ki
             if actual_ratio >= MAX_UNDERSHOOT_KI_MULTIPLIER:
                 return False
+
+        # H14: Guard against no-op adjustments at/near cap.
+        # When cumulative is just under 3.0 (floating-point), get_adjustment() can return
+        # ~1.0 → apply_adjustment records cooldown and resets state with zero actual Ki change.
+        # Treat any effective multiplier ≤ 1.001 as "already at cap".
+        _NO_OP_EPS = 0.001
+        effective_multiplier = self.get_adjustment(current_ki, physics_baseline_ki)
+        if effective_multiplier <= 1.0 + _NO_OP_EPS:
+            return False
 
         # Check real-time mode
         realtime_triggered = self._check_realtime_mode(cycles_completed)
@@ -370,10 +402,16 @@ class UndershootDetector:
         Returns:
             The multiplier that was applied.
         """
-        multiplier = self.get_adjustment(current_ki, physics_baseline_ki)
+        # C08: Clamp multiplier ≥ 1.0 — get_adjustment() can return ≤ 0 when cumulative
+        # is corrupt (e.g. bad restore produces negative max_allowed).  Applying a negative
+        # multiplier would flip cumulative negative and permanently break the cap gate.
+        multiplier = max(1.0, self.get_adjustment(current_ki, physics_baseline_ki))
 
-        # Update shared cumulative multiplier
-        self.cumulative_ki_multiplier *= multiplier
+        # Update shared cumulative multiplier, clamped to [1.0, cap] for safety
+        self.cumulative_ki_multiplier = min(
+            MAX_UNDERSHOOT_KI_MULTIPLIER,
+            max(1.0, self.cumulative_ki_multiplier * multiplier),
+        )
 
         # Record adjustment time for cooldown enforcement (wall-clock, survives restarts)
         self.last_adjustment_time = dt_util.utcnow()
@@ -550,10 +588,14 @@ class UndershootDetector:
             max_allowed = MAX_UNDERSHOOT_KI_MULTIPLIER / actual_ratio
         else:
             max_allowed = MAX_UNDERSHOOT_KI_MULTIPLIER / self.cumulative_ki_multiplier
-        multiplier = min(multiplier, max_allowed)
+        # C08: clamp ≥ 1.0 to prevent negative-multiplier corruption of cumulative tracker
+        multiplier = max(1.0, min(multiplier, max_allowed))
 
-        # Update shared cumulative multiplier
-        self.cumulative_ki_multiplier *= multiplier
+        # Update shared cumulative multiplier, clamped to [1.0, cap] for safety
+        self.cumulative_ki_multiplier = min(
+            MAX_UNDERSHOOT_KI_MULTIPLIER,
+            max(1.0, self.cumulative_ki_multiplier * multiplier),
+        )
 
         # Record adjustment time for cooldown enforcement (wall-clock, survives restarts)
         self.last_adjustment_time = dt_util.utcnow()

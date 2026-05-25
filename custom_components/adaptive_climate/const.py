@@ -49,6 +49,7 @@ class ThermostatCondition(StrEnum):
     OPEN_WINDOW = "open_window"
     NIGHT_SETBACK = "night_setback"
     LEARNING_GRACE = "learning_grace"
+    AUTO_LEARNING_WINDOW = "auto_learning_window"
 
 
 class ThermostatState(StrEnum):
@@ -70,6 +71,7 @@ class OverrideType(StrEnum):
     NIGHT_SETBACK = "night_setback"
     LEARNING_GRACE = "learning_grace"
     COOLING_SUPPLY_CLAMP = "cooling_supply_clamp"
+    AUTO_LEARNING_WINDOW = "auto_learning_window"
 
 
 # Override priority order (highest first)
@@ -80,6 +82,7 @@ OVERRIDE_PRIORITY = [
     OverrideType.COOLING_SUPPLY_CLAMP,
     OverrideType.PREHEATING,
     OverrideType.NIGHT_SETBACK,
+    OverrideType.AUTO_LEARNING_WINDOW,
     OverrideType.LEARNING_GRACE,
 ]
 
@@ -948,6 +951,16 @@ MAX_UNDERSHOOT_KI_MULTIPLIER = 3.0
 # Severe undershoot multiplier - thermal debt must exceed this multiple of threshold
 # for persistent undershoot detection to stay active beyond bootstrap phase
 SEVERE_UNDERSHOOT_MULTIPLIER = 2.0
+
+# Decay time constants for _time_below_target and _thermal_debt in real-time undershoot mode
+# Controls how quickly stale under-target accumulation decays during within-tolerance operation
+# Larger thermal mass = longer decay window (floor needs 4h to forget stale debt, forced_air 30min)
+UNDERSHOOT_TBT_DECAY_TAU: dict[HeatingType, float] = {
+    HeatingType.FLOOR_HYDRONIC: 4 * 3600,  # 4 hours
+    HeatingType.RADIATOR: 2 * 3600,  # 2 hours
+    HeatingType.CONVECTOR: 1 * 3600,  # 1 hour
+    HeatingType.FORCED_AIR: 30 * 60,  # 30 min
+}
 
 # Auto-apply PID constants
 # Maximum auto-applies per season (90 days) to prevent runaway tuning

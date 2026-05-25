@@ -16,6 +16,7 @@ from ..const import (
     PID_LIMITS,
     MIN_CYCLES_FOR_LEARNING,
     MAX_CYCLE_HISTORY,
+    MAX_UNDERSHOOT_KI_MULTIPLIER,
     MIN_ADJUSTMENT_INTERVAL,
     MIN_ADJUSTMENT_CYCLES,
     MIN_CONVERGENCE_CYCLES_FOR_KE,
@@ -23,6 +24,7 @@ from ..const import (
     CONFIDENCE_INCREASE_PER_GOOD_CYCLE,
     CLAMPED_OVERSHOOT_MULTIPLIER,
     DEFAULT_CLAMPED_OVERSHOOT_MULTIPLIER,
+    PIDChangeReason,
     get_convergence_thresholds,
     get_rule_thresholds,
     HeatingType as HeatingTypeEnum,
@@ -1437,8 +1439,10 @@ class AdaptiveLearner:
         last_boost_utc = None
         physics_baseline_ki: float | None = None
         if pid_history:
-            # Check both old reason names for backward compatibility
-            undershoot_utc = _get_last_adjustment_time_from_history(pid_history, "undershoot_ki_boost")
+            # Primary: use enum value to avoid drift if enum is ever renamed
+            undershoot_utc = _get_last_adjustment_time_from_history(pid_history, PIDChangeReason.UNDERSHOOT_BOOST.value)
+            # Legacy: "chronic_approach_ki_boost" was the old name before PIDChangeReason enum
+            # (written by versions prior to C09/H16; keep reading it for backward compatibility)
             chronic_utc = _get_last_adjustment_time_from_history(pid_history, "chronic_approach_ki_boost")
             # Use the most recent adjustment
             if undershoot_utc and chronic_utc:
@@ -1650,8 +1654,12 @@ class AdaptiveLearner:
             self._undershoot_detector.thermal_debt = undershoot_state.get("thermal_debt", 0.0)
             # Cycle mode state
             self._undershoot_detector._consecutive_failures = undershoot_state.get("consecutive_failures", 0)
-            # Shared state
-            self._undershoot_detector.cumulative_ki_multiplier = undershoot_state.get("cumulative_ki_multiplier", 1.0)
+            # Shared state — clamp to [1.0, cap] so a corrupt persisted value cannot
+            # permanently break the gate (negative would invert min(), >cap would block forever)
+            raw_cumulative = float(undershoot_state.get("cumulative_ki_multiplier", 1.0))
+            self._undershoot_detector.cumulative_ki_multiplier = min(
+                MAX_UNDERSHOOT_KI_MULTIPLIER, max(1.0, raw_cumulative)
+            )
             # Restore cooldown timestamp (C09/C10): stored as ISO string; ignore old monotonic floats
             last_adj_raw = undershoot_state.get("last_adjustment_time")
             if isinstance(last_adj_raw, str):

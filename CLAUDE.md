@@ -331,7 +331,7 @@ Unified detector with dual modes: real-time thermal debt tracking and cycle-base
 **Behavior:**
 - Applies Ki boost when pattern detected (respects cooldown and cumulative cap)
 - Cooldown scales with thermal mass (floor: 24h, radiator: 12h, convector: 6h, forced_air: 3h)
-- Cumulative multiplier capped at 2.0x to prevent runaway integral gain
+- Cumulative multiplier capped at 3.0x to prevent runaway integral gain
 - Decreases convergence confidence on adjustment (similar to poor cycles)
 
 **Integration:**
