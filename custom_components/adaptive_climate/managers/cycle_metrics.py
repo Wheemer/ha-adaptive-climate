@@ -93,17 +93,41 @@ class CycleMetricsRecorder:
         self._integral_at_setpoint_cross: float | None = None
         self._prev_cycle_end_temp: float | None = None
         self._transport_delay_minutes: float | None = None
+        # Mode captured at cycle start (M02: avoid re-read at finalization)
+        self._cycle_mode: str | None = None
 
         # Logging
         self._logger = logging.getLogger(f"{__name__}.{zone_id}")
 
     def reset_cycle_metrics(self) -> None:
-        """Reset all metrics tracking state for a new cycle."""
+        """Reset all metrics tracking state for a new cycle.
+
+        Note: _prev_cycle_end_temp and _cycle_mode are intentionally NOT reset
+        here — they must survive across cycle resets so the next cycle can use
+        them.  Use clear_prev_cycle_end_temp() on abort paths to invalidate a
+        stale value, and set_cycle_mode() to update the mode for the new cycle.
+        """
         self._interruption_history.clear()
         self._was_clamped = False
         self._integral_at_tolerance_entry = None
         self._integral_at_setpoint_cross = None
         self._transport_delay_minutes = None
+
+    def set_cycle_mode(self, hvac_mode: str) -> None:
+        """Capture the HVAC mode at cycle start for use at finalization (M02).
+
+        Args:
+            hvac_mode: Current HVAC mode string ("heat", "cool", etc.)
+        """
+        self._cycle_mode = hvac_mode
+
+    def clear_prev_cycle_end_temp(self) -> None:
+        """Invalidate the previous-cycle end temperature (M03).
+
+        Call this on abort paths so that inter_cycle_drift is not computed
+        against a stale temperature from a cycle that was never finalised.
+        """
+        self._prev_cycle_end_temp = None
 
     def add_interruption(self, timestamp: datetime, interruption_type: str) -> None:
         """Record an interruption in the current cycle.
@@ -353,6 +377,7 @@ class CycleMetricsRecorder:
         cycle_state_value: str,
         temperature_history: list[tuple[datetime, float]],
         outdoor_temp_history: list[tuple[datetime, float]],
+        cycle_start_temp: float | None = None,
     ) -> None:
         """Record metrics for the current cycle without resetting state.
 
@@ -365,6 +390,8 @@ class CycleMetricsRecorder:
             cycle_state_value: Current cycle state as string ("heating", "cooling", "settling")
             temperature_history: List of (timestamp, temperature) samples
             outdoor_temp_history: List of (timestamp, outdoor_temp) samples
+            cycle_start_temp: Temperature at cycle start, captured explicitly to survive
+                deque truncation (H07). Falls back to temperature_history[0][1] if None.
         """
         # Validate cycle
         is_valid, reason = self._is_cycle_valid(cycle_start_time, temperature_history)
@@ -397,12 +424,13 @@ class CycleMetricsRecorder:
             self._logger.warning("No target temperature recorded, cannot calculate metrics")
             return
 
-        # Get start temperature (first reading in history)
+        # Get start temperature — prefer explicitly captured value (H07: survives deque
+        # truncation on very long cycles) and fall back to first history entry.
         if len(temperature_history) < 1:
             self._logger.warning("No temperature history, cannot calculate metrics")
             return
 
-        start_temp = temperature_history[0][1]
+        start_temp = cycle_start_temp if cycle_start_temp is not None else temperature_history[0][1]
 
         # Calculate starting delta for weighted learning (target - actual)
         starting_delta = target_temp - start_temp
@@ -418,7 +446,13 @@ class CycleMetricsRecorder:
             target_temp,
             transport_delay_seconds=transport_delay_seconds,
         )
-        undershoot = calculate_undershoot(temperature_history, target_temp)
+        # C04: Undershoot must only consider the settling window (after heat delivery ends),
+        # not the raw cold pre-cycle temperature.  Using the full history causes every
+        # morning recovery cycle to report undershoot ≈ setback delta even when the
+        # target was fully reached, triggering false Ki boosts via UndershootDetector.
+        settling_start = self.get_settling_start_time()
+        settling_history = [(t, v) for t, v in temperature_history if settling_start is None or t >= settling_start]
+        undershoot = calculate_undershoot(settling_history or temperature_history, target_temp)
         settling_time = calculate_settling_time(temperature_history, target_temp, reference_time=self._device_off_time)
         oscillations = count_oscillations(temperature_history, target_temp)
         # Use cold_tolerance if available, else default (0.2) from calculate_rise_time
@@ -429,16 +463,14 @@ class CycleMetricsRecorder:
             rise_time_kwargs["threshold"] = self._cold_tolerance
         rise_time = calculate_rise_time(temperature_history, start_temp, target_temp, **rise_time_kwargs)
 
-        # Detect disturbances (requires environmental sensor data - not yet wired up)
-        # For now, heater_active_periods is estimated from cycle start/stop times
+        # C05: heater_active_periods from real device on/off event timestamps.
+        # The previous approach used the median sample timestamp as a fake heating-end,
+        # which mislabelled heating periods and polluted the disturbance detector.
         heater_active_periods = []
-        if cycle_start_time:
-            # Estimate heater was active from cycle start to first settling temp
-            heating_end = cycle_start_time
-            if len(temperature_history) > 0:
-                # Assume heating stopped sometime during the cycle
-                heating_end = temperature_history[len(temperature_history) // 2][0]
-            heater_active_periods.append((cycle_start_time, heating_end))
+        if self._device_on_time is not None:
+            end = self._device_off_time or (temperature_history[-1][0] if temperature_history else None)
+            if end is not None:
+                heater_active_periods.append((self._device_on_time, end))
 
         detector = DisturbanceDetector()
         disturbances = detector.detect_disturbances(
@@ -477,10 +509,17 @@ class CycleMetricsRecorder:
         # Calculate dead_time from transport delay if set
         dead_time = self._transport_delay_minutes
 
-        # Determine mode from current cycle state
+        # M02: Determine mode from the mode captured at cycle start, not by re-reading
+        # the current HVAC mode.  Re-reading at finalization causes a user flip after
+        # SETTLING_STARTED to be recorded with the wrong mode in the metrics row.
         mode = None
-        if cycle_state_value in ("heating", "settling"):
-            # Check if we were in a heating cycle
+        if self._cycle_mode is not None:
+            if self._cycle_mode == "heat":
+                mode = "heating"
+            elif self._cycle_mode == "cool":
+                mode = "cooling"
+        elif cycle_state_value in ("heating", "settling"):
+            # Fallback for backward compatibility (no mode captured yet)
             hvac_mode = self._get_hvac_mode()
             if hvac_mode == "heat":
                 mode = "heating"

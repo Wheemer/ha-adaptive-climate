@@ -25,6 +25,7 @@ from ..const import (
     DEFAULT_CLAMPED_OVERSHOOT_MULTIPLIER,
     get_convergence_thresholds,
     get_rule_thresholds,
+    HeatingType as HeatingTypeEnum,
 )
 
 # Import PID rule engine components
@@ -193,8 +194,6 @@ class AdaptiveLearner:
 
         # Undershoot detector for persistent temperature deficit detection (unified real-time + cycle)
         # Convert string to HeatingType enum if needed (default to RADIATOR if None)
-        from ..const import HeatingType as HeatingTypeEnum
-
         if heating_type is None:
             undershoot_heating_type = HeatingTypeEnum.RADIATOR
         else:
@@ -210,6 +209,18 @@ class AdaptiveLearner:
 
         # Heating rate learner for unified heating rate learning
         self._heating_rate_learner = HeatingRateLearner(heating_type or "radiator")
+
+        # Optional reference to PIDGainsManager; wired from climate.py after init.
+        # Enables seasonal-limit safety gate to use real pid_history (C02 fix).
+        self._pid_gains_manager: Any = None
+
+    def set_pid_gains_manager(self, manager: Any) -> None:
+        """Wire the PIDGainsManager so seasonal-limit safety gates use real history.
+
+        Args:
+            manager: PIDGainsManager instance (or None to remove)
+        """
+        self._pid_gains_manager = manager
 
     @property
     def cycle_history(self) -> list[CycleMetrics]:
@@ -282,6 +293,19 @@ class AdaptiveLearner:
     def _auto_apply_count(self, value: int) -> None:
         """Backward-compatible alias setter for _heating_auto_apply_count."""
         self._confidence._heating_auto_apply_count = value
+
+    def increment_auto_apply_count(self) -> int:
+        """Increment and return the auto-apply counter.
+
+        Use this instead of direct mutation (``learner._auto_apply_count += 1``)
+        to keep the interface clean. Note: currently always increments the heating
+        counter; mode-aware fix tracked in 04-learning/C03.
+
+        Returns:
+            The new counter value after incrementing.
+        """
+        self._confidence._heating_auto_apply_count += 1
+        return self._confidence._heating_auto_apply_count
 
     @property
     def _convergence_confidence(self) -> float:
@@ -604,8 +628,8 @@ class AdaptiveLearner:
 
         # Auto-apply safety gates (when called for automatic PID application)
         if check_auto_apply:
-            # Delegate to auto-apply manager for all safety gate checks
-            # Note: pid_history is now managed by PIDGainsManager, not AdaptiveLearner
+            # Pull real pid_history from PIDGainsManager if wired; fall back to empty list.
+            _pid_history = self._pid_gains_manager.get_history(mode) if self._pid_gains_manager is not None else []
             gates_passed, min_interval_hours, min_adjustment_cycles, min_cycles = (
                 self._auto_apply.check_auto_apply_safety_gates(
                     validation_manager=self._validation,
@@ -614,7 +638,7 @@ class AdaptiveLearner:
                     current_ki=current_ki,
                     current_kd=current_kd,
                     outdoor_temp=outdoor_temp,
-                    pid_history=[],  # Empty list - history is now managed by PIDGainsManager
+                    pid_history=_pid_history,
                     mode=mode,
                     contribution_tracker=self._contribution_tracker,
                 )
@@ -905,34 +929,16 @@ class AdaptiveLearner:
         self._undershoot_detector.reset_all()  # Reset all undershoot state
 
         # Reset contribution tracker (no reset method - create fresh instance)
-        from ..const import HeatingType as HeatingTypeEnum
-
         if self._heating_type is None:
             heating_type_enum = HeatingTypeEnum.RADIATOR
         elif isinstance(self._heating_type, str):
             heating_type_enum = HeatingTypeEnum(self._heating_type)
         else:
             heating_type_enum = self._heating_type
-        from .confidence_contribution import ConfidenceContributionTracker
-
         self._contribution_tracker = ConfidenceContributionTracker(heating_type_enum)
 
         # Reset heating rate learner (no reset method - create fresh instance)
-        from .heating_rate_learner import HeatingRateLearner
-
         self._heating_rate_learner = HeatingRateLearner(self._heating_type or "radiator")
-
-    def get_previous_pid(self) -> dict[str, float] | None:
-        """Get the previous PID configuration for rollback.
-
-        DEPRECATED: PID history is now managed by PIDGainsManager.
-        This method is kept for backward compatibility but always returns None.
-
-        Returns:
-            None (history is now managed by PIDGainsManager)
-        """
-        _LOGGER.debug("get_previous_pid() called on AdaptiveLearner - PID history now managed by PIDGainsManager")
-        return None
 
     def set_physics_baseline(self, kp: float, ki: float, kd: float) -> None:
         """Set the physics-based baseline PID values for drift calculation.
@@ -1158,9 +1164,9 @@ class AdaptiveLearner:
                 starting_delta=metrics.starting_delta,
                 is_stable=is_stable,
                 outcome=outcome,
-                effective_duty=None,  # TODO: Add effective_duty to metrics
+                effective_duty=None,
                 outdoor_temp=metrics.outdoor_temp_avg,
-                is_night_setback_recovery=False,  # TODO: Add night setback tracking
+                is_night_setback_recovery=False,
             )
 
             # Track recovery cycles for tier gating
@@ -1349,14 +1355,15 @@ class AdaptiveLearner:
             None if all checks pass (OK to auto-apply),
             Error message string if any check fails (blocked).
         """
-        # PID history is now managed by PIDGainsManager, pass empty list
+        # Pull real pid_history from PIDGainsManager if wired; fall back to empty list.
+        _pid_history = self._pid_gains_manager.get_history(None) if self._pid_gains_manager is not None else []
         return self._validation.check_auto_apply_limits(
             current_kp,
             current_ki,
             current_kd,
             self._heating_auto_apply_count,
             self._cooling_auto_apply_count,
-            [],  # Empty list - history is now managed by PIDGainsManager
+            _pid_history,
         )
 
     def record_seasonal_shift(self) -> None:
@@ -1624,6 +1631,12 @@ class AdaptiveLearner:
         self._consecutive_converged_cycles = restored["consecutive_converged_cycles"]
         self._pid_converged_for_ke = restored["pid_converged_for_ke"]
 
+        # C04: Restore cycle counts from cycle history length.
+        # The counters were never serialized so they defaulted to 0 on restart,
+        # causing learning_status to regress to 'collecting' until cycles re-accumulated.
+        self._confidence._heating_cycle_count = len(self._heating_cycle_history)
+        self._confidence._cooling_cycle_count = len(self._cooling_cycle_history)
+
         # Restore unified undershoot detector state (serialization module already handles v7->v8 migration)
         undershoot_state = restored.get("undershoot_detector_state", {})
         if undershoot_state:
@@ -1636,20 +1649,16 @@ class AdaptiveLearner:
             self._undershoot_detector.cumulative_ki_multiplier = undershoot_state.get("cumulative_ki_multiplier", 1.0)
 
         # Restore contribution tracker state (serialization module handles v8->v9 migration)
-        from .confidence_contribution import ConfidenceContributionTracker
-
         contribution_state = restored.get("contribution_tracker_state", {})
         if contribution_state:
             # Use from_dict to restore state
             self._contribution_tracker = ConfidenceContributionTracker.from_dict(contribution_state, self._heating_type)
 
         # Restore heating rate learner state (serialization module handles v9->v10 migration)
-        from .heating_rate_learner import HeatingRateLearner
-
         heating_rate_learner_state = restored.get("heating_rate_learner_state", {})
         if heating_rate_learner_state:
             # Use from_dict to restore state
-            self._heating_rate_learner = HeatingRateLearner.from_dict(heating_rate_learner_state)
+            self._heating_rate_learner = HeatingRateLearner.from_dict(heating_rate_learner_state, self._heating_type)
         else:
             # Migration from v9 and earlier: create fresh learner
             self._heating_rate_learner = HeatingRateLearner(self._heating_type)

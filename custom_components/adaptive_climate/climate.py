@@ -538,6 +538,8 @@ class AdaptiveThermostat(ClimateControlMixin, ClimateHandlersMixin, ClimateEntit
                         self.entity_id,
                         adaptive_learner._auto_apply_count,
                     )
+                    # Wire PIDGainsManager so seasonal-limit gate uses real pid_history (C02)
+                    adaptive_learner.set_pid_gains_manager(self._gains_manager)
 
         # Register manifold configuration with coordinator
         if coordinator and self._zone_id:
@@ -1325,30 +1327,45 @@ class AdaptiveThermostat(ClimateControlMixin, ClimateHandlersMixin, ClimateEntit
             old_values = result.get("old_values", {})
             new_values = result.get("new_values", {})
 
-            await self.hass.services.async_call(
-                "persistent_notification",
-                "create",
-                {
-                    "notification_id": f"adaptive_climate_auto_apply_{self._zone_id}",
-                    "title": f"🔧 PID Auto-Applied: {self._name}",
-                    "message": (
-                        f"Adaptive PID values have been automatically applied.\n\n"
-                        f"**Previous values:**\n"
-                        f"- Kp: {old_values.get('kp', 'N/A'):.4f}\n"
-                        f"- Ki: {old_values.get('ki', 'N/A'):.5f}\n"
-                        f"- Kd: {old_values.get('kd', 'N/A'):.3f}\n\n"
-                        f"**New values:**\n"
-                        f"- Kp: {new_values.get('kp', 'N/A'):.4f}\n"
-                        f"- Ki: {new_values.get('ki', 'N/A'):.5f}\n"
-                        f"- Kd: {new_values.get('kd', 'N/A'):.3f}\n\n"
-                        f"The system will validate performance over the next 5 cycles. "
-                        f"If performance degrades, it will automatically rollback.\n\n"
-                        f"To manually rollback, call service: "
-                        f"`adaptive_climate.rollback_pid`"
-                    ),
-                },
-                blocking=False,
-            )
+            try:
+                _old_kp = float(old_values.get("kp", 0.0))
+                _old_ki = float(old_values.get("ki", 0.0))
+                _old_kd = float(old_values.get("kd", 0.0))
+                _new_kp = float(new_values.get("kp", 0.0))
+                _new_ki = float(new_values.get("ki", 0.0))
+                _new_kd = float(new_values.get("kd", 0.0))
+                await self.hass.services.async_call(
+                    "persistent_notification",
+                    "create",
+                    {
+                        "notification_id": f"adaptive_climate_auto_apply_{self._zone_id}",
+                        "title": f"🔧 PID Auto-Applied: {self._name}",
+                        "message": (
+                            f"Adaptive PID values have been automatically applied.\n\n"
+                            f"**Previous values:**\n"
+                            f"- Kp: {_old_kp:.4f}\n"
+                            f"- Ki: {_old_ki:.5f}\n"
+                            f"- Kd: {_old_kd:.3f}\n\n"
+                            f"**New values:**\n"
+                            f"- Kp: {_new_kp:.4f}\n"
+                            f"- Ki: {_new_ki:.5f}\n"
+                            f"- Kd: {_new_kd:.3f}\n\n"
+                            f"The system will validate performance over the next 5 cycles. "
+                            f"If performance degrades, it will automatically rollback.\n\n"
+                            f"To manually rollback, call service: "
+                            f"`adaptive_climate.rollback_pid`"
+                        ),
+                    },
+                    blocking=False,
+                )
+            except Exception as _notify_err:
+                _LOGGER.error(
+                    "%s: Failed to send auto-apply notification: %s (old=%s, new=%s)",
+                    self.entity_id,
+                    _notify_err,
+                    old_values,
+                    new_values,
+                )
             _LOGGER.info(
                 "%s: Auto-applied PID values: Kp=%.4f→%.4f, Ki=%.5f→%.5f, Kd=%.3f→%.3f",
                 self.entity_id,

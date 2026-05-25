@@ -118,14 +118,22 @@ class CycleTrackerManager:
         self._state: CycleState = CycleState.IDLE
         self._cycle_start_time: datetime | None = None
         self._cycle_target_temp: float | None = None
-        self._temperature_history: deque[tuple[datetime, float]] = deque(maxlen=2000)
-        self._outdoor_temp_history: list[tuple[datetime, float]] = []
+        # H07: capacity raised to 5000 so long cycles at sub-30s sampling don't
+        # truncate the start of history and corrupt inter_cycle_drift / settling_mae.
+        # _cycle_start_temp is captured explicitly at cycle-start so we never rely
+        # on temperature_history[0] (which may be evicted from the deque).
+        self._temperature_history: deque[tuple[datetime, float]] = deque(maxlen=5000)
+        self._cycle_start_temp: float | None = None
+        # H08: bounded deque instead of unbounded list; outdoor temp updates are
+        # infrequent so 500 samples is ample for a single cycle.
+        self._outdoor_temp_history: deque[tuple[datetime, float]] = deque(maxlen=500)
         self._settling_timeout_handle = None
         self._last_interruption_reason: str | None = None  # Persists across cycle resets
         self._restoration_complete: bool = False  # Gate temperature updates until restoration done
         self._finalizing: bool = False  # Guard against concurrent finalization calls
 
-        # Calculate dynamic settling timeout based on thermal mass
+        # Calculate dynamic settling timeout based on thermal mass.
+        # Fallback chain: explicit config → tau-derived → heating-type table → generic 120 min.
         self._settling_timeout_source = "default"
         if settling_timeout_minutes is not None:
             # Use explicit override
@@ -138,8 +146,19 @@ class CycleTrackerManager:
                 max(SETTLING_TIMEOUT_MIN, min(SETTLING_TIMEOUT_MAX, calculated_timeout))
             )
             self._settling_timeout_source = f"calculated (tau={thermal_time_constant:.1f}h)"
+        elif heating_type is not None and heating_type in HEATING_TYPE_CHARACTERISTICS:
+            # H09: use heating-type table for a type-specific default rather than a
+            # one-size-fits-all 120 min.  Fast systems (convector/forced_air) would
+            # otherwise waste up to 2 h waiting for settling that never comes.
+            ht_chars = HEATING_TYPE_CHARACTERISTICS[HeatingType(heating_type)]
+            if "max_settling_time" in ht_chars:
+                self._max_settling_time_minutes = ht_chars["max_settling_time"]
+                self._settling_timeout_source = f"heating_type ({heating_type})"
+            else:
+                self._max_settling_time_minutes = 120
+                self._settling_timeout_source = "default"
         else:
-            # Default fallback
+            # Generic fallback when no heating type is configured
             self._max_settling_time_minutes = 120
             self._settling_timeout_source = "default"
 
@@ -367,13 +386,15 @@ class CycleTrackerManager:
 
         if self._state == CycleState.SETTLING and not self._finalizing:
             self._logger.info("Finalizing previous cycle before starting new one")
-            # Record metrics synchronously before starting new cycle
+            # Record metrics synchronously before starting new cycle.
+            # Pass the previous cycle's captured start temp (H07).
             self._metrics_recorder.record_cycle_metrics(
                 cycle_start_time=self._cycle_start_time,
                 cycle_target_temp=self._cycle_target_temp,
                 cycle_state_value=self._state.value,
                 temperature_history=list(self._temperature_history),
-                outdoor_temp_history=self._outdoor_temp_history.copy(),
+                outdoor_temp_history=list(self._outdoor_temp_history),
+                cycle_start_temp=self._cycle_start_temp,
             )
 
         # Transition to new state
@@ -386,11 +407,14 @@ class CycleTrackerManager:
         self._last_interruption_reason = None
         # Note: clamping state is cleared by reset_cycle_metrics() call above
 
-        current_temp = self._get_current_temp()
+        # H07: capture start temp from the event so it survives deque truncation.
+        self._cycle_start_temp = event.current_temp if event.current_temp is not None else self._get_current_temp()
+        # M02: capture mode at cycle start so finalization uses it even after a flip.
+        self._metrics_recorder.set_cycle_mode(event.hvac_mode)
         self._logger.info(
             "Cycle started: target=%.2f°C, current=%.2f°C",
             self._cycle_target_temp or 0.0,
-            current_temp or 0.0,
+            self._cycle_start_temp or 0.0,
         )
 
     def _on_settling_started(self, event: SettlingStartedEvent) -> None:
@@ -552,7 +576,7 @@ class CycleTrackerManager:
                 self._zone_id,
                 f": {reason}" if reason else "",
             )
-            self._reset_cycle_state()
+            self._reset_cycle_state(is_abort=True)
 
     def cleanup(self) -> None:
         """Clean up event subscriptions and timers.
@@ -660,16 +684,22 @@ class CycleTrackerManager:
         if should_abort:
             # Abort the cycle
             self._logger.info("Cycle aborted: %s", reason)
-            self._reset_cycle_state()
+            self._reset_cycle_state(is_abort=True)
         else:
             # Continue tracking but mark as interrupted
             self._logger.info("Cycle interrupted (continuing): %s", reason)
 
-    def _reset_cycle_state(self) -> None:
+    def _reset_cycle_state(self, is_abort: bool = False) -> None:
         """Reset cycle state to IDLE and clear all cycle data.
 
-        This helper method provides consistent cleanup of cycle state,
-        ensuring all state variables are properly reset.
+        Args:
+            is_abort: True when the cycle is being discarded without recording
+                metrics (contact sensor, major setpoint change, mode change,
+                explicit abort).  When True, _prev_cycle_end_temp is also cleared
+                so the next cycle doesn't compute a bogus inter_cycle_drift against
+                a temperature from a cycle that was never finalised (M03).
+                False (default) for normal finalization — _prev_cycle_end_temp has
+                already been updated by record_cycle_metrics() and must be preserved.
         """
         # Clear temperature history
         self._temperature_history.clear()
@@ -678,9 +708,14 @@ class CycleTrackerManager:
         # Reset cycle tracking variables
         self._cycle_start_time = None
         self._cycle_target_temp = None
+        self._cycle_start_temp = None
 
         # Clear metrics tracking state
         self._metrics_recorder.reset_cycle_metrics()
+        if is_abort:
+            # M03: Invalidate stale end-temp so the next cycle skips inter_cycle_drift
+            # instead of comparing against a temperature from an aborted cycle.
+            self._metrics_recorder.clear_prev_cycle_end_temp()
 
         # Set state to IDLE
         self._state = CycleState.IDLE
@@ -777,13 +812,16 @@ class CycleTrackerManager:
             self._settling_timeout_handle()
             self._settling_timeout_handle = None
 
-        # Record metrics using the metrics recorder
+        # Record metrics using the metrics recorder.
+        # Pass the explicitly captured start temp (H07) to avoid using the
+        # (possibly truncated) deque head as cycle start temperature.
         self._metrics_recorder.record_cycle_metrics(
             cycle_start_time=self._cycle_start_time,
             cycle_target_temp=self._cycle_target_temp,
             cycle_state_value=self._state.value,
             temperature_history=list(self._temperature_history),
-            outdoor_temp_history=self._outdoor_temp_history.copy(),
+            outdoor_temp_history=list(self._outdoor_temp_history),
+            cycle_start_temp=self._cycle_start_temp,
         )
 
         # Reset cycle state (clears interruption flags and transitions to IDLE)

@@ -179,11 +179,26 @@ class ValidationManager:
         # Check 2: Seasonal limit (auto-applies in last 90 days)
         now = dt_util.utcnow()
         cutoff = now - timedelta(days=90)
-        recent_applies = [
-            entry
-            for entry in pid_history
-            if entry.get("reason") == "auto_apply" and entry.get("timestamp", now) > cutoff
-        ]
+        recent_applies = []
+        for entry in pid_history:
+            if entry.get("reason") != "auto_apply":
+                continue
+            ts_raw = entry.get("timestamp")
+            if ts_raw is None:
+                # No timestamp → treat as recent (conservative)
+                recent_applies.append(entry)
+                continue
+            try:
+                ts = datetime.fromisoformat(str(ts_raw))
+                # Ensure timezone-aware for comparison with utcnow()
+                if ts.tzinfo is None:
+                    from datetime import timezone
+
+                    ts = ts.replace(tzinfo=timezone.utc)
+                if ts > cutoff:
+                    recent_applies.append(entry)
+            except (ValueError, TypeError):
+                _LOGGER.warning("Skipping malformed PID history timestamp: %r", ts_raw)
         if len(recent_applies) >= MAX_AUTO_APPLIES_PER_SEASON:
             return (
                 f"Seasonal limit reached: {len(recent_applies)} auto-applies in last 90 days "

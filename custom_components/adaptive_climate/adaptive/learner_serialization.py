@@ -189,7 +189,7 @@ def _default_learner_state() -> dict[str, Any]:
             "recovery_cycle_count": 0,
         },
         "heating_rate_learner_state": {},
-        "format_version": "v10",
+        "format_version": CURRENT_VERSION,
     }
 
 
@@ -217,8 +217,12 @@ def restore_learner_from_dict(data: dict[str, Any]) -> dict[str, Any]:
         - format_version: 'v10' to indicate v10 format
     """
     stored_version = data.get("format_version", 0)
+    try:
+        stored_version = int(stored_version)
+    except (TypeError, ValueError):
+        stored_version = 0
 
-    if stored_version != 10:
+    if stored_version != CURRENT_VERSION:
         _LOGGER.warning(
             "Unrecognized learner format version %s, using defaults",
             stored_version,
@@ -291,5 +295,5 @@ def restore_learner_from_dict(data: dict[str, Any]) -> dict[str, Any]:
         "undershoot_detector_state": undershoot_detector_state,
         "contribution_tracker_state": contribution_tracker_state,
         "heating_rate_learner_state": heating_rate_learner_state,
-        "format_version": "v10",
+        "format_version": CURRENT_VERSION,
     }

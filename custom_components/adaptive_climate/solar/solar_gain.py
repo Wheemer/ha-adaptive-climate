@@ -66,16 +66,18 @@ class SolarGainPattern:
 class SolarGainLearner:
     """Learns solar gain patterns from observed temperature changes."""
 
-    def __init__(self, zone_id: str, orientation: WindowOrientation):
+    def __init__(self, zone_id: str, orientation: WindowOrientation, southern_hemisphere: bool = False):
         """
         Initialize solar gain learner.
 
         Args:
             zone_id: Zone identifier
             orientation: Window orientation for this zone
+            southern_hemisphere: If True, flip month→season mapping (AU/BR/NZ/ZA etc.)
         """
         self.zone_id = zone_id
         self.orientation = orientation
+        self.southern_hemisphere = southern_hemisphere
         self.measurements: list[SolarGainMeasurement] = []
         self.patterns: dict[tuple[int, Season, CloudCoverage], SolarGainPattern] = {}
 
@@ -108,7 +110,11 @@ class SolarGainLearner:
 
     def _get_season(self, dt: datetime) -> Season:
         """
-        Determine season from datetime.
+        Determine season from datetime, accounting for hemisphere.
+
+        Northern Hemisphere calendar dates are used as the base mapping.
+        When southern_hemisphere=True the result is flipped by 2 seasons
+        so that December→SUMMER for AU/NZ/ZA/BR users.
 
         Args:
             dt: Datetime to check
@@ -119,32 +125,27 @@ class SolarGainLearner:
         month = dt.month
         day = dt.day
 
-        # Winter: Dec 21 - Mar 20
-        if month == 12 and day >= 21:
-            return Season.WINTER
-        if month in [1, 2]:
-            return Season.WINTER
-        if month == 3 and day < 21:
-            return Season.WINTER
+        # Northern-hemisphere calendar mapping
+        if (month == 12 and day >= 21) or month in (1, 2) or (month == 3 and day < 21):
+            nh_season = Season.WINTER
+        elif (month == 3 and day >= 21) or month in (4, 5) or (month == 6 and day < 21):
+            nh_season = Season.SPRING
+        elif (month == 6 and day >= 21) or month in (7, 8) or (month == 9 and day < 21):
+            nh_season = Season.SUMMER
+        else:
+            nh_season = Season.FALL
 
-        # Spring: Mar 21 - Jun 20
-        if month == 3 and day >= 21:
-            return Season.SPRING
-        if month in [4, 5]:
-            return Season.SPRING
-        if month == 6 and day < 21:
-            return Season.SPRING
+        if not self.southern_hemisphere:
+            return nh_season
 
-        # Summer: Jun 21 - Sep 20
-        if month == 6 and day >= 21:
-            return Season.SUMMER
-        if month in [7, 8]:
-            return Season.SUMMER
-        if month == 9 and day < 21:
-            return Season.SUMMER
-
-        # Fall: Sep 21 - Dec 20
-        return Season.FALL
+        # Southern hemisphere: seasons are opposite
+        _OPPOSITE: dict[Season, Season] = {
+            Season.WINTER: Season.SUMMER,
+            Season.SUMMER: Season.WINTER,
+            Season.SPRING: Season.FALL,
+            Season.FALL: Season.SPRING,
+        }
+        return _OPPOSITE[nh_season]
 
     def _update_patterns(self) -> None:
         """Update learned patterns from all measurements."""
@@ -199,17 +200,17 @@ class SolarGainLearner:
         # Try same hour and season but any cloud coverage
         for (h, s, c), pattern in self.patterns.items():
             if h == hour and s == season:
-                # Apply cloud coverage adjustment
                 adjustment = self._get_cloud_adjustment(c, cloud_coverage)
-                return pattern.avg_gain_c_per_hour * adjustment
+                if adjustment > 0.0:  # 0.0 means "skip — back-extrapolation unreliable"
+                    return pattern.avg_gain_c_per_hour * adjustment
 
         # Try same hour but any season/cloud
         for (h, s, c), pattern in self.patterns.items():
             if h == hour:
-                # Apply seasonal and cloud adjustments
                 seasonal_adj = self._get_seasonal_adjustment(s, season)
                 cloud_adj = self._get_cloud_adjustment(c, cloud_coverage)
-                return pattern.avg_gain_c_per_hour * seasonal_adj * cloud_adj
+                if cloud_adj > 0.0:  # 0.0 means "skip — back-extrapolation unreliable"
+                    return pattern.avg_gain_c_per_hour * seasonal_adj * cloud_adj
 
         # No learned pattern, use fallback
         return fallback_gain_c_per_hour
@@ -223,9 +224,9 @@ class SolarGainLearner:
             actual_cloud: Actual cloud coverage
 
         Returns:
-            Adjustment factor (0.0-1.0)
+            Adjustment factor (0.0–3.0); callers must treat 0.0 as "skip this pattern".
         """
-        # Cloud coverage reduction factors
+        # Cloud coverage reduction factors relative to clear sky
         cloud_factors = {
             CloudCoverage.CLEAR: 1.0,
             CloudCoverage.PARTLY_CLOUDY: 0.7,
@@ -236,10 +237,17 @@ class SolarGainLearner:
         learned_factor = cloud_factors[learned_cloud]
         actual_factor = cloud_factors[actual_cloud]
 
-        # If learned is clear, scale down by actual factor
-        if learned_factor > 0:
-            return actual_factor / learned_factor
-        return actual_factor
+        if learned_factor <= 0:
+            return actual_factor
+
+        # Skip back-extrapolation when actual conditions are much clearer than learned data.
+        # Dividing CLEAR(1.0) / OVERCAST(0.1) = 10× is unreliable — the pattern was
+        # learned under very different conditions with no clear-sky baseline.
+        if actual_factor > 2.0 * learned_factor:
+            return 0.0  # Caller skips this pattern when 0.0 is returned
+
+        # Cap at 3× to prevent runaway even within the allowed range
+        return min(actual_factor / learned_factor, 3.0)
 
     def _get_seasonal_adjustment(self, learned_season: Season, actual_season: Season) -> float:
         """
@@ -303,9 +311,15 @@ class SolarGainLearner:
 class SolarGainManager:
     """Manages solar gain learning for multiple zones."""
 
-    def __init__(self):
-        """Initialize solar gain manager."""
+    def __init__(self, southern_hemisphere: bool = False):
+        """Initialize solar gain manager.
+
+        Args:
+            southern_hemisphere: If True, flip the month→season mapping for all zones
+                                 (pass ``hass.config.latitude < 0`` to derive this).
+        """
         self.learners: dict[str, SolarGainLearner] = {}
+        self._southern_hemisphere = southern_hemisphere
 
     def configure_zone(self, zone_id: str, orientation: WindowOrientation) -> None:
         """
@@ -315,7 +329,7 @@ class SolarGainManager:
             zone_id: Zone identifier
             orientation: Window orientation for this zone
         """
-        self.learners[zone_id] = SolarGainLearner(zone_id, orientation)
+        self.learners[zone_id] = SolarGainLearner(zone_id, orientation, self._southern_hemisphere)
 
     def add_measurement(
         self, zone_id: str, timestamp: datetime, temperature_rise_c: float, cloud_coverage: CloudCoverage

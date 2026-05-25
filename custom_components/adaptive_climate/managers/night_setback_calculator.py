@@ -110,15 +110,12 @@ class NightSetbackCalculator:
     def get_weather_condition(self) -> str | None:
         """Get current weather condition from coordinator's weather entity."""
         coordinator = self._hass.data.get(DOMAIN, {}).get("coordinator")
-        if coordinator and hasattr(coordinator, "_weather_entity"):
-            weather_state = self._hass.states.get(coordinator._weather_entity)
-            if weather_state:
-                return weather_state.state
-        # Try common weather entity names as fallback
-        for entity_id in ["weather.home", "weather.knmi_home", "weather.forecast_home"]:
-            weather_state = self._hass.states.get(entity_id)
-            if weather_state:
-                return weather_state.state
+        if coordinator is not None:
+            weather_entity_id = coordinator.weather_entity
+            if weather_entity_id:
+                weather_state = self._hass.states.get(weather_entity_id)
+                if weather_state:
+                    return weather_state.state
         return None
 
     def calculate_dynamic_night_end(self) -> dt_time | None:
@@ -283,20 +280,35 @@ class NightSetbackCalculator:
                 # Fallback: use recovery_deadline or default 07:00
                 deadline = self._night_setback_config.get("recovery_deadline")
                 if deadline:
-                    hour, minute = map(int, deadline.split(":"))
-                    end_time = dt_time(hour, minute)
+                    try:
+                        hour, minute = map(int, deadline.split(":"))
+                        end_time = dt_time(hour, minute)
+                    except (ValueError, AttributeError):
+                        _LOGGER.error(
+                            "%s: Invalid recovery_deadline %r — expected HH:MM, falling back to 07:00",
+                            self._entity_id,
+                            deadline,
+                        )
+                        end_time = dt_time(7, 0)
                 else:
                     end_time = dt_time(7, 0)
             else:
                 # If recovery_deadline is set and earlier than dynamic end, use it
                 deadline_str = self._night_setback_config.get("recovery_deadline")
                 if deadline_str:
-                    hour, minute = map(int, deadline_str.split(":"))
-                    deadline_time = dt_time(hour, minute)
-                    if deadline_time < end_time:
-                        end_time = deadline_time
-                        _LOGGER.debug(
-                            "%s: Using recovery_deadline %s (earlier than dynamic end time)",
+                    try:
+                        hour, minute = map(int, deadline_str.split(":"))
+                        deadline_time = dt_time(hour, minute)
+                        if deadline_time < end_time:
+                            end_time = deadline_time
+                            _LOGGER.debug(
+                                "%s: Using recovery_deadline %s (earlier than dynamic end time)",
+                                self._entity_id,
+                                deadline_str,
+                            )
+                    except (ValueError, AttributeError):
+                        _LOGGER.error(
+                            "%s: Invalid recovery_deadline %r — expected HH:MM, ignoring",
                             self._entity_id,
                             deadline_str,
                         )
