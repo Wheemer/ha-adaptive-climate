@@ -104,7 +104,7 @@ class TestV9FormatSerialization:
         restored = restore_learner_from_dict(v10_data)
 
         # Should detect v10 format
-        assert restored["format_version"] == "v10"
+        assert restored["format_version"] == 10
 
         # Should have contribution_tracker_state
         assert "contribution_tracker_state" in restored
