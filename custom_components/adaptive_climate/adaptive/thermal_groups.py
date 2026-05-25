@@ -234,6 +234,34 @@ class ThermalGroupManager:
 
         return [z for z in group.zones if z != leader_zone_id]
 
+    def remove_zone(self, zone_id: str) -> None:
+        """Remove a zone from its thermal group.
+
+        Called during zone unregistration (e.g. config entry reload or zone removed).
+        If the zone is a group leader, the group retains the remaining zones; no
+        automatic leader promotion is performed.  An empty group is removed entirely.
+
+        Args:
+            zone_id: Zone identifier to remove.
+        """
+        group_name = self._zone_to_group.pop(zone_id, None)
+        if group_name is None:
+            # Zone was not in any group — nothing to do
+            return
+
+        group = self._groups.get(group_name)
+        if group is None:
+            return
+
+        group.zones = [z for z in group.zones if z != zone_id]
+        _LOGGER.debug("Removed zone %s from thermal group %s", zone_id, group_name)
+
+        # Clean up group if it became empty
+        if not group.zones:
+            del self._groups[group_name]
+            self._transfer_history.pop(group_name, None)
+            _LOGGER.debug("Removed empty thermal group %s", group_name)
+
     def record_heat_output(self, zone_id: str, heat_output: float) -> None:
         """Record heat output for a zone in a source group.
 

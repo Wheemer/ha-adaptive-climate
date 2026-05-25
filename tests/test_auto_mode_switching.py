@@ -470,7 +470,11 @@ class TestAsyncEvaluate:
 
     @pytest.mark.asyncio
     async def test_respects_min_switch_interval(self, mock_hass, mock_coordinator, default_config):
-        """Test respects minimum switch interval."""
+        """Test respects minimum switch interval.
+
+        H06: mark_switched() is responsible for recording the switch; only after
+        it is called does async_evaluate respect the rate-limit interval.
+        """
         mock_coordinator.get_active_zone_setpoints.return_value = [21.0]
         mock_coordinator.weather_entity = "weather.home"
         mock_hass.states.get.return_value = MagicMock()
@@ -484,12 +488,15 @@ class TestAsyncEvaluate:
         result1 = await manager.async_evaluate()
         assert result1 == HVACMode.HEAT
 
+        # Simulate coordinator calling mark_switched after applying to zones (H06)
+        manager.mark_switched(result1)
+
         # Change forecast to warrant COOL
         mock_hass.services.async_call = AsyncMock(
             return_value=mock_forecast_response("weather.home", [{"temperature": 28.0}])
         )
 
-        # Second evaluation within interval should return None
+        # Second evaluation within interval should return None (rate-limited)
         result2 = await manager.async_evaluate()
         assert result2 is None
 
@@ -654,7 +661,7 @@ class TestAsyncEvaluate:
 
     @pytest.mark.asyncio
     async def test_returns_none_when_mode_unchanged(self, mock_hass, mock_coordinator, default_config):
-        """Test returns None when target mode equals current mode."""
+        """Test returns None when target mode equals current mode (already switched)."""
         mock_coordinator.get_active_zone_setpoints.return_value = [21.0]
         mock_coordinator.weather_entity = "weather.home"
         mock_hass.states.get.return_value = MagicMock()
@@ -668,16 +675,23 @@ class TestAsyncEvaluate:
         result1 = await manager.async_evaluate()
         assert result1 == HVACMode.HEAT
 
-        # Reset last_switch to allow another evaluation
+        # Coordinator records the switch (H06)
+        manager.mark_switched(result1)
+
+        # Allow second evaluation by bypassing the rate-limit
         manager._last_switch = 0.0
 
-        # Second evaluation with same conditions
+        # Second evaluation with same conditions — mode already HEAT, no change
         result2 = await manager.async_evaluate()
         assert result2 is None  # No change needed
 
     @pytest.mark.asyncio
     async def test_updates_state_on_switch(self, mock_hass, mock_coordinator, default_config):
-        """Test updates internal state when switching mode."""
+        """Test mark_switched updates internal state after coordinator applies the switch.
+
+        H06: async_evaluate no longer mutates _current_mode/_last_switch.
+        Those are updated only by mark_switched().
+        """
         mock_coordinator.get_active_zone_setpoints.return_value = [21.0]
         mock_coordinator.weather_entity = "weather.home"
         mock_hass.states.get.return_value = MagicMock()
@@ -691,8 +705,15 @@ class TestAsyncEvaluate:
         assert manager.last_switch_time == 0.0
 
         result = await manager.async_evaluate()
-
         assert result == HVACMode.HEAT
+
+        # State unchanged until coordinator calls mark_switched (H06)
+        assert manager.current_mode is None
+        assert manager.last_switch_time == 0.0
+
+        # Coordinator confirms zones were switched
+        manager.mark_switched(result)
+
         assert manager.current_mode == HVACMode.HEAT
         assert manager.last_switch_time > 0.0
 
@@ -801,7 +822,7 @@ class TestGetStateAttributes:
 
     @pytest.mark.asyncio
     async def test_debug_attributes_include_switch_times(self, mock_hass, mock_coordinator, default_config):
-        """Test debug attributes include switch times after a switch."""
+        """Test debug attributes include switch times after mark_switched (H06/H07)."""
         mock_coordinator.outdoor_temp = 15.0
         mock_coordinator.get_active_zone_setpoints.return_value = [21.0]
         mock_coordinator.weather_entity = "weather.home"
@@ -811,10 +832,84 @@ class TestGetStateAttributes:
         )
         manager = AutoModeSwitchingManager(mock_hass, default_config, mock_coordinator)
 
-        # Trigger a switch
-        await manager.async_evaluate()
+        # Before mark_switched, no switch times
+        attrs = manager.get_state_attributes(debug=True)
+        assert "last_switch" not in attrs.get("auto_mode_switching", {})
+
+        # Evaluate then record the switch (H06: coordinator calls mark_switched)
+        result = await manager.async_evaluate()
+        manager.mark_switched(result)
 
         attrs = manager.get_state_attributes(debug=True)
 
         assert "last_switch" in attrs["auto_mode_switching"]
         assert "next_allowed_switch" in attrs["auto_mode_switching"]
+
+    def test_mark_switched_does_not_recompute_iso_on_attribute_reads(self, mock_hass, mock_coordinator, default_config):
+        """ISO strings pre-computed in mark_switched, not in get_state_attributes (H07)."""
+        import datetime
+
+        manager = AutoModeSwitchingManager(mock_hass, default_config, mock_coordinator)
+        mock_coordinator.get_active_zone_setpoints.return_value = [20.0]
+
+        # Simulate a switch
+        manager.mark_switched(HVACMode.HEAT)
+
+        cached_last = manager._cached_last_switch_iso
+        cached_next = manager._cached_next_allowed_switch_iso
+
+        # Multiple attribute reads must return the same cached strings
+        for _ in range(10):
+            attrs = manager.get_state_attributes(debug=True)
+            assert attrs["auto_mode_switching"]["last_switch"] == cached_last
+            assert attrs["auto_mode_switching"]["next_allowed_switch"] == cached_next
+
+    def test_should_switch_false_within_interval(self, mock_hass, mock_coordinator, default_config):
+        """_should_switch returns False within the min_switch_interval (A03/H06)."""
+        manager = AutoModeSwitchingManager(mock_hass, default_config, mock_coordinator)
+        manager.mark_switched(HVACMode.HEAT)
+
+        assert manager._should_switch() is False
+
+    def test_should_switch_true_when_never_switched(self, mock_hass, mock_coordinator, default_config):
+        """_should_switch returns True on first evaluation (A03/H06)."""
+        manager = AutoModeSwitchingManager(mock_hass, default_config, mock_coordinator)
+        assert manager._should_switch() is True
+
+    def test_compute_target_mode_heat(self, mock_hass, mock_coordinator, default_config):
+        """_compute_target_mode returns HEAT when forecast cold (A03)."""
+        manager = AutoModeSwitchingManager(mock_hass, default_config, mock_coordinator)
+        # threshold=2.0: forecast 15 < setpoint 21 - 2 = 19
+        result = manager._compute_target_mode(15.0, 21.0, "shoulder")
+        assert result == HVACMode.HEAT
+
+    def test_compute_target_mode_cool(self, mock_hass, mock_coordinator, default_config):
+        """_compute_target_mode returns COOL when forecast warm (A03)."""
+        manager = AutoModeSwitchingManager(mock_hass, default_config, mock_coordinator)
+        # threshold=2.0: forecast 25 > setpoint 21 + 2 = 23
+        result = manager._compute_target_mode(25.0, 21.0, "shoulder")
+        assert result == HVACMode.COOL
+
+    def test_compute_target_mode_none_in_hysteresis(self, mock_hass, mock_coordinator, default_config):
+        """_compute_target_mode returns None in hysteresis zone (A03)."""
+        manager = AutoModeSwitchingManager(mock_hass, default_config, mock_coordinator)
+        # threshold=2.0: forecast 21 is within ±2 of setpoint 21
+        result = manager._compute_target_mode(21.0, 21.0, "shoulder")
+        assert result is None
+
+    def test_compute_target_mode_winter_blocks_cool(self, mock_hass, mock_coordinator, default_config):
+        """_compute_target_mode returns None when winter blocks COOL (A03)."""
+        manager = AutoModeSwitchingManager(mock_hass, default_config, mock_coordinator)
+        # Without season lock, 25 > 21+2 → COOL
+        result = manager._compute_target_mode(25.0, 21.0, "winter")
+        assert result is None
+
+    def test_compute_target_mode_no_change_when_already_in_mode(self, mock_hass, mock_coordinator, default_config):
+        """_compute_target_mode returns None when current mode already matches (A03)."""
+        manager = AutoModeSwitchingManager(mock_hass, default_config, mock_coordinator)
+        manager.mark_switched(HVACMode.HEAT)  # set _current_mode = HEAT
+        manager._last_switch = 0.0  # bypass rate limit for this test
+
+        # Forecast still warrants HEAT, but current_mode is already HEAT
+        result = manager._compute_target_mode(15.0, 21.0, "shoulder")
+        assert result is None

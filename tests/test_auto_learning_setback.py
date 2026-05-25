@@ -340,3 +340,81 @@ class TestAutoLearningSetbackDaysTracking:
 
         # Should be at 7
         assert manager._days_at_maintenance_cap == 7
+
+
+# =============================================================================
+# H11: Auto-learning setback is decoupled from night-setback override type
+# =============================================================================
+
+
+class TestH11AutoLearningDecoupledFromNightSetback:
+    """H11 / D9: auto-learning setback must not piggyback on night_setback override."""
+
+    def test_auto_learning_setback_returns_false_in_night(self):
+        """calculate_night_setback_adjustment returns in_night_period=False for auto-learning (H11)."""
+        manager = create_night_setback_manager(
+            has_configured_setback=False,
+            learning_status="stable",
+            auto_learning_enabled=True,
+        )
+        manager._days_at_maintenance_cap = 7
+        manager._last_auto_setback = None
+
+        # 4am = inside auto-learning window
+        mock_time = datetime(2024, 1, 15, 4, 0, 0)
+        _, in_night_period, _ = manager.calculate_night_setback_adjustment(mock_time)
+
+        assert in_night_period is False
+
+    def test_auto_learning_setback_marks_info_flag(self):
+        """auto_learning_window key in info dict identifies the override (H11)."""
+        manager = create_night_setback_manager(
+            has_configured_setback=False,
+            learning_status="stable",
+            auto_learning_enabled=True,
+        )
+        manager._days_at_maintenance_cap = 7
+        manager._last_auto_setback = None
+
+        mock_time = datetime(2024, 1, 15, 4, 0, 0)
+        _, _, info = manager.calculate_night_setback_adjustment(mock_time)
+
+        assert info.get("auto_learning_window") is True
+        assert "auto_learning_delta" in info
+
+    def test_auto_learning_setback_does_not_set_night_setback_grace(self):
+        """Auto-learning setback must not trigger night-setback learning grace (H11)."""
+        manager = create_night_setback_manager(
+            has_configured_setback=False,
+            learning_status="stable",
+            auto_learning_enabled=True,
+        )
+        manager._days_at_maintenance_cap = 7
+        manager._last_auto_setback = None
+
+        # Simulate transition: call once outside window (3am-1min) then inside (4am)
+        mock_time_before = datetime(2024, 1, 15, 2, 59, 0)  # before window
+        mock_time_inside = datetime(2024, 1, 15, 4, 0, 0)  # inside window
+
+        manager.calculate_night_setback_adjustment(mock_time_before)
+        manager.calculate_night_setback_adjustment(mock_time_inside)
+
+        # Grace period must NOT be set (no night-setback transition happened)
+        assert manager.in_learning_grace_period is False
+
+    def test_auto_learning_info_has_no_night_setback_end_dependency(self):
+        """Auto-learning info dict does not require night_setback_end key (H11 KeyError fix)."""
+        manager = create_night_setback_manager(
+            has_configured_setback=False,
+            learning_status="stable",
+            auto_learning_enabled=True,
+        )
+        manager._days_at_maintenance_cap = 7
+        manager._last_auto_setback = None
+
+        mock_time = datetime(2024, 1, 15, 4, 0, 0)
+        _, _, info = manager.calculate_night_setback_adjustment(mock_time)
+
+        # night_setback_end is not required for auto-learning — must not raise
+        _ = info.get("night_setback_end")  # should return None, not raise
+        assert info.get("auto_learning_window") is True

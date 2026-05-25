@@ -61,6 +61,9 @@ class AutoModeSwitchingManager:
         self._last_switch: float = 0.0  # monotonic timestamp
         self._cached_season: str = "shoulder"
         self._cached_forecast_median: float | None = None
+        # H07: Cached ISO strings for get_state_attributes — recomputed only in mark_switched
+        self._cached_last_switch_iso: str | None = None
+        self._cached_next_allowed_switch_iso: str | None = None
 
     @property
     def current_mode(self) -> str | None:
@@ -172,52 +175,44 @@ class AutoModeSwitchingManager:
 
         return statistics.median(temps)
 
-    async def async_evaluate(self) -> str | None:
-        """Evaluate and return new mode if switch needed.
+    # -------------------------------------------------------------------------
+    # A03: Pure-compute helpers — each does exactly one thing
+    # -------------------------------------------------------------------------
 
-        Logic:
-        1. Check min_switch_interval
-        2. Get forecast median and median setpoint
-        3. Apply season locking (winter = only HEAT, summer = only COOL)
-        4. Compare forecast vs setpoint to decide mode
+    def _should_switch(self) -> bool:
+        """Return True if the min_switch_interval has elapsed since the last switch.
+
+        Skips the check on the very first evaluation (``_last_switch == 0``).
+        """
+        if self._last_switch > 0:
+            elapsed = time.monotonic() - self._last_switch
+            if elapsed < self._min_switch_interval:
+                _LOGGER.debug(
+                    "Min switch interval not met (%.0fs < %ds)",
+                    elapsed,
+                    self._min_switch_interval,
+                )
+                return False
+        return True
+
+    def _compute_target_mode(
+        self,
+        forecast_median: float,
+        median_setpoint: float,
+        season: str,
+    ) -> str | None:
+        """Pure-compute: decide target HVAC mode from inputs.
+
+        Args:
+            forecast_median: Median forecast or current outdoor temperature.
+            median_setpoint: Median setpoint across active zones.
+            season: Current season ("winter", "summer", or "shoulder").
 
         Returns:
-            HVACMode.HEAT or HVACMode.COOL if switch needed,
-            None if no change needed.
+            HVACMode.HEAT, HVACMode.COOL, or None (no change needed).
         """
-        now = time.monotonic()
-
-        # Check min_switch_interval (skip on first evaluation)
-        if self._last_switch > 0:
-            elapsed = now - self._last_switch
-            if elapsed < self._min_switch_interval:
-                _LOGGER.debug("Min switch interval not met (%.0fs < %ds)", elapsed, self._min_switch_interval)
-                return None
-
-        # Get median setpoint from active zones
-        median_setpoint = self.get_median_setpoint()
-        if median_setpoint is None:
-            _LOGGER.debug("No active zones, skipping evaluation")
-            return None
-
-        # Get forecast median (also caches season)
-        season = await self.async_get_season()
-        forecast_median = self._cached_forecast_median
-        if forecast_median is None:
-            # Forecast unavailable — fall back to current outdoor temperature.
-            # Season defaults to "shoulder" (no locking) when forecast is absent.
-            outdoor_temp = self._coordinator.outdoor_temp
-            if outdoor_temp is None:
-                _LOGGER.debug("No forecast and no outdoor temp available, skipping evaluation")
-                return None
-            _LOGGER.debug("No forecast available, falling back to current outdoor temp %.1f°C", outdoor_temp)
-            forecast_median = outdoor_temp
-
-        # Determine target mode based on forecast vs setpoint
-        target_mode: str | None = None
-
         if forecast_median < median_setpoint - self._threshold:
-            target_mode = HVACMode.HEAT
+            target_mode: str = HVACMode.HEAT
             _LOGGER.debug(
                 "Forecast %.1f°C < setpoint %.1f°C - %.1f°C, suggesting HEAT",
                 forecast_median,
@@ -241,7 +236,7 @@ class AutoModeSwitchingManager:
             )
             return None
 
-        # Apply season locking
+        # Season locking
         if season == "winter" and target_mode == HVACMode.COOL:
             _LOGGER.debug("Season locking: winter prevents switching to COOL")
             return None
@@ -249,11 +244,76 @@ class AutoModeSwitchingManager:
             _LOGGER.debug("Season locking: summer prevents switching to HEAT")
             return None
 
-        # Check if mode actually changed
+        # No change if already in this mode
         if target_mode == self._current_mode:
             return None
 
-        # Update state and return new mode
+        return target_mode
+
+    def mark_switched(self, mode: str) -> None:
+        """Record that a mode switch was successfully applied to ≥1 zone.
+
+        Updates the rate-limit timestamp, current mode, and cached ISO strings
+        so ``get_state_attributes`` does not recompute them on every read (H07).
+
+        Args:
+            mode: The HVAC mode that was applied.
+        """
+        now = time.monotonic()
+        self._current_mode = mode
+        self._last_switch = now
+
+        # H07: Pre-compute ISO strings; recompute only here, not in get_state_attributes
+        last_switch_dt = dt_util.utcnow()
+        next_allowed = last_switch_dt + timedelta(seconds=self._min_switch_interval)
+        self._cached_last_switch_iso = last_switch_dt.isoformat()
+        self._cached_next_allowed_switch_iso = next_allowed.isoformat()
+
+    async def async_evaluate(self) -> str | None:
+        """Evaluate and return new mode if a switch is needed.
+
+        Logic (A03 split):
+        1. ``_should_switch()`` — rate-limit check
+        2. ``get_median_setpoint()`` — inputs from active zones
+        3. ``async_get_season()`` — forecast-based season classification
+        4. ``_compute_target_mode()`` — pure mode decision
+
+        Intentionally does NOT call ``mark_switched``.  The coordinator calls
+        ``mark_switched`` only after confirming ≥1 zone received the command
+        (H06), so a no-op evaluation (all OFF, service errors) does not consume
+        the rate-limit interval.
+
+        Returns:
+            HVACMode.HEAT or HVACMode.COOL if switch needed, None otherwise.
+        """
+        # 1. Rate-limit guard
+        if not self._should_switch():
+            return None
+
+        # 2. Inputs
+        median_setpoint = self.get_median_setpoint()
+        if median_setpoint is None:
+            _LOGGER.debug("No active zones, skipping evaluation")
+            return None
+
+        # 3. Season + forecast (also caches _cached_forecast_median)
+        season = await self.async_get_season()
+        forecast_median = self._cached_forecast_median
+        if forecast_median is None:
+            # Forecast unavailable — fall back to current outdoor temperature.
+            # Season defaults to "shoulder" (no locking) when forecast is absent.
+            outdoor_temp = self._coordinator.outdoor_temp
+            if outdoor_temp is None:
+                _LOGGER.debug("No forecast and no outdoor temp available, skipping evaluation")
+                return None
+            _LOGGER.debug("No forecast available, falling back to current outdoor temp %.1f°C", outdoor_temp)
+            forecast_median = outdoor_temp
+
+        # 4. Pure mode decision
+        target_mode = self._compute_target_mode(forecast_median, median_setpoint, season)
+        if target_mode is None:
+            return None
+
         _LOGGER.info(
             "Auto mode switching: %s -> %s (forecast=%.1f°C, setpoint=%.1f°C, season=%s)",
             self._current_mode,
@@ -262,9 +322,6 @@ class AutoModeSwitchingManager:
             median_setpoint,
             season,
         )
-        self._current_mode = target_mode
-        self._last_switch = now
-
         return target_mode
 
     def get_state_attributes(self, debug: bool = False) -> dict:
@@ -290,14 +347,9 @@ class AutoModeSwitchingManager:
             "median_setpoint": self.get_median_setpoint(),
         }
 
-        # Include last switch time if we've switched
-        if self._last_switch > 0:
-            # Convert monotonic to datetime for readability
-            elapsed = time.monotonic() - self._last_switch
-            last_switch_dt = dt_util.utcnow() - timedelta(seconds=elapsed)
-            next_allowed = last_switch_dt + timedelta(seconds=self._min_switch_interval)
-
-            attrs["auto_mode_switching"]["last_switch"] = last_switch_dt.isoformat()
-            attrs["auto_mode_switching"]["next_allowed_switch"] = next_allowed.isoformat()
+        # H07: Use cached ISO strings; recomputed in mark_switched, not here
+        if self._last_switch > 0 and self._cached_last_switch_iso is not None:
+            attrs["auto_mode_switching"]["last_switch"] = self._cached_last_switch_iso
+            attrs["auto_mode_switching"]["next_allowed_switch"] = self._cached_next_allowed_switch_iso
 
         return attrs
