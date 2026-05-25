@@ -720,3 +720,73 @@ class TestValidateThermalGroupsConfig:
 
         with pytest.raises(ValueError, match="cannot receive from itself"):
             validate_thermal_groups_config(config)
+
+
+# =============================================================================
+# H10: ThermalGroupManager.remove_zone
+# =============================================================================
+
+
+class TestRemoveZone:
+    """Tests for ThermalGroupManager.remove_zone (H10)."""
+
+    def test_remove_zone_not_in_group_is_noop(self):
+        """remove_zone on zone not in any group does nothing."""
+        from unittest.mock import MagicMock
+        from custom_components.adaptive_climate.adaptive.thermal_groups import ThermalGroupManager
+
+        hass = MagicMock()
+        manager = ThermalGroupManager(hass, [{"name": "grp", "zones": ["zone_a", "zone_b"], "leader": "zone_a"}])
+
+        # zone_c is not in any group
+        manager.remove_zone("zone_c")
+
+        # No change
+        assert "zone_a" in manager._zone_to_group
+        assert "zone_b" in manager._zone_to_group
+
+    def test_remove_zone_removes_from_group_zones_list(self):
+        """remove_zone removes the zone from its group's zones list."""
+        from unittest.mock import MagicMock
+        from custom_components.adaptive_climate.adaptive.thermal_groups import ThermalGroupManager
+
+        hass = MagicMock()
+        manager = ThermalGroupManager(hass, [{"name": "grp", "zones": ["zone_a", "zone_b"], "leader": "zone_a"}])
+
+        manager.remove_zone("zone_b")
+
+        assert "zone_b" not in manager._zone_to_group
+        grp = manager._groups["grp"]
+        assert "zone_b" not in grp.zones
+        assert "zone_a" in grp.zones
+
+    def test_remove_zone_removes_empty_group(self):
+        """remove_zone removes the group when the last zone is removed."""
+        from unittest.mock import MagicMock
+        from custom_components.adaptive_climate.adaptive.thermal_groups import ThermalGroupManager
+
+        hass = MagicMock()
+        manager = ThermalGroupManager(hass, [{"name": "grp", "zones": ["zone_a"], "leader": "zone_a"}])
+
+        manager.remove_zone("zone_a")
+
+        assert "zone_a" not in manager._zone_to_group
+        assert "grp" not in manager._groups
+
+    def test_remove_zone_keeps_other_zones_in_group(self):
+        """remove_zone of one zone leaves others in the group."""
+        from unittest.mock import MagicMock
+        from custom_components.adaptive_climate.adaptive.thermal_groups import ThermalGroupManager
+
+        hass = MagicMock()
+        manager = ThermalGroupManager(
+            hass, [{"name": "grp", "zones": ["zone_a", "zone_b", "zone_c"], "leader": "zone_a"}]
+        )
+
+        manager.remove_zone("zone_b")
+
+        assert "zone_a" in manager._zone_to_group
+        assert "zone_c" in manager._zone_to_group
+        assert "zone_b" not in manager._zone_to_group
+        grp = manager._groups["grp"]
+        assert sorted(grp.zones) == ["zone_a", "zone_c"]
