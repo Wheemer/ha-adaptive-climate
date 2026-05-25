@@ -1,6 +1,22 @@
 # CHANGELOG
 
 
+## v0.64.5 (2026-05-25)
+
+### Bug Fixes
+
+- **cooling**: Comprehensive cooling mode fixes
+  ([`3debe6a`](https://github.com/afewyards/ha-adaptive-climate/commit/3debe6a2f96f40215fe20be0a90d60ac9397d3b4))
+
+- PWM controller: use abs(control_output) == 0 instead of <= 0 (negative output is valid cooling
+  demand, not zero demand) - Skip undershoot detection in COOL mode (tracks temp below setpoint,
+  only valid for heating) - Contact sensors: force PAUSE action in COOL mode when configured for
+  FROST_PROTECTION (cooling to 5°C makes no sense) - Reset integral on HEAT<->COOL mode switch to
+  prevent stale buildup - Fix cooling_supply_temp config location in coordinator - Ki boost: remove
+  physics baseline fallback that used already-boosted gains from truncated history, causing runaway
+  multiplier - Add cooling supply clamp override to status attributes
+
+
 ## v0.64.4 (2026-04-27)
 
 ### Bug Fixes

@@ -17,17 +17,11 @@ allowed_tags = ["feat", "fix", "docs", "style", "refactor", "perf", "test", "cho
 minor_tags = ["feat"]
 patch_tags = ["fix", "perf"]
 
+
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths = ["tests"]
 
-[project]
-name = "adaptive-climate"
-version = "0.64.4"
-description = "Home Assistant custom component for PID-based thermostat control with adaptive learning"
-readme = "README.md"
-license = {text = "MIT"}
-requires-python = ">=3.11"
 
 [tool.ruff]
 target-version = "py311"
@@ -62,6 +56,7 @@ ignore = [
 "custom_components/**/helpers/__init__.py" = ["F401"]
 "tests/conftest.py" = ["E402", "F811"]
 "custom_components/**/const.py" = ["UP036", "UP042", "N805"]
+
 
 [tool.pyright]
 pythonVersion = "3.11"
@@ -114,3 +109,12 @@ reportUnusedFunction = false
 
 [tool.pyright.defineConstant]
 TYPE_CHECKING = true
+
+[project]
+name = "adaptive-climate"
+version = "0.64.5"
+description = "Home Assistant custom component for PID-based thermostat control with adaptive learning"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.11"
+
