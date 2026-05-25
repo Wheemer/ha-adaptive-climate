@@ -384,6 +384,13 @@ async def test_auto_apply_adaptive_pid():
         "ki": 0.015,
         "kd": 12.0,
     }
+
+    # increment_auto_apply_count should mutate _auto_apply_count and return new value
+    def _mock_increment_auto_apply_count():
+        mock_learner._auto_apply_count += 1
+        return mock_learner._auto_apply_count
+
+    mock_learner.increment_auto_apply_count.side_effect = _mock_increment_auto_apply_count
     mock_coordinator.get_adaptive_learner.return_value = mock_learner
     mock_state._coordinator = mock_coordinator
 

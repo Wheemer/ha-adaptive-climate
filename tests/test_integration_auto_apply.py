@@ -77,11 +77,12 @@ def mock_hass():
     # Track created tasks so we can await them
     created_tasks = []
 
-    def track_task(coro):
+    def track_task(coro, name=None):
         created_tasks.append(coro)
         return coro
 
     hass.async_create_task = MagicMock(side_effect=track_task)
+    hass.async_create_background_task = MagicMock(side_effect=track_task)
     hass._created_tasks = created_tasks  # Expose for tests
 
     def mock_call_later(delay, callback):
