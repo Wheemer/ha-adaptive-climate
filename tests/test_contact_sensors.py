@@ -328,92 +328,156 @@ class TestContactSensorManager:
 
 
 class TestContactAccumulatorReset:
-    """Tests for duty accumulator reset on contact sensor open (Story 3.3)."""
+    """Tests for duty accumulator reset respecting contact_delay (Story 3.3).
 
-    def test_contact_open_resets_accumulator(self):
-        """Test contact sensor open resets duty accumulator."""
+    The accumulator must NOT be reset immediately when a contact sensor opens.
+    It should only be reset when the pause actually begins (after contact_delay elapses)
+    and only on the first control loop iteration that detects the paused state.
+    """
+
+    def _make_control_loop_check(self, handler: ContactSensorHandler, mock_heater_controller):
+        """Build a minimal object that mirrors the transition-detection logic in
+        _async_control_heating.  Returns a callable that simulates one control loop
+        iteration, advancing time as requested.
+        """
         from unittest.mock import MagicMock
 
-        # Create mock heater controller
-        mock_heater_controller = MagicMock()
-        mock_heater_controller.reset_duty_accumulator = MagicMock()
-
-        # Create mock contact sensor handler
-        contact_handler = ContactSensorHandler(
-            contact_sensors=["binary_sensor.window_bedroom"], contact_delay_seconds=0
-        )
-
-        # Create a mock climate-like object that simulates contact sensor state change
-        class MockClimate:
+        class ControlLoopSimulator:
             def __init__(self):
+                self._contact_sensor_handler = handler
                 self._heater_controller = mock_heater_controller
-                self._contact_sensor_handler = contact_handler
-                self._contact_pause_times: dict[str, datetime] = {}
+                self._contact_was_paused = False
 
-            def handle_contact_sensor_changed(self, entity_id: str, is_open: bool) -> None:
-                """Handle contact sensor state change (mirrors climate.py logic)."""
-                current_time = datetime.now()
-
-                if is_open:
-                    # Track pause start time for this sensor
-                    self._contact_pause_times[entity_id] = current_time
-                    # Reset duty accumulator when contact opens
+            def tick(self, current_time: datetime) -> bool:
+                """Simulate one iteration.  Returns True when the accumulator was reset."""
+                contact_paused_now = self._contact_sensor_handler.should_take_action(current_time)
+                reset_happened = False
+                if contact_paused_now and not self._contact_was_paused:
                     if self._heater_controller is not None:
                         self._heater_controller.reset_duty_accumulator()
-                else:
-                    # Clear pause time when contact closes
-                    self._contact_pause_times.pop(entity_id, None)
+                        reset_happened = True
+                self._contact_was_paused = contact_paused_now if contact_paused_now else False
+                if not contact_paused_now:
+                    self._contact_was_paused = False
+                return reset_happened
 
-        climate = MockClimate()
+        return ControlLoopSimulator()
 
-        # Act - Contact sensor opens
-        climate.handle_contact_sensor_changed("binary_sensor.window_bedroom", True)
+    def test_accumulator_not_reset_immediately_on_open(self):
+        """Accumulator must NOT be reset the moment a contact sensor opens."""
+        from unittest.mock import MagicMock
 
-        # Assert - accumulator should be reset
+        mock_heater_controller = MagicMock()
+        handler = ContactSensorHandler(
+            contact_sensors=["binary_sensor.window_bedroom"],
+            contact_delay_seconds=300,  # 5-minute delay
+        )
+        sim = self._make_control_loop_check(handler, mock_heater_controller)
+
+        t0 = datetime(2024, 1, 15, 10, 0)
+        handler.update_contact_states({"binary_sensor.window_bedroom": True}, t0)
+
+        # Control loop runs immediately after open — delay not elapsed yet
+        reset = sim.tick(t0)
+
+        assert reset is False
+        mock_heater_controller.reset_duty_accumulator.assert_not_called()
+
+    def test_accumulator_reset_when_pause_begins(self):
+        """Accumulator IS reset on the first control loop tick after delay elapses."""
+        from unittest.mock import MagicMock
+
+        mock_heater_controller = MagicMock()
+        handler = ContactSensorHandler(
+            contact_sensors=["binary_sensor.window_bedroom"],
+            contact_delay_seconds=300,
+        )
+        sim = self._make_control_loop_check(handler, mock_heater_controller)
+
+        t0 = datetime(2024, 1, 15, 10, 0)
+        handler.update_contact_states({"binary_sensor.window_bedroom": True}, t0)
+
+        # Tick before delay — no reset
+        sim.tick(t0)
+        mock_heater_controller.reset_duty_accumulator.assert_not_called()
+
+        # Tick after delay elapses — first pause iteration → accumulator reset
+        t_after = t0 + timedelta(minutes=5)
+        reset = sim.tick(t_after)
+
+        assert reset is True
         mock_heater_controller.reset_duty_accumulator.assert_called_once()
 
-    def test_contact_close_does_not_reset_accumulator(self):
-        """Test contact sensor close does NOT reset duty accumulator."""
+    def test_accumulator_reset_only_once_per_pause(self):
+        """Accumulator is reset exactly once per contact-open event, not on every tick."""
         from unittest.mock import MagicMock
 
-        # Create mock heater controller
         mock_heater_controller = MagicMock()
-        mock_heater_controller.reset_duty_accumulator = MagicMock()
-
-        # Create mock contact sensor handler
-        contact_handler = ContactSensorHandler(
-            contact_sensors=["binary_sensor.window_bedroom"], contact_delay_seconds=0
+        handler = ContactSensorHandler(
+            contact_sensors=["binary_sensor.window_bedroom"],
+            contact_delay_seconds=0,  # No delay for simplicity
         )
+        sim = self._make_control_loop_check(handler, mock_heater_controller)
 
-        # Create a mock climate-like object that simulates contact sensor state change
-        class MockClimate:
-            def __init__(self):
-                self._heater_controller = mock_heater_controller
-                self._contact_sensor_handler = contact_handler
-                self._contact_pause_times: dict[str, datetime] = {}
+        t0 = datetime(2024, 1, 15, 10, 0)
+        handler.update_contact_states({"binary_sensor.window_bedroom": True}, t0)
 
-            def handle_contact_sensor_changed(self, entity_id: str, is_open: bool) -> None:
-                """Handle contact sensor state change (mirrors climate.py logic)."""
-                current_time = datetime.now()
+        # Three consecutive ticks while contact remains open
+        sim.tick(t0)
+        sim.tick(t0 + timedelta(minutes=1))
+        sim.tick(t0 + timedelta(minutes=2))
 
-                if is_open:
-                    # Track pause start time for this sensor
-                    self._contact_pause_times[entity_id] = current_time
-                    # Reset duty accumulator when contact opens
-                    if self._heater_controller is not None:
-                        self._heater_controller.reset_duty_accumulator()
-                else:
-                    # Clear pause time when contact closes
-                    self._contact_pause_times.pop(entity_id, None)
+        # Should have been called exactly once (the first tick after open)
+        assert mock_heater_controller.reset_duty_accumulator.call_count == 1
 
-        climate = MockClimate()
+    def test_accumulator_reset_again_on_reopen(self):
+        """After close → reopen, the accumulator is reset again on the next pause."""
+        from unittest.mock import MagicMock
 
-        # First open the contact (which resets accumulator)
-        climate.handle_contact_sensor_changed("binary_sensor.window_bedroom", True)
+        mock_heater_controller = MagicMock()
+        handler = ContactSensorHandler(
+            contact_sensors=["binary_sensor.window_bedroom"],
+            contact_delay_seconds=0,
+        )
+        sim = self._make_control_loop_check(handler, mock_heater_controller)
+
+        t0 = datetime(2024, 1, 15, 10, 0)
+
+        # First open — pause begins — accumulator reset
+        handler.update_contact_states({"binary_sensor.window_bedroom": True}, t0)
+        sim.tick(t0)
+        assert mock_heater_controller.reset_duty_accumulator.call_count == 1
+
+        # Close — no pause
+        handler.update_contact_states({"binary_sensor.window_bedroom": False}, t0 + timedelta(minutes=10))
+        sim.tick(t0 + timedelta(minutes=10))
+        assert mock_heater_controller.reset_duty_accumulator.call_count == 1
+
+        # Reopen — pause begins again — accumulator reset a second time
+        handler.update_contact_states({"binary_sensor.window_bedroom": True}, t0 + timedelta(minutes=20))
+        sim.tick(t0 + timedelta(minutes=20))
+        assert mock_heater_controller.reset_duty_accumulator.call_count == 2
+
+    def test_contact_close_does_not_reset_accumulator(self):
+        """Closing a contact sensor does NOT reset the duty accumulator."""
+        from unittest.mock import MagicMock
+
+        mock_heater_controller = MagicMock()
+        handler = ContactSensorHandler(
+            contact_sensors=["binary_sensor.window_bedroom"],
+            contact_delay_seconds=0,
+        )
+        sim = self._make_control_loop_check(handler, mock_heater_controller)
+
+        t0 = datetime(2024, 1, 15, 10, 0)
+
+        # Open then pause is detected
+        handler.update_contact_states({"binary_sensor.window_bedroom": True}, t0)
+        sim.tick(t0)
         mock_heater_controller.reset_duty_accumulator.reset_mock()
 
-        # Act - Contact sensor closes
-        climate.handle_contact_sensor_changed("binary_sensor.window_bedroom", False)
+        # Close — tick — no further reset
+        handler.update_contact_states({"binary_sensor.window_bedroom": False}, t0 + timedelta(minutes=5))
+        sim.tick(t0 + timedelta(minutes=5))
 
-        # Assert - accumulator should NOT be reset on close
         mock_heater_controller.reset_duty_accumulator.assert_not_called()

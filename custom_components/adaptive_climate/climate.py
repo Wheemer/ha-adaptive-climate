@@ -325,6 +325,11 @@ class AdaptiveThermostat(ClimateControlMixin, ClimateHandlersMixin, ClimateEntit
         # Contact sensor pause tracking (for calculating pause duration in ContactResumeEvent)
         self._contact_pause_times: dict[str, datetime] = {}
 
+        # Tracks whether climate was paused due to contact sensor on last control loop
+        # iteration. Used to detect the not-paused → paused transition so the duty
+        # accumulator is reset exactly once when the pause begins (after contact_delay).
+        self._contact_was_paused: bool = False
+
         # Weekly pause counters (for reporting)
         self._humidity_pause_count: int = 0
         self._contact_pause_count: int = 0

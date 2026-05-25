@@ -127,9 +127,8 @@ class ClimateHandlersMixin:
                         entity_id=entity_id,
                     )
                 )
-                # Reset duty accumulator when contact opens
-                if self._heater_controller is not None:
-                    self._heater_controller.reset_duty_accumulator()
+                # NOTE: duty accumulator reset is deferred until the pause actually
+                # begins (after contact_delay elapses). See _async_control_heating.
             else:
                 # Calculate pause duration and emit resume event
                 pause_start = self._contact_pause_times.pop(entity_id, None)

@@ -69,6 +69,22 @@ class ClimateControlMixin:
             if self._status_manager.is_paused(hvac_mode_str):
                 _LOGGER.info("%s: Heating paused", self.entity_id)
 
+                # Detect not-paused → paused transition for contact sensor pause.
+                # The duty accumulator is reset here (after contact_delay) rather than
+                # immediately on sensor open, so accumulated duty from before the door
+                # opened is not discarded during the delay window.
+                contact_paused_now = bool(
+                    self._contact_sensor_handler and self._contact_sensor_handler.should_take_action()
+                )
+                if contact_paused_now and not self._contact_was_paused:
+                    if self._heater_controller is not None:
+                        self._heater_controller.reset_duty_accumulator()
+                        _LOGGER.debug(
+                            "%s: Contact sensor pause began — duty accumulator reset",
+                            self.entity_id,
+                        )
+                self._contact_was_paused = contact_paused_now
+
                 # Discard any active heating rate session on override
                 zone_data = coordinator.get_zone_data(self._zone_id) if coordinator else None
                 adaptive_learner = zone_data.get("adaptive_learner") if zone_data else None
@@ -107,6 +123,10 @@ class ClimateControlMixin:
 
                 self.async_write_ha_state()
                 return
+
+            # Not paused — clear the contact-pause transition tracker so the next
+            # pause (after a re-open) is correctly detected as a fresh transition.
+            self._contact_was_paused = False
 
             if self._sensor_stall != 0 and time.monotonic() - self._last_sensor_update > self._sensor_stall:
                 # sensor not updated for too long, considered as stall, set to safety level
