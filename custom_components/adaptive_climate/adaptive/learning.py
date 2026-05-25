@@ -1612,10 +1612,10 @@ class AdaptiveLearner:
 
         Delegates to learner_serialization module for actual deserialization logic.
 
-        Supports v10 format only.
+        Supports all historical versions (v4+) via learner_serialization migration chain.
 
         Args:
-            data: Dictionary containing v10 format data
+            data: Dictionary containing serialized learner data (any supported version)
         """
         # Delegate to serialization module for parsing
         restored = restore_learner_from_dict(data)
@@ -1642,7 +1642,7 @@ class AdaptiveLearner:
         self._confidence._heating_cycle_count = len(self._heating_cycle_history)
         self._confidence._cooling_cycle_count = len(self._cooling_cycle_history)
 
-        # Restore unified undershoot detector state (serialization module already handles v7->v8 migration)
+        # Restore unified undershoot detector state (migration chain in learner_serialization handles v4→v10)
         undershoot_state = restored.get("undershoot_detector_state", {})
         if undershoot_state:
             # Real-time mode state
@@ -1665,7 +1665,7 @@ class AdaptiveLearner:
                     _LOGGER.info("Could not parse undershoot last_adjustment_time: %s — cooldown reset", last_adj_raw)
             # else: None or old monotonic float — leave as None (reset cooldown)
 
-        # Restore contribution tracker state (serialization module handles v8->v9 migration)
+        # Restore contribution tracker state (migration chain handles v4→v10)
         contribution_state = restored.get("contribution_tracker_state", {})
         if contribution_state:
             # Use from_dict to restore state

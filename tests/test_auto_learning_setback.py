@@ -169,7 +169,13 @@ class TestAutoLearningSetbackWindow:
 
     @patch("homeassistant.util.dt.utcnow")
     def test_applies_in_3_to_5_am_window(self, mock_utcnow):
-        """Setback applies during 3-5am window."""
+        """Setback applies during 3-5am window.
+
+        H11 / D9: auto-learning setback returns in_night_period=False (it is NOT a
+        regular night-setback window) with info['auto_learning_window']=True so
+        callers can display the dedicated override type without triggering
+        night-setback grace logic.
+        """
         manager = create_night_setback_manager(
             has_configured_setback=False,
             learning_status="stable",
@@ -187,10 +193,11 @@ class TestAutoLearningSetbackWindow:
         # Calculate setback
         effective_target, in_night_period, info = manager.calculate_night_setback_adjustment(mock_time)
 
-        # Should apply 0.5°C setback
-        assert in_night_period is True
+        # Should apply 0.5°C setback but NOT pretend to be a regular night-setback
+        assert in_night_period is False  # H11: decouple from night-setback
         assert effective_target == 19.5  # 20.0 - 0.5
-        assert info.get("night_setback_delta") == 0.5
+        assert info.get("auto_learning_window") is True  # H11: dedicated flag
+        assert info.get("auto_learning_delta") == 0.5  # H11: dedicated delta key
 
     @patch("homeassistant.util.dt.utcnow")
     def test_not_active_at_2_am(self, mock_utcnow):

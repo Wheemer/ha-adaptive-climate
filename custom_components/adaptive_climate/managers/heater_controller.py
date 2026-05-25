@@ -477,6 +477,31 @@ class HeaterController:
         """
         self._cooler_cycle_count = count
 
+    @property
+    def cycle_active(self) -> bool:
+        """Whether a cycle is currently active."""
+        return self._cycle_active
+
+    @property
+    def has_demand(self) -> bool:
+        """Whether there is current demand (control_output > 0)."""
+        return self._has_demand
+
+    def restore_cycle_state(self, cycle_active: bool, has_demand: bool) -> None:
+        """Restore cycle tracking state after HA restart.
+
+        On restore with active cycle: marks as active but the in-progress cycle
+        will not be used for learning because no fresh CYCLE_STARTED was emitted
+        in this session. This prevents spurious CYCLE_STARTED emissions from
+        resetting CycleTrackerManager timestamps.
+
+        Args:
+            cycle_active: Whether a cycle was active before restart.
+            has_demand: Whether demand was present before restart.
+        """
+        self._cycle_active = cycle_active
+        self._has_demand = has_demand
+
     def _increment_cycle_count(self, hvac_mode: HVACMode, is_now_off: bool) -> None:
         """Increment cycle counter on on→off transition.
 

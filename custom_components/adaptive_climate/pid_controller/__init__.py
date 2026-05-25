@@ -342,6 +342,20 @@ class PID:
         # Clamp to [0, 1]: negative would flip sign, >1 would amplify
         self._integral *= max(0.0, min(1.0, factor))
 
+    def clamp_integral(self, external: float = 0.0, feedforward: float = 0.0) -> None:
+        """Clamp integral to valid bounds given current out_min/out_max and offsets.
+
+        Call after restoring integral from state to prevent violations when
+        out_max/Ke/F changed across restart.
+
+        Args:
+            external: Current external (Ke) term value.
+            feedforward: Current feedforward (F) term value.
+        """
+        i_max = self._out_max - external - feedforward
+        i_min = self._out_min - external - feedforward
+        self._integral = max(min(self._integral, i_max), i_min)
+
     def scale_integral(self, factor: float) -> None:
         """Scale the integral term by a factor.
 

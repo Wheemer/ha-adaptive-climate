@@ -252,6 +252,20 @@ class PIDGainsManager:
                 mode=HVACMode.HEAT,
             )
 
+        # 3. Restore cooling gains if present
+        if self._cooling_gains is not None:
+            cooling_history = self._pid_history.get("cooling", [])
+            if cooling_history:
+                last_cooling = cooling_history[-1]
+                self.set_gains(
+                    PIDChangeReason.RESTORE,
+                    kp=last_cooling.get("kp", self._cooling_gains.kp),
+                    ki=last_cooling.get("ki", self._cooling_gains.ki),
+                    kd=last_cooling.get("kd", self._cooling_gains.kd),
+                    ke=last_cooling.get("ke", 0.0),
+                    mode=HVACMode.COOL,
+                )
+
     def _restore_history(self, old_history: Any) -> None:
         """Restore history from state attributes.
 

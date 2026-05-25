@@ -1,0 +1,15 @@
+{
+  "format_version": 6,
+  "heating": {
+    "cycle_history": [
+      {"overshoot": 0.18, "undershoot": 0.09, "settling_time": 22.0, "oscillations": 1, "rise_time": 14.0}
+    ],
+    "auto_apply_count": 3,
+    "convergence_confidence": 42.0
+  },
+  "cooling": {"cycle_history": [], "auto_apply_count": 0, "convergence_confidence": 0.0},
+  "undershoot_detector": {"cumulative_ki_multiplier": 1.1, "time_below_target": 5.0, "thermal_debt": 12.5},
+  "last_adjustment_time": null,
+  "consecutive_converged_cycles": 5,
+  "pid_converged_for_ke": true
+}

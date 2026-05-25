@@ -2,7 +2,7 @@
 
 import pytest
 from datetime import datetime
-from unittest.mock import Mock, MagicMock
+from unittest.mock import Mock
 from homeassistant.components.climate import HVACMode
 
 from custom_components.adaptive_climate.managers.pid_gains_manager import PIDGainsManager
@@ -1654,3 +1654,59 @@ class TestInitialHistoryRecording:
         # Cooling history should be empty
         cooling_history = manager.get_history(HVACMode.COOL)
         assert len(cooling_history) == 0
+
+
+# =============================================================================
+# Cooling Gains Restore
+# =============================================================================
+
+
+class TestCoolingGainsRestore:
+    """Tests for restoring cooling gains from persisted history."""
+
+    def test_restore_cooling_gains_from_history(
+        self, mock_pid_controller, initial_heating_gains, initial_cooling_gains
+    ):
+        """Cooling gains should be restored from cooling history on restore_from_state."""
+        mgr = PIDGainsManager(mock_pid_controller, initial_heating_gains, initial_cooling_gains)
+
+        old_state = Mock()
+        old_state.attributes = {
+            "pid_history": {
+                "heating": [],
+                "cooling": [
+                    {
+                        "kp": 2.0,
+                        "ki": 0.2,
+                        "kd": 20.0,
+                        "ke": 0.3,
+                        "timestamp": "2024-01-01T00:00:00",
+                        "reason": "physics_init",
+                        "actor": "system",
+                    }
+                ],
+            }
+        }
+        mgr.restore_from_state(old_state)
+        cooling_gains = mgr.get_gains(HVACMode.COOL)
+        assert cooling_gains.kp == pytest.approx(2.0)
+        assert cooling_gains.ki == pytest.approx(0.2)
+
+    def test_restore_cooling_gains_not_applied_when_history_empty(
+        self, mock_pid_controller, initial_heating_gains, initial_cooling_gains
+    ):
+        """When cooling history is empty, cooling gains stay at initial values."""
+        mgr = PIDGainsManager(mock_pid_controller, initial_heating_gains, initial_cooling_gains)
+
+        old_state = Mock()
+        old_state.attributes = {
+            "pid_history": {
+                "heating": [],
+                "cooling": [],
+            }
+        }
+        mgr.restore_from_state(old_state)
+        cooling_gains = mgr.get_gains(HVACMode.COOL)
+        # Should remain at initial values since no history entry to restore from
+        assert cooling_gains.kp == pytest.approx(initial_cooling_gains.kp)
+        assert cooling_gains.ki == pytest.approx(initial_cooling_gains.ki)

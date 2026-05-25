@@ -240,7 +240,11 @@ class NightSetbackManager:
         if current_time is None:
             current_time = dt_util.utcnow()
 
-        # Check if auto-learning setback should apply
+        # Check if auto-learning setback should apply.
+        # H11 / D9: Return in_night_period=False so downstream night-setback logic
+        # (grace periods, state-attribute override type) does NOT activate.
+        # Mark the result with auto_learning_window=True so callers can present the
+        # dedicated "auto_learning_window" override rather than "night_setback".
         if self.should_apply_auto_learning_setback() and self._is_in_auto_learning_window(current_time):
             target_temp = self._calculator._get_target_temp()
             if target_temp is None:
@@ -248,8 +252,10 @@ class NightSetbackManager:
 
             effective_target = target_temp - AUTO_LEARNING_SETBACK_DELTA
             info = {
-                "night_setback_delta": AUTO_LEARNING_SETBACK_DELTA,
+                "auto_learning_window": True,
+                "auto_learning_delta": AUTO_LEARNING_SETBACK_DELTA,
                 "effective_delta": AUTO_LEARNING_SETBACK_DELTA,
+                # Keep legacy key for backwards-compat with any existing callers
                 "auto_learning": True,
             }
 
@@ -262,7 +268,8 @@ class NightSetbackManager:
                     self._days_at_maintenance_cap,
                 )
 
-            return effective_target, True, info
+            # in_night_period=False — this is NOT a regular night-setback window
+            return effective_target, False, info
 
         # First calculate what the full setback would be
         effective_target, in_night_period, info = self._calculator.calculate_night_setback_adjustment(current_time)

@@ -1,0 +1,21 @@
+{
+  "format_version": 8,
+  "heating": {
+    "cycle_history": [
+      {"overshoot": 0.10, "undershoot": 0.05, "settling_time": 16.0, "oscillations": 0, "rise_time": 10.0}
+    ],
+    "auto_apply_count": 5,
+    "convergence_confidence": 62.0
+  },
+  "cooling": {"cycle_history": [], "auto_apply_count": 0, "convergence_confidence": 0.0},
+  "undershoot_detector": {
+    "cumulative_ki_multiplier": 1.15,
+    "last_adjustment_time": null,
+    "time_below_target": 1.5,
+    "thermal_debt": 6.0,
+    "consecutive_failures": 2
+  },
+  "last_adjustment_time": null,
+  "consecutive_converged_cycles": 8,
+  "pid_converged_for_ke": true
+}

@@ -54,6 +54,10 @@ def build_state_attributes(thermostat: SmartThermostat) -> dict[str, Any]:
         ),
         "cycle_count": build_cycle_count(heater_count, cooler_count, is_demand_switch),
         "integral": thermostat.pid_control_i,
+        # Cycle tracking state — persisted so that a mid-cycle restart doesn't emit
+        # a spurious CYCLE_STARTED and wipe CycleTrackerManager's in-progress timestamps.
+        "_cycle_active": thermostat._heater_controller.cycle_active if thermostat._heater_controller else False,
+        "_has_demand": thermostat._heater_controller.has_demand if thermostat._heater_controller else False,
     }
 
     # PID history (flat for RestoreEntity round-trip)
@@ -731,14 +735,22 @@ def _build_status_attribute(thermostat: SmartThermostat) -> dict[str, Any]:
     # TODO: Extract preheat details from night setback controller when available
 
     # === Night setback override data ===
+    # H11 / D9: auto-learning setback now returns in_night=False with
+    # info["auto_learning_window"]=True, so it lands in the separate branch below.
     night_setback_active = False
     night_setback_delta = None
     night_setback_ends_at = None
     night_setback_limited_to = None
+    auto_learning_window_active = False
+    auto_learning_window_delta = None
     if thermostat._night_setback_controller:
         try:
             _, in_night, info = thermostat._night_setback_controller.calculate_night_setback_adjustment()
-            if in_night:
+            if info.get("auto_learning_window"):
+                # Auto-learning setback — separate override type (D9)
+                auto_learning_window_active = True
+                auto_learning_window_delta = info.get("auto_learning_delta")
+            elif in_night:
                 night_setback_delta = info.get("night_setback_delta")
                 night_setback_active = True
                 setback_end_time = info.get("night_setback_end")
@@ -810,6 +822,8 @@ def _build_status_attribute(thermostat: SmartThermostat) -> dict[str, Any]:
         night_setback_delta=night_setback_delta,
         night_setback_ends_at=night_setback_ends_at,
         night_setback_limited_to=night_setback_limited_to,
+        auto_learning_window_active=auto_learning_window_active,
+        auto_learning_window_delta=auto_learning_window_delta,
         learning_grace_active=learning_grace_active,
         learning_grace_until=learning_grace_until,
         cooling_clamp_active=cooling_clamp_active,

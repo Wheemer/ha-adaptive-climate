@@ -16,6 +16,29 @@ STORAGE_VERSION = 5
 SAVE_DELAY_SECONDS = 30
 
 
+def _migrate_store(data: dict, from_version: int) -> dict:
+    """Migrate store data from an older version to STORAGE_VERSION.
+
+    For versions 1-4, the outer structure {"version": N, "zones": {...}} is the same.
+    The inner zone data (learner serialization format) is handled separately by
+    learner_serialization.py. We only need to bump the outer version number here.
+
+    Returns a copy of data with version bumped to STORAGE_VERSION.
+    Returns data unchanged if from_version >= STORAGE_VERSION.
+    """
+    if from_version >= STORAGE_VERSION:
+        return data
+
+    _LOGGER.warning(
+        "Migrating store from v%s to v%s",
+        from_version,
+        STORAGE_VERSION,
+    )
+    migrated = dict(data)
+    migrated["version"] = STORAGE_VERSION
+    return migrated
+
+
 def _create_store(hass, version: int, key: str):
     """Create a Store instance."""
     from homeassistant.helpers.storage import Store
@@ -118,6 +141,10 @@ class LearningDataStore:
             _LOGGER.warning("Persisted learning data failed validation, using default structure")
             self._data = {"version": STORAGE_VERSION, "zones": {}}
             return self._data
+
+        # Migrate older store versions to current
+        if data["version"] < STORAGE_VERSION:
+            data = _migrate_store(data, data["version"])
 
         self._data = data
         return data

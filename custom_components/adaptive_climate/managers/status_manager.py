@@ -101,6 +101,9 @@ class StatusManager:
         night_setback_delta: float | None = None,
         night_setback_ends_at: str | None = None,
         night_setback_limited_to: float | None = None,
+        # Auto-learning window override (D9: separate from night_setback)
+        auto_learning_window_active: bool = False,
+        auto_learning_window_delta: float | None = None,
         # Learning grace override
         learning_grace_active: bool = False,
         learning_grace_until: str | None = None,
@@ -141,6 +144,8 @@ class StatusManager:
             night_setback_delta=night_setback_delta,
             night_setback_ends_at=night_setback_ends_at,
             night_setback_limited_to=night_setback_limited_to,
+            auto_learning_window_active=auto_learning_window_active,
+            auto_learning_window_delta=auto_learning_window_delta,
             learning_grace_active=learning_grace_active,
             learning_grace_until=learning_grace_until,
             cooling_clamp_active=cooling_clamp_active,
@@ -361,6 +366,9 @@ def build_overrides(
     night_setback_delta: float | None = None,
     night_setback_ends_at: str | None = None,
     night_setback_limited_to: float | None = None,
+    # Auto-learning window (D9: separate override type, not piggybacking night_setback)
+    auto_learning_window_active: bool = False,
+    auto_learning_window_delta: float | None = None,
     # Learning grace
     learning_grace_active: bool = False,
     learning_grace_until: str | None = None,
@@ -379,7 +387,8 @@ def build_overrides(
     4. cooling_supply_clamp
     5. preheating
     6. night_setback
-    7. learning_grace
+    7. auto_learning_window
+    8. learning_grace
 
     Returns:
         List of override dicts, ordered by priority
@@ -449,7 +458,16 @@ def build_overrides(
             )
         )
 
-    # 7. Learning grace (lowest priority)
+    # 7. Auto-learning window (D9: own override type)
+    if auto_learning_window_active:
+        overrides.append(
+            build_override(
+                OverrideType.AUTO_LEARNING_WINDOW,
+                delta=auto_learning_window_delta,
+            )
+        )
+
+    # 8. Learning grace (lowest priority)
     if learning_grace_active:
         overrides.append(
             build_override(

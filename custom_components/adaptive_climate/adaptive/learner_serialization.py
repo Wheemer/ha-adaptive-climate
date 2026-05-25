@@ -2,6 +2,17 @@
 
 This module provides functions to serialize and deserialize AdaptiveLearner state
 to/from dictionaries for persistence across Home Assistant restarts.
+
+Migration policy:
+- Every format bump requires a migrator function added to this module.
+- Migrators NEVER wipe cycle_history or convergence_confidence — data loss is
+  worse than a stale gain.
+- Each migrator updates data["format_version"] in place and returns the dict.
+- The _migrate() dispatch function chains v4→v5→...→CURRENT_VERSION, skipping
+  any steps already satisfied by the stored version.
+- On migration, a single WARN is logged with old and new version numbers.
+- If stored version > CURRENT_VERSION, data is returned unchanged with a WARN
+  (forward-compatibility: the user downgraded the component).
 """
 
 from __future__ import annotations
@@ -159,7 +170,130 @@ def _deserialize_cycle(cycle_dict: dict[str, Any]) -> CycleMetrics:
     )
 
 
-def _default_learner_state() -> dict[str, Any]:
+def _migrate_v4_to_v5(data: dict[str, Any]) -> dict[str, Any]:
+    """Flat → mode-keyed. Move cycle_history/auto_apply_count/convergence_confidence under heating{}."""
+    cycle_history = data.pop("cycle_history", [])
+    auto_apply_count = data.pop("auto_apply_count", 0)
+    convergence_confidence = data.pop("convergence_confidence", 0.0)
+
+    data["heating"] = {
+        "cycle_history": cycle_history,
+        "auto_apply_count": auto_apply_count,
+        "convergence_confidence": convergence_confidence,
+    }
+    data.setdefault("cooling", {"cycle_history": [], "auto_apply_count": 0, "convergence_confidence": 0.0})
+    data["format_version"] = 5
+    return data
+
+
+def _migrate_v5_to_v6(data: dict[str, Any]) -> dict[str, Any]:
+    """Add undershoot_detector with zero defaults."""
+    data.setdefault(
+        "undershoot_detector",
+        {"cumulative_ki_multiplier": 1.0, "time_below_target": 0.0, "thermal_debt": 0.0},
+    )
+    data["format_version"] = 6
+    return data
+
+
+def _migrate_v6_to_v7(data: dict[str, Any]) -> dict[str, Any]:
+    """Add chronic_approach_detector with zero defaults (was briefly present in v7)."""
+    data.setdefault("chronic_approach_detector", {"cumulative_multiplier": 1.0, "consecutive_failures": 0})
+    data["format_version"] = 7
+    return data
+
+
+def _migrate_v7_to_v8(data: dict[str, Any]) -> dict[str, Any]:
+    """Merge chronic_approach_detector into undershoot_detector. Take max of multipliers. Add consecutive_failures=0."""
+    chronic = data.pop("chronic_approach_detector", {})
+    undershoot = data.get("undershoot_detector", {})
+
+    # Merge: take max of multipliers so we don't lose accumulated Ki boost
+    chronic_mult = float(chronic.get("cumulative_multiplier", 1.0))
+    undershoot_mult = float(undershoot.get("cumulative_ki_multiplier", 1.0))
+    merged_mult = max(chronic_mult, undershoot_mult)
+
+    undershoot["cumulative_ki_multiplier"] = merged_mult
+    undershoot.setdefault("consecutive_failures", 0)
+    undershoot.setdefault("last_adjustment_time", None)
+    data["undershoot_detector"] = undershoot
+    data["format_version"] = 8
+    return data
+
+
+def _migrate_v8_to_v9(data: dict[str, Any]) -> dict[str, Any]:
+    """Add contribution_tracker with zero defaults."""
+    data.setdefault(
+        "contribution_tracker",
+        {"maintenance_contribution": 0.0, "heating_rate_contribution": 0.0, "recovery_cycle_count": 0},
+    )
+    data["format_version"] = 9
+    return data
+
+
+def _migrate_v9_to_v10(data: dict[str, Any]) -> dict[str, Any]:
+    """Add heating_rate_learner={}. Convert undershoot last_adjustment_time from monotonic float to None.
+
+    Monotonic floats are meaningless across restarts, so we reset to None rather
+    than trying to convert them. This means the undershoot detector will have a
+    fresh cooldown window after migration, which is the safe default.
+    """
+    data.setdefault("heating_rate_learner", {})
+
+    # Convert monotonic float to None — can't meaningfully translate across restart
+    undershoot = data.get("undershoot_detector", {})
+    last_adj = undershoot.get("last_adjustment_time")
+    if isinstance(last_adj, (int, float)):
+        undershoot["last_adjustment_time"] = None
+    data["undershoot_detector"] = undershoot
+    data["format_version"] = 10
+    return data
+
+
+def _migrate(data: dict[str, Any]) -> dict[str, Any]:
+    """Chain migrate data from stored version up to CURRENT_VERSION.
+
+    Returns migrated dict. Never wipes cycle_history.
+
+    If version < 4: treated as v4 (flat structure, best effort).
+    If version > CURRENT_VERSION: returned unchanged with a warning.
+    """
+    stored_version = data.get("format_version", 0)
+    try:
+        stored_version = int(stored_version)
+    except (TypeError, ValueError):
+        stored_version = 0
+
+    if stored_version > CURRENT_VERSION:
+        _LOGGER.warning(
+            "Learner state has future format version %s (current %s) — returning unchanged",
+            stored_version,
+            CURRENT_VERSION,
+        )
+        return data
+
+    if stored_version < 4:
+        # Treat as v4 flat structure (best effort)
+        stored_version = 4
+        data.setdefault("format_version", 4)
+
+    _steps = [
+        (4, _migrate_v4_to_v5),
+        (5, _migrate_v5_to_v6),
+        (6, _migrate_v6_to_v7),
+        (7, _migrate_v7_to_v8),
+        (8, _migrate_v8_to_v9),
+        (9, _migrate_v9_to_v10),
+    ]
+
+    for from_version, migrator in _steps:
+        if stored_version <= from_version:
+            data = migrator(data)
+
+    return data
+
+
+def default_learner_state() -> dict[str, Any]:
     """Return default learner state for when restoration fails or data is missing.
 
     Returns:
@@ -224,10 +358,11 @@ def restore_learner_from_dict(data: dict[str, Any]) -> dict[str, Any]:
 
     if stored_version != CURRENT_VERSION:
         _LOGGER.warning(
-            "Unrecognized learner format version %s, using defaults",
+            "Migrating learner state from v%s to v%s — cycle history preserved",
             stored_version,
+            CURRENT_VERSION,
         )
-        return _default_learner_state()
+        data = _migrate(data)
 
     # V10 format: mode-keyed structure
     heating_cycle_history = [

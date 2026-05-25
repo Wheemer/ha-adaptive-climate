@@ -1,0 +1,10 @@
+{
+  "cycle_history": [
+    {"overshoot": 0.2, "undershoot": 0.1, "settling_time": 25.0, "oscillations": 1, "rise_time": 15.0}
+  ],
+  "auto_apply_count": 2,
+  "convergence_confidence": 35.0,
+  "last_adjustment_time": null,
+  "consecutive_converged_cycles": 3,
+  "pid_converged_for_ke": false
+}

@@ -2,7 +2,7 @@
 
 import sys
 import pytest
-from unittest.mock import MagicMock, Mock
+from unittest.mock import MagicMock
 from abc import ABC
 from enum import IntFlag
 
@@ -137,17 +137,17 @@ class TestDualGainSetRestoration:
     The _restore_dual_gain_sets() method has been removed from StateRestorer.
     """
 
-    def test_gains_restore_from_pid_history_heating_only(self, state_restorer, mock_thermostat):
+    def test_gains_restore_from_pid_history_heating_only(self):
         """Test that gains restoration is delegated to PIDGainsManager."""
         # This functionality is now tested in test_pid_gains_manager.py
         pass
 
-    def test_gains_restore_from_pid_history_heating_and_cooling(self, state_restorer, mock_thermostat):
+    def test_gains_restore_from_pid_history_heating_and_cooling(self):
         """Test that gains restoration is delegated to PIDGainsManager."""
         # This functionality is now tested in test_pid_gains_manager.py
         pass
 
-    def test_gains_restore_cooling_none_when_missing(self, state_restorer, mock_thermostat):
+    def test_gains_restore_cooling_none_when_missing(self):
         """Test that gains restoration is delegated to PIDGainsManager."""
         # This functionality is now tested in test_pid_gains_manager.py
         pass
@@ -320,7 +320,7 @@ class TestInitialPhysicsGainsRecording:
     def test_initial_gains_recorded_when_no_history_in_saved_state(self, state_restorer, mock_thermostat):
         """Test that initial physics gains are recorded when saved state has no history."""
         from custom_components.adaptive_climate.managers.pid_gains_manager import PIDGainsManager
-        from custom_components.adaptive_climate.const import PIDGains, PIDChangeReason
+        from custom_components.adaptive_climate.const import PIDGains
 
         # Setup gains manager
         initial_gains = PIDGains(kp=20.0, ki=0.01, kd=100.0, ke=0.0)
@@ -398,7 +398,7 @@ class TestPidHistoryPersistence:
     def test_pid_history_round_trip(self, state_restorer, mock_thermostat):
         """pid_history in state attrs → restore_from_state → gains_manager has history."""
         from custom_components.adaptive_climate.managers.pid_gains_manager import PIDGainsManager
-        from custom_components.adaptive_climate.const import PIDGains, PIDChangeReason
+        from custom_components.adaptive_climate.const import PIDGains
 
         # Setup gains manager with initial gains
         initial_gains = PIDGains(kp=20.0, ki=0.01, kd=100.0, ke=0.0)
@@ -513,3 +513,28 @@ class TestPidHistoryPersistence:
         assert current_gains.ki == 0.03
         assert current_gains.kd == 150.0
         assert current_gains.ke == 0.8
+
+
+class TestIntegralClampOnRestore:
+    """Tests that restored integral is clamped to current PID bounds."""
+
+    def test_integral_clamped_after_restore(self, state_restorer, mock_thermostat):
+        """Restored integral exceeding out_max is clamped."""
+        mock_thermostat._gains_manager = None  # skip gains restore
+        mock_thermostat._pid_controller.integral = 0.0
+        mock_thermostat._pid_controller._out_max = 50.0
+        mock_thermostat._pid_controller._out_min = 0.0
+        mock_thermostat._pid_controller._external = 0.0
+        mock_thermostat._pid_controller._feedforward = 0.0
+
+        old_state = MagicMock()
+        old_state.state = "heat"
+        old_state.attributes = {"integral": 100.0}  # Exceeds out_max
+
+        state_restorer._restore_pid_values(old_state)
+
+        # clamp_integral should have been called
+        mock_thermostat._pid_controller.clamp_integral.assert_called_once_with(
+            external=mock_thermostat._pid_controller._external,
+            feedforward=mock_thermostat._pid_controller._feedforward,
+        )

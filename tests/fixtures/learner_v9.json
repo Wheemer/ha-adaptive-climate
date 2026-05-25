@@ -1,0 +1,26 @@
+{
+  "format_version": 9,
+  "heating": {
+    "cycle_history": [
+      {"overshoot": 0.08, "undershoot": 0.04, "settling_time": 14.0, "oscillations": 0, "rise_time": 9.0}
+    ],
+    "auto_apply_count": 6,
+    "convergence_confidence": 70.0
+  },
+  "cooling": {"cycle_history": [], "auto_apply_count": 0, "convergence_confidence": 0.0},
+  "undershoot_detector": {
+    "cumulative_ki_multiplier": 1.05,
+    "last_adjustment_time": null,
+    "time_below_target": 0.5,
+    "thermal_debt": 3.0,
+    "consecutive_failures": 0
+  },
+  "contribution_tracker": {
+    "maintenance_contribution": 18.5,
+    "heating_rate_contribution": 7.2,
+    "recovery_cycle_count": 4
+  },
+  "last_adjustment_time": null,
+  "consecutive_converged_cycles": 10,
+  "pid_converged_for_ke": true
+}

@@ -1,12 +1,10 @@
 """Tests for AdaptiveLearner serialization and format migrations."""
 
 import pytest
-from datetime import datetime, timezone
 from custom_components.adaptive_climate.adaptive.learning import AdaptiveLearner
 from custom_components.adaptive_climate.adaptive.cycle_analysis import CycleMetrics
 from custom_components.adaptive_climate.adaptive.learner_serialization import (
     CURRENT_VERSION,
-    learner_to_dict,
     restore_learner_from_dict,
 )
 from custom_components.adaptive_climate.const import HeatingType
@@ -379,3 +377,67 @@ class TestBackwardCompatibility:
         assert "cycle_history" in data["cooling"]
         assert "auto_apply_count" in data["cooling"]
         assert "convergence_confidence" in data["cooling"]
+
+
+class TestVersionMigrations:
+    """Test per-version migration: cycle_history always preserved."""
+
+    def _load_fixture(self, name: str) -> dict:
+        import json
+        import pathlib
+
+        fixtures_dir = pathlib.Path(__file__).parent / "fixtures"
+        return json.loads((fixtures_dir / name).read_text())
+
+    def test_v4_cycle_history_preserved(self):
+        data = self._load_fixture("learner_v4.json")
+        result = restore_learner_from_dict(data)
+        assert len(result["heating_cycle_history"]) == 1
+        assert result["heating_convergence_confidence"] == pytest.approx(35.0)
+
+    def test_v5_cycle_history_preserved(self):
+        data = self._load_fixture("learner_v5.json")
+        result = restore_learner_from_dict(data)
+        assert len(result["heating_cycle_history"]) == 1
+        assert result["heating_convergence_confidence"] == pytest.approx(28.0)
+
+    def test_v6_cycle_history_and_undershoot_preserved(self):
+        data = self._load_fixture("learner_v6.json")
+        result = restore_learner_from_dict(data)
+        assert len(result["heating_cycle_history"]) == 1
+        assert result["heating_convergence_confidence"] == pytest.approx(42.0)
+        assert result["undershoot_detector_state"]["cumulative_ki_multiplier"] == pytest.approx(1.1)
+
+    def test_v7_merges_chronic_into_undershoot(self):
+        data = self._load_fixture("learner_v7.json")
+        result = restore_learner_from_dict(data)
+        assert len(result["heating_cycle_history"]) == 1
+        # max(1.0, 1.15) = 1.15
+        assert result["undershoot_detector_state"]["cumulative_ki_multiplier"] == pytest.approx(1.15)
+
+    def test_v8_cycle_history_and_failures_preserved(self):
+        data = self._load_fixture("learner_v8.json")
+        result = restore_learner_from_dict(data)
+        assert len(result["heating_cycle_history"]) == 1
+        assert result["undershoot_detector_state"]["consecutive_failures"] == 2
+
+    def test_v9_contribution_tracker_preserved(self):
+        data = self._load_fixture("learner_v9.json")
+        result = restore_learner_from_dict(data)
+        assert len(result["heating_cycle_history"]) == 1
+        assert result["contribution_tracker_state"]["maintenance_contribution"] == pytest.approx(18.5)
+        assert result["contribution_tracker_state"]["recovery_cycle_count"] == 4
+
+    def test_all_versions_produce_current_format(self):
+        """After migration, format_version == CURRENT_VERSION for all fixtures."""
+        for fname in [
+            "learner_v4.json",
+            "learner_v5.json",
+            "learner_v6.json",
+            "learner_v7.json",
+            "learner_v8.json",
+            "learner_v9.json",
+        ]:
+            data = self._load_fixture(fname)
+            result = restore_learner_from_dict(data)
+            assert result["format_version"] == CURRENT_VERSION, f"Failed for {fname}"

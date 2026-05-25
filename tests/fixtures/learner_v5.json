@@ -1,0 +1,14 @@
+{
+  "format_version": 5,
+  "heating": {
+    "cycle_history": [
+      {"overshoot": 0.15, "undershoot": 0.08, "settling_time": 20.0, "oscillations": 0, "rise_time": 12.0}
+    ],
+    "auto_apply_count": 1,
+    "convergence_confidence": 28.0
+  },
+  "cooling": {"cycle_history": [], "auto_apply_count": 0, "convergence_confidence": 0.0},
+  "last_adjustment_time": null,
+  "consecutive_converged_cycles": 2,
+  "pid_converged_for_ke": false
+}
