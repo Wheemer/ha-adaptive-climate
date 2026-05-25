@@ -1,6 +1,6 @@
 """Tests for cycle metrics recorder."""
 
-from datetime import datetime
+from datetime import datetime, timezone
 from unittest.mock import MagicMock, Mock
 
 import pytest
@@ -245,7 +245,7 @@ class TestRiseTimeThreshold:
         )
 
         # Create temperature history reaching target within 0.5°C (but not 0.05°C)
-        cycle_start = datetime(2025, 1, 15, 10, 0, 0)
+        cycle_start = datetime(2025, 1, 15, 10, 0, 0, tzinfo=timezone.utc)
         target_temp = 20.0
         start_temp = 18.0
 
@@ -296,7 +296,7 @@ class TestRiseTimeThreshold:
         )
 
         # Create temperature history
-        cycle_start = datetime(2025, 1, 15, 10, 0, 0)
+        cycle_start = datetime(2025, 1, 15, 10, 0, 0, tzinfo=timezone.utc)
         target_temp = 20.0
 
         temperature_history = [
@@ -344,7 +344,7 @@ class TestRiseTimeThreshold:
         )
 
         # Create temperature history (need at least 5 samples)
-        cycle_start = datetime(2025, 1, 15, 10, 0, 0)
+        cycle_start = datetime(2025, 1, 15, 10, 0, 0, tzinfo=timezone.utc)
         target_temp = 20.0
 
         temperature_history = [
@@ -395,14 +395,14 @@ class TestStartingDeltaCalculation:
         )
 
         # Create temperature history starting at 18.0°C
-        start_time = datetime(2025, 1, 15, 10, 0, 0)
+        start_time = datetime(2025, 1, 15, 10, 0, 0, tzinfo=timezone.utc)
         temperature_history = [
-            (datetime(2025, 1, 15, 10, 0, 0), 18.0),
-            (datetime(2025, 1, 15, 10, 5, 0), 18.5),
-            (datetime(2025, 1, 15, 10, 10, 0), 19.0),
-            (datetime(2025, 1, 15, 10, 15, 0), 19.5),
-            (datetime(2025, 1, 15, 10, 20, 0), 20.0),
-            (datetime(2025, 1, 15, 10, 25, 0), 20.2),
+            (datetime(2025, 1, 15, 10, 0, 0, tzinfo=timezone.utc), 18.0),
+            (datetime(2025, 1, 15, 10, 5, 0, tzinfo=timezone.utc), 18.5),
+            (datetime(2025, 1, 15, 10, 10, 0, tzinfo=timezone.utc), 19.0),
+            (datetime(2025, 1, 15, 10, 15, 0, tzinfo=timezone.utc), 19.5),
+            (datetime(2025, 1, 15, 10, 20, 0, tzinfo=timezone.utc), 20.0),
+            (datetime(2025, 1, 15, 10, 25, 0, tzinfo=timezone.utc), 20.2),
         ]
 
         # Target temp is 20.0 (from mock_callbacks)
@@ -446,14 +446,14 @@ class TestStartingDeltaCalculation:
         )
 
         # Create temperature history starting at 22.0°C (above target)
-        start_time = datetime(2025, 1, 15, 10, 0, 0)
+        start_time = datetime(2025, 1, 15, 10, 0, 0, tzinfo=timezone.utc)
         temperature_history = [
-            (datetime(2025, 1, 15, 10, 0, 0), 22.0),
-            (datetime(2025, 1, 15, 10, 5, 0), 21.5),
-            (datetime(2025, 1, 15, 10, 10, 0), 21.0),
-            (datetime(2025, 1, 15, 10, 15, 0), 20.5),
-            (datetime(2025, 1, 15, 10, 20, 0), 20.0),
-            (datetime(2025, 1, 15, 10, 25, 0), 19.8),
+            (datetime(2025, 1, 15, 10, 0, 0, tzinfo=timezone.utc), 22.0),
+            (datetime(2025, 1, 15, 10, 5, 0, tzinfo=timezone.utc), 21.5),
+            (datetime(2025, 1, 15, 10, 10, 0, tzinfo=timezone.utc), 21.0),
+            (datetime(2025, 1, 15, 10, 15, 0, tzinfo=timezone.utc), 20.5),
+            (datetime(2025, 1, 15, 10, 20, 0, tzinfo=timezone.utc), 20.0),
+            (datetime(2025, 1, 15, 10, 25, 0, tzinfo=timezone.utc), 19.8),
         ]
 
         # Target temp is 20.0
