@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any, TypedDict
 from homeassistant.util import dt as dt_util
 
 from ..const import OverrideType, ThermostatCondition, ThermostatState
+from .pause_detector import PauseDetector
 
 if TYPE_CHECKING:
     from ..adaptive.contact_sensors import ContactSensorHandler
@@ -60,6 +61,10 @@ class StatusManager:
         self._humidity_detector = humidity_detector
         self._night_setback_controller: NightSetbackManager | None = None
         self._debug = debug
+        self._pause_detector = PauseDetector(
+            contact_sensor_handler=contact_sensor_handler,
+            humidity_detector=humidity_detector,
+        )
 
     def set_night_setback_controller(self, controller: NightSetbackManager | None):
         """Set night setback controller (late binding).
@@ -171,16 +176,7 @@ class StatusManager:
         Returns:
             True if any pause mechanism is active
         """
-        # Check contact sensors (highest priority)
-        if self._contact_sensor_handler and self._contact_sensor_handler.should_take_action():
-            from ..adaptive.contact_sensors import ContactAction
-
-            action = self._contact_sensor_handler.get_action(hvac_mode)
-            if action == ContactAction.PAUSE:
-                return True
-
-        # Check humidity detection
-        return bool(self._humidity_detector and self._humidity_detector.should_pause())
+        return self._pause_detector.is_control_paused(hvac_mode)
 
 
 def format_iso8601(dt: datetime) -> str:

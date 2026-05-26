@@ -246,29 +246,10 @@ def _add_learning_object(thermostat: SmartThermostat, attrs: dict[str, Any]) -> 
     # Get heating type from thermostat
     heating_type = thermostat._heating_type if hasattr(thermostat, "_heating_type") else None
 
-    # Detect all pause conditions
-    is_paused = False
+    # Detect all pause conditions via unified PauseDetector
+    from .pause_detector import PauseDetector
 
-    # Check learning grace period
-    if thermostat._night_setback_controller:
-        try:
-            is_paused = thermostat._night_setback_controller.in_learning_grace_period
-        except (TypeError, AttributeError):
-            pass
-
-    # Check contact sensor pause
-    if not is_paused and thermostat._contact_sensor_handler:
-        try:
-            is_paused = thermostat._contact_sensor_handler.is_any_contact_open()
-        except (TypeError, AttributeError):
-            pass
-
-    # Check humidity pause
-    if not is_paused and thermostat._humidity_detector:
-        try:
-            is_paused = thermostat._humidity_detector.should_pause()
-        except (TypeError, AttributeError):
-            pass
+    is_paused = PauseDetector.from_entity(thermostat).is_learning_paused()
 
     # Get contribution tracker for tier gate checks
     contribution_tracker = getattr(adaptive_learner, "_contribution_tracker", None)

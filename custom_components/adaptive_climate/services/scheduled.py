@@ -253,37 +253,10 @@ async def _run_weekly_report_core(
             heating_type = zone_data.get("heating_type") if zone_data else None
 
             # Detect pause conditions (needed for learning status calculation)
-            is_paused = False
+            from ..managers.pause_detector import PauseDetector
+
             climate_entity = zone_data.get("climate_entity") if zone_data else None
-            if climate_entity:
-                # Check learning grace period
-                if hasattr(climate_entity, "_night_setback_controller") and climate_entity._night_setback_controller:
-                    try:
-                        is_paused = climate_entity._night_setback_controller.in_learning_grace_period
-                    except (TypeError, AttributeError):
-                        pass
-
-                # Check contact sensor pause
-                if (
-                    not is_paused
-                    and hasattr(climate_entity, "_contact_sensor_handler")
-                    and climate_entity._contact_sensor_handler
-                ):
-                    try:
-                        is_paused = climate_entity._contact_sensor_handler.is_any_contact_open()
-                    except (TypeError, AttributeError):
-                        pass
-
-                # Check humidity pause
-                if (
-                    not is_paused
-                    and hasattr(climate_entity, "_humidity_detector")
-                    and climate_entity._humidity_detector
-                ):
-                    try:
-                        is_paused = climate_entity._humidity_detector.should_pause()
-                    except (TypeError, AttributeError):
-                        pass
+            is_paused = PauseDetector.from_entity(climate_entity).is_learning_paused() if climate_entity else False
 
             learning_status = _compute_learning_status(
                 cycle_count,
