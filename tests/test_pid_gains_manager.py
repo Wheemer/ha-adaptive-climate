@@ -1711,6 +1711,58 @@ class TestCoolingGainsRestore:
         assert cooling_gains.kp == pytest.approx(initial_cooling_gains.kp)
         assert cooling_gains.ki == pytest.approx(initial_cooling_gains.ki)
 
+    def test_cooling_history_survives_state_roundtrip(
+        self, mock_pid_controller, initial_heating_gains, initial_cooling_gains
+    ) -> None:
+        """M10: cooling PID history is preserved through state serialization roundtrip.
+
+        Regression test: state_attributes.py must serialize pid_history as a mode-keyed
+        dict {"heating": [...], "cooling": [...]}, not as a flat heating-only list.
+        The flat-list format (the pre-fix behaviour) silently discards cooling history
+        on every restart.
+        """
+        # Build manager with history entries in BOTH modes
+        mgr = PIDGainsManager(mock_pid_controller, initial_heating_gains, initial_cooling_gains)
+        mgr.set_gains(PIDChangeReason.AUTO_APPLY, kp=1.1, ki=0.11, kd=11.0, ke=0.1, mode=HVACMode.HEAT)
+        mgr.set_gains(PIDChangeReason.AUTO_APPLY, kp=1.6, ki=0.16, kd=13.0, ke=0.2, mode=HVACMode.COOL)
+
+        # Serialize as mode-keyed dict — the format state_attributes.py must produce after fix.
+        # (Before fix it wrote only the heating history as a flat list.)
+        def _fmt(e: dict) -> dict:
+            return {
+                "timestamp": e["timestamp"],
+                "kp": round(e["kp"], 2),
+                "ki": round(e["ki"], 4),
+                "kd": round(e["kd"], 2),
+                "ke": round(e.get("ke", 0.0), 2),
+                "reason": e["reason"],
+            }
+
+        pid_history_attr = {
+            "heating": [_fmt(e) for e in mgr.get_history(HVACMode.HEAT)],
+            "cooling": [_fmt(e) for e in mgr.get_history(HVACMode.COOL)],
+        }
+
+        # Restore into a fresh manager (simulating HA restart)
+        old_state = Mock()
+        old_state.attributes = {"pid_history": pid_history_attr}
+        restored = PIDGainsManager(mock_pid_controller, initial_heating_gains, initial_cooling_gains)
+        restored.restore_from_state(old_state)
+
+        # Both histories must survive the roundtrip
+        heat_hist = restored.get_history(HVACMode.HEAT)
+        cool_hist = restored.get_history(HVACMode.COOL)
+
+        assert len(heat_hist) == 1
+        assert heat_hist[0]["kp"] == pytest.approx(1.1)
+
+        assert len(cool_hist) == 1, (
+            "Cooling PID history must survive a state serialization roundtrip. "
+            "state_attributes.py must serialize pid_history as a mode-keyed dict "
+            "{'heating': [...], 'cooling': [...]}, not a flat heating-only list."
+        )
+        assert cool_hist[0]["kp"] == pytest.approx(1.6)
+
     def test_cooling_history_restored_when_initial_cooling_gains_none(self, mock_pid_controller, initial_heating_gains):
         """M10: cooling history must be restored even when manager starts without cooling gains.
 
