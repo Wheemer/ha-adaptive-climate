@@ -305,7 +305,58 @@ class ClimateControlMixin:
             # Update control time for humidity integral decay calculation
             self._last_control_time = time.monotonic()
 
+            # Fire milestone notification check once per control cycle (not on attribute reads)
+            self._async_schedule_milestone_check()
+
             self.async_write_ha_state()
+
+    def _async_schedule_milestone_check(self) -> None:
+        """Schedule a learning milestone check as a background task.
+
+        Called once per control cycle (not on attribute reads) to avoid flooding
+        the event-loop.  The milestone tracker only fires a notification when the
+        learning tier actually changes, so duplicate calls within a cycle are
+        harmless but still wasteful on every attribute read.
+        """
+        if not self._zone_id:
+            return
+
+        coordinator = self.hass.data.get(DOMAIN, {}).get("coordinator")
+        if not coordinator:
+            return
+
+        zone_data = coordinator.get_zone_data(self._zone_id)
+        if not zone_data:
+            return
+
+        milestone_tracker = zone_data.get("milestone_tracker")
+        adaptive_learner = zone_data.get("adaptive_learner")
+        if not milestone_tracker or not adaptive_learner:
+            return
+
+        # Compute current learning status (same logic as _add_learning_object)
+        from .managers.state_attributes import _compute_learning_status
+        from .managers.pause_detector import PauseDetector
+
+        cycle_count = adaptive_learner.get_cycle_count()
+        convergence_confidence = adaptive_learner.get_convergence_confidence()
+        heating_type = getattr(self, "_heating_type", None)
+        is_paused = PauseDetector.from_entity(self).is_learning_paused()
+        contribution_tracker = getattr(adaptive_learner, "_contribution_tracker", None)
+
+        learning_status = _compute_learning_status(
+            cycle_count,
+            convergence_confidence,
+            heating_type,
+            is_paused,
+            contribution_tracker=contribution_tracker,
+        )
+        confidence_pct = round(convergence_confidence * 100)
+
+        self.hass.async_create_background_task(
+            milestone_tracker.async_check_milestone(learning_status, confidence_pct),
+            "adaptive_climate_milestone_check",
+        )
 
     @property
     def _is_device_active(self) -> bool:

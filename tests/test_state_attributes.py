@@ -2085,3 +2085,83 @@ def test_build_state_attributes_new_structure():
     # Old status structure should NOT be present
     assert "state" not in attrs.get("status", {})
     assert "conditions" not in attrs.get("status", {})
+
+
+class TestStateAttributesNoSideEffects:
+    """Test that build_state_attributes does not produce side effects."""
+
+    def test_state_attributes_no_background_tasks(self):
+        """build_state_attributes must not create background tasks.
+
+        HA reads extra_state_attributes on every state write, UI poll, recorder
+        tick and template evaluation.  Spawning a background task on every read
+        would flood the event-loop with duplicate milestone checks.
+        """
+        from custom_components.adaptive_climate.managers.state_attributes import (
+            build_state_attributes,
+        )
+
+        # Build a minimal thermostat mock that has a milestone_tracker wired up
+        # so the old code *would* fire a background task.
+        thermostat = MagicMock()
+        thermostat._control_output = 45.0
+        thermostat.pid_control_i = 5.0
+        thermostat._heater_controller = MagicMock()
+        thermostat._heater_controller.heater_cycle_count = 10
+        thermostat._heater_controller.cooler_cycle_count = 0
+        thermostat._heater_controller.duty_accumulator_seconds = 0.0
+        thermostat._heater_controller.min_open_time = 300.0
+        thermostat._heater_controller.heater_on = False
+        thermostat._heater_controller.cooler_on = False
+        thermostat._pid_controller = MagicMock()
+        thermostat._pid_controller.outdoor_temp_lagged = 5.0
+        thermostat._gains_manager = None
+        thermostat._night_setback_controller = None
+        thermostat._contact_sensor_handler = None
+        thermostat._humidity_detector = None
+        thermostat._heating_type = "convector"
+        thermostat.entity_id = "climate.test_zone"
+        thermostat.hvac_mode = "heat"
+        # Preset temps
+        thermostat._away_temp = 18.0
+        thermostat._eco_temp = 19.0
+        thermostat._boost_temp = 24.0
+        thermostat._comfort_temp = 21.0
+        thermostat._home_temp = 20.0
+        thermostat._sleep_temp = 18.0
+        thermostat._activity_temp = 20.0
+
+        # Wire up a coordinator with an adaptive_learner AND a milestone_tracker
+        milestone_tracker = MagicMock()
+        adaptive_learner = MagicMock()
+        adaptive_learner.get_cycle_count.return_value = 10
+        adaptive_learner.get_convergence_confidence.return_value = 0.5
+        adaptive_learner._contribution_tracker = None
+        cycle_tracker = MagicMock()
+        cycle_tracker.get_state_name.return_value = "idle"
+
+        zone_data = {
+            "climate_entity_id": "climate.test_zone",
+            "adaptive_learner": adaptive_learner,
+            "cycle_tracker": cycle_tracker,
+            "milestone_tracker": milestone_tracker,
+        }
+        coordinator = MagicMock()
+        coordinator.outdoor_temp_lagged = 8.0
+        coordinator.get_zone_by_climate_entity.return_value = ("zone1", zone_data)
+        coordinator.auto_mode_switching_enabled = False
+
+        thermostat._coordinator = coordinator
+
+        # hass mock — track calls to async_create_background_task
+        hass = MagicMock()
+        hass.data = {"adaptive_climate": {"debug": False}}
+        thermostat.hass = hass
+
+        # Call build_state_attributes multiple times (simulating frequent HA reads)
+        build_state_attributes(thermostat)
+        build_state_attributes(thermostat)
+        build_state_attributes(thermostat)
+
+        # The read path must NEVER spawn a background task
+        hass.async_create_background_task.assert_not_called()

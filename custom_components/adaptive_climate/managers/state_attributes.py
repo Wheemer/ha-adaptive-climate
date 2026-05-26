@@ -267,14 +267,6 @@ def _add_learning_object(thermostat: SmartThermostat, attrs: dict[str, Any]) -> 
     confidence_pct = round(convergence_confidence * 100)
     attrs["learning"] = build_learning_object(status=learning_status, confidence=confidence_pct)
 
-    # Fire milestone check (fire-and-forget)
-    milestone_tracker = zone_data.get("milestone_tracker")
-    if milestone_tracker:
-        thermostat.hass.async_create_background_task(
-            milestone_tracker.async_check_milestone(learning_status, confidence_pct),
-            "adaptive_climate_milestone_check",
-        )
-
 
 def _add_debug_object(thermostat: SmartThermostat, attrs: dict[str, Any]) -> None:
     """Add debug object grouped by feature.
