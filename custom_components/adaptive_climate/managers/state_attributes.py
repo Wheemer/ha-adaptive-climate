@@ -60,23 +60,21 @@ def build_state_attributes(thermostat: SmartThermostat) -> dict[str, Any]:
         "_has_demand": thermostat._heater_controller.has_demand if thermostat._heater_controller else False,
     }
 
-    # PID history (flat for RestoreEntity round-trip)
+    # PID history — serialise as mode-keyed dict so cooling history survives (M10).
+    # Previously this wrote only the heating history as a flat list, which caused
+    # restore_from_state() to treat everything as heating and discard cooling history.
     if thermostat._gains_manager:
-        history = thermostat._gains_manager.get_history()
-        if history:
-            from ..const import ATTR_PID_HISTORY
+        from homeassistant.components.climate import HVACMode as _HVACMode
+        from ..const import ATTR_PID_HISTORY
 
-            attrs[ATTR_PID_HISTORY] = [
-                {
-                    "timestamp": e["timestamp"],
-                    "kp": round(e["kp"], 2),
-                    "ki": round(e["ki"], 4),
-                    "kd": round(e["kd"], 2),
-                    "ke": round(e.get("ke", 0.0), 2),
-                    "reason": e["reason"],
-                }
-                for e in history
-            ]
+        heat_history = thermostat._gains_manager.get_history(_HVACMode.HEAT)
+        cool_history = thermostat._gains_manager.get_history(_HVACMode.COOL)
+
+        if heat_history or cool_history:
+            attrs[ATTR_PID_HISTORY] = {
+                "heating": [_format_history_entry(e) for e in heat_history],
+                "cooling": [_format_history_entry(e) for e in cool_history],
+            }
 
     # Add preset temperatures if they exist
     preset_attrs = [
@@ -459,6 +457,28 @@ def _add_auto_mode_switching_attributes(thermostat: SmartThermostat, attrs: dict
 
     debug = thermostat.hass.data.get(DOMAIN, {}).get("debug", False)
     attrs.update(auto_mode_mgr.get_state_attributes(debug=debug))
+
+
+def _format_history_entry(e: dict[str, Any]) -> dict[str, Any]:
+    """Format a single PID history entry for serialization.
+
+    Rounds values to reduce state-attribute churn while preserving enough precision
+    for the restore/dedup comparison in PIDGainsManager.
+
+    Args:
+        e: Raw history entry dict from PIDGainsManager.
+
+    Returns:
+        Dict with rounded float fields suitable for HA state attributes.
+    """
+    return {
+        "timestamp": e["timestamp"],
+        "kp": round(e["kp"], 2),
+        "ki": round(e["ki"], 4),
+        "kd": round(e["kd"], 2),
+        "ke": round(e.get("ke", 0.0), 2),
+        "reason": e["reason"],
+    }
 
 
 def build_learning_object(status: str, confidence: int) -> dict[str, Any]:
