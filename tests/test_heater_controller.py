@@ -2171,7 +2171,7 @@ class TestValveActuationTimeDelays:
         return controller, dispatcher
 
     @pytest.mark.asyncio
-    @patch("custom_components.adaptive_climate.managers.heater_controller.async_call_later")
+    @patch("custom_components.adaptive_climate.managers.heater_timers.async_call_later")
     async def test_demand_signal_delayed_on_turn_on(
         self, mock_call_later, heater_controller_valve_actuation, mock_thermostat
     ):
@@ -2221,7 +2221,7 @@ class TestValveActuationTimeDelays:
         assert args[0][1] == 120.0  # delay in seconds
 
     @pytest.mark.asyncio
-    @patch("custom_components.adaptive_climate.managers.heater_controller.async_call_later")
+    @patch("custom_components.adaptive_climate.managers.heater_timers.async_call_later")
     async def test_demand_signal_immediate_when_no_valve_actuation_time(
         self, mock_call_later, mock_hass, mock_thermostat
     ):
@@ -2279,7 +2279,7 @@ class TestValveActuationTimeDelays:
         mock_call_later.assert_not_called()
 
     @pytest.mark.asyncio
-    @patch("custom_components.adaptive_climate.managers.heater_controller.async_call_later")
+    @patch("custom_components.adaptive_climate.managers.heater_timers.async_call_later")
     async def test_demand_removal_delayed_on_turn_off(
         self, mock_call_later, heater_controller_valve_actuation, mock_thermostat
     ):
@@ -2329,7 +2329,7 @@ class TestValveActuationTimeDelays:
         assert args[0][1] == 60.0  # half valve_actuation_time
 
     @pytest.mark.asyncio
-    @patch("custom_components.adaptive_climate.managers.heater_controller.async_call_later")
+    @patch("custom_components.adaptive_climate.managers.heater_timers.async_call_later")
     async def test_pending_open_timer_cancelled_on_turn_off(
         self, mock_call_later, heater_controller_valve_actuation, mock_thermostat
     ):
@@ -2464,7 +2464,7 @@ class TestDemandZeroDebounce:
         }
 
     @pytest.mark.asyncio
-    @patch("custom_components.adaptive_climate.managers.heater_controller.async_call_later")
+    @patch("custom_components.adaptive_climate.managers.heater_timers.async_call_later")
     async def test_demand_zero_debounce_fires_settling(self, mock_call_later, hc_pwm_with_dispatcher):
         """Test that demand→0 starts a debounce timer, and when it fires SETTLING_STARTED is emitted."""
         controller, dispatcher = hc_pwm_with_dispatcher
@@ -2517,7 +2517,7 @@ class TestDemandZeroDebounce:
         assert controller._cycle_active is False
 
     @pytest.mark.asyncio
-    @patch("custom_components.adaptive_climate.managers.heater_controller.async_call_later")
+    @patch("custom_components.adaptive_climate.managers.heater_timers.async_call_later")
     async def test_demand_zero_debounce_cancelled(self, mock_call_later, hc_pwm_with_dispatcher):
         """Test that demand returning >0 before timer fires cancels the debounce timer."""
         controller, dispatcher = hc_pwm_with_dispatcher
@@ -2563,7 +2563,7 @@ class TestDemandZeroDebounce:
         assert controller._cycle_active is True
 
     @pytest.mark.asyncio
-    @patch("custom_components.adaptive_climate.managers.heater_controller.async_call_later")
+    @patch("custom_components.adaptive_climate.managers.heater_timers.async_call_later")
     async def test_demand_zero_debounce_scales_with_pwm(self, mock_call_later, mock_hass, mock_thermostat):
         """Test that debounce timer = 2×PWM period for different heating types."""
         dispatcher = CycleEventDispatcher()
@@ -2622,7 +2622,7 @@ class TestDemandZeroDebounce:
             )
 
     @pytest.mark.asyncio
-    @patch("custom_components.adaptive_climate.managers.heater_controller.async_call_later")
+    @patch("custom_components.adaptive_climate.managers.heater_timers.async_call_later")
     async def test_demand_zero_debounce_propagates_was_clamped_true(self, mock_call_later, mock_hass, mock_thermostat):
         """Test that was_clamped=True is propagated through debounce into SettlingStartedEvent."""
         import time
@@ -2691,7 +2691,7 @@ class TestDemandZeroDebounce:
         assert settling_events[0].was_clamped is True
 
     @pytest.mark.asyncio
-    @patch("custom_components.adaptive_climate.managers.heater_controller.async_call_later")
+    @patch("custom_components.adaptive_climate.managers.heater_timers.async_call_later")
     async def test_demand_zero_debounce_propagates_was_clamped_false(self, mock_call_later, mock_hass, mock_thermostat):
         """Test that was_clamped=False is propagated through debounce into SettlingStartedEvent."""
         import time
@@ -2836,7 +2836,7 @@ class TestLowOutputMaintenanceTimeout:
         }
 
     @pytest.mark.asyncio
-    @patch("custom_components.adaptive_climate.managers.heater_controller.async_call_later")
+    @patch("custom_components.adaptive_climate.managers.heater_timers.async_call_later")
     async def test_low_output_timeout_fires_settling(self, mock_call_later, hc_pwm_with_dispatcher):
         """Test that low output (< 2%) starts a timer and SETTLING_STARTED fires when it expires."""
         controller, dispatcher = hc_pwm_with_dispatcher
@@ -2884,7 +2884,7 @@ class TestLowOutputMaintenanceTimeout:
         assert controller._cycle_active is False
 
     @pytest.mark.asyncio
-    @patch("custom_components.adaptive_climate.managers.heater_controller.async_call_later")
+    @patch("custom_components.adaptive_climate.managers.heater_timers.async_call_later")
     async def test_low_output_timeout_cancelled_on_demand_increase(self, mock_call_later, hc_pwm_with_dispatcher):
         """Test that output rising above MIN_OUTPUT_THRESHOLD cancels the low-output timer."""
         controller, dispatcher = hc_pwm_with_dispatcher
@@ -2923,7 +2923,7 @@ class TestLowOutputMaintenanceTimeout:
         assert len(settling_events) == 0
 
     @pytest.mark.asyncio
-    @patch("custom_components.adaptive_climate.managers.heater_controller.async_call_later")
+    @patch("custom_components.adaptive_climate.managers.heater_timers.async_call_later")
     async def test_low_output_timeout_not_started_above_threshold(self, mock_call_later, hc_pwm_with_dispatcher):
         """Test that output at or above MIN_OUTPUT_THRESHOLD (2%) does NOT start the low-output timer."""
         controller, _dispatcher = hc_pwm_with_dispatcher

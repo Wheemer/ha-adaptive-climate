@@ -9,10 +9,8 @@ from typing import TYPE_CHECKING, Any
 
 # These imports are only needed when running in Home Assistant
 try:
-    from homeassistant.core import HomeAssistant, split_entity_id, callback
-    from homeassistant.util import dt as dt_util
+    from homeassistant.core import HomeAssistant, split_entity_id
     from homeassistant.core import DOMAIN as HA_DOMAIN
-    from homeassistant.helpers.event import async_call_later
     from homeassistant.const import (
         ATTR_ENTITY_ID,
         SERVICE_TURN_OFF,
@@ -36,7 +34,6 @@ try:
         SERVICE_SET_VALVE_POSITION,
         ATTR_POSITION,
     )
-    from homeassistant.exceptions import HomeAssistantError, ServiceNotFound
     from homeassistant.components.climate import HVACMode
 
     HAS_HOMEASSISTANT = True
@@ -60,17 +57,17 @@ except ImportError:
     VALVE_DOMAIN = "valve"
     SERVICE_SET_VALVE_POSITION = "set_valve_position"
     ATTR_POSITION = "position"
-    HomeAssistantError = Exception
-    ServiceNotFound = Exception
 
-from ..const import EVENT_HEATER_CONTROL_FAILED, MIN_OUTPUT_THRESHOLD
-from .events import (
-    CycleEventDispatcher,
-    CycleStartedEvent,
-    SettlingStartedEvent,
-    HeatingStartedEvent,
-    HeatingEndedEvent,
-)
+    def split_entity_id(entity_id: str) -> tuple[str, str]:  # type: ignore[misc]
+        parts = entity_id.split(".", 1)
+        return (parts[0], parts[1]) if len(parts) == 2 else (entity_id, "")
+
+
+from ..const import MIN_OUTPUT_THRESHOLD
+from .events import CycleEventDispatcher
+from .heater_cycle_bookkeeper import HeaterCycleBookkeeper
+from .heater_service_caller import HeaterServiceCaller
+from .heater_timers import HeaterTimerManager
 from .pwm_controller import PWMController
 from .heat_pipeline import HeatPipeline
 
@@ -85,6 +82,11 @@ class HeaterController:
 
     Manages the state and control of heater/cooler entities for the thermostat.
     This includes turning devices on/off, setting valve values, and PWM control.
+
+    Delegates to three helpers:
+    - HeaterServiceCaller  – HA service invocation with error handling
+    - HeaterCycleBookkeeper – cycle state tracking and event emission
+    - HeaterTimerManager   – valve-actuation and settling-debounce timers
     """
 
     def __init__(
@@ -106,26 +108,7 @@ class HeaterController:
         valve_actuation_time: float = 0.0,
         heating_type: str | None = None,
     ):
-        """Initialize the HeaterController.
-
-        Args:
-            hass: Home Assistant instance
-            thermostat: Reference to the parent thermostat entity
-            heater_entity_id: List of heater entity IDs
-            cooler_entity_id: List of cooler entity IDs
-            demand_switch_entity_id: List of demand switch entity IDs
-            heater_polarity_invert: Whether to invert heater polarity
-            pwm: PWM duration in seconds
-            difference: Output range (max - min)
-            min_open_time: Minimum open time in seconds
-            min_closed_time: Minimum closed time in seconds
-            dispatcher: Optional event dispatcher for cycle events
-            cooling_type: Type of cooling system for compressor protection (forced_air, mini_split, chilled_water)
-            get_was_clamped: Callback to get PID was_clamped state
-            reset_clamp_state: Callback to reset PID clamp state
-            valve_actuation_time: Time for valve to fully open in seconds (default 0 = immediate)
-            heating_type: Heating system type string (e.g. "floor_hydronic") for tau selection
-        """
+        """Initialise the HeaterController."""
         self._hass = hass
         self._thermostat = thermostat
         self._heater_entity_id = heater_entity_id
@@ -138,8 +121,6 @@ class HeaterController:
         self._min_closed_time = min_closed_time
         self._dispatcher = dispatcher
         self._cooling_type = cooling_type
-        self._get_was_clamped = get_was_clamped
-        self._reset_clamp_state = reset_clamp_state
         self._valve_actuation_time = valve_actuation_time
         self._heating_type = heating_type
         self._transport_delay: float = 0.0  # Updated dynamically via set_transport_delay
@@ -147,33 +128,28 @@ class HeaterController:
         # Committed heat snapshot taken at each valve-close (for overshoot split)
         self._last_committed_heat_snapshot: float = 0.0
 
-        # State tracking (owned by thermostat, but accessed here)
-        self._heater_control_failed = False
-        self._last_heater_error: str | None = None
-
-        # Timer handles for delayed demand signaling
-        self._valve_open_timer: Callable[[], None] | None = None
-        self._valve_close_timer: Callable[[], None] | None = None
-        self._demand_zero_timer: Callable[[], None] | None = None
-        self._low_output_timer: Callable[[], None] | None = None
-
-        # Cycle counting for actuator wear tracking
-        self._heater_cycle_count: int = 0
-        self._cooler_cycle_count: int = 0
-        self._last_heater_state: bool = False
-        self._last_cooler_state: bool = False
-
-        # Cycle tracking for event emission
-        self._cycle_active: bool = False  # Heater has turned on in current demand period
-        self._has_demand: bool = False  # control_output > 0
+        # ── Helper instances ───────────────────────────────────────────────────
+        self._service_caller = HeaterServiceCaller(hass, thermostat)
+        self._bookkeeper = HeaterCycleBookkeeper(
+            thermostat=thermostat,
+            dispatcher=dispatcher,
+            get_was_clamped=get_was_clamped,
+            reset_clamp_state=reset_clamp_state,
+        )
+        self._timers = HeaterTimerManager(
+            hass=hass,
+            thermostat_entity_id=thermostat.entity_id,
+            pwm=pwm,
+            valve_actuation_time=valve_actuation_time,
+            bookkeeper=self._bookkeeper,
+        )
 
         # Heat pipeline for committed heat tracking.
         # Created for all PWM systems — transport_delay starts at 0 and is updated
         # dynamically via set_transport_delay() when the coordinator learns the manifold delay.
-        # Tau is chosen per heating type to match the system's thermal inertia.
         self._heat_pipeline: HeatPipeline | None = (
             HeatPipeline(
-                transport_delay=0.0,  # Updated dynamically via set_transport_delay
+                transport_delay=0.0,
                 valve_time=valve_actuation_time,
                 tau=HeatPipeline.tau_for_heating_type(heating_type),
             )
@@ -196,240 +172,163 @@ class HeaterController:
             else None
         )
 
-    def _get_pid_was_clamped(self) -> bool:
-        """Get was_clamped state from PID controller via callback.
-
-        Returns:
-            True if PID reports clamping occurred, False otherwise or if unavailable.
-        """
-        if self._get_was_clamped is None:
-            return False
-        return self._get_was_clamped()
-
-    def _reset_pid_clamp_state(self) -> None:
-        """Reset PID clamp state at cycle start via callback.
-
-        Calls reset_clamp_state() callback if available.
-        """
-        if self._reset_clamp_state is not None:
-            self._reset_clamp_state()
-
-    @callback
-    def _emit_settling_started_debounced(self, hvac_mode: HVACMode, was_clamped: bool) -> None:
-        """Emit SETTLING_STARTED after demand=0 debounce timer fires.
-
-        Called by async_call_later when demand has stayed at 0 for 2×PWM period,
-        indicating the heating session has truly ended (not just a brief dip).
-        Also cancels any pending low-output timer (mutual exclusion).
-        """
-        self._demand_zero_timer = None
-        # Cancel low-output timer if both fired simultaneously
-        if self._low_output_timer is not None:
-            self._low_output_timer()
-            self._low_output_timer = None
-        if self._dispatcher and self._cycle_active:
-            self._dispatcher.emit(
-                SettlingStartedEvent(
-                    hvac_mode=hvac_mode,
-                    timestamp=dt_util.utcnow(),
-                    was_clamped=was_clamped,
-                )
-            )
-        self._cycle_active = False
-
-    @callback
-    def _emit_settling_started_low_output(self, hvac_mode: HVACMode, was_clamped: bool) -> None:
-        """Emit SETTLING_STARTED after low-output maintenance timeout fires.
-
-        Called by async_call_later when control_output has stayed below
-        MIN_OUTPUT_THRESHOLD for 2×PWM period, indicating a maintenance cycle
-        has stalled. Replaces the v0.28 async_turn_off() SETTLING_STARTED emission.
-        Also cancels any pending demand-zero timer (mutual exclusion).
-        """
-        self._low_output_timer = None
-        # Cancel demand-zero timer if both fired simultaneously
-        if self._demand_zero_timer is not None:
-            self._demand_zero_timer()
-            self._demand_zero_timer = None
-        if self._dispatcher and self._cycle_active:
-            self._dispatcher.emit(
-                SettlingStartedEvent(
-                    hvac_mode=hvac_mode,
-                    timestamp=dt_util.utcnow(),
-                    was_clamped=was_clamped,
-                )
-            )
-        self._cycle_active = False
-
-    def cancel_pending_timers(self) -> None:
-        """Cancel all pending timers (call on entity removal/shutdown)."""
-        if self._demand_zero_timer is not None:
-            self._demand_zero_timer()
-            self._demand_zero_timer = None
-        if self._low_output_timer is not None:
-            self._low_output_timer()
-            self._low_output_timer = None
-        if self._valve_open_timer is not None:
-            self._valve_open_timer()
-            self._valve_open_timer = None
-        if self._valve_close_timer is not None:
-            self._valve_close_timer()
-            self._valve_close_timer = None
-
-    def abort_active_cycle(self) -> None:
-        """Abort the current cycle without emitting SETTLING_STARTED.
-
-        Used when operating conditions change fundamentally (e.g., night setback)
-        making the current cycle invalid for learning.
-        """
-        self.cancel_pending_timers()
-        self._cycle_active = False
-
-    def _emit_cycle_started(self, hvac_mode: HVACMode) -> None:
-        """Emit CycleStartedEvent with current temperature state.
-
-        Args:
-            hvac_mode: Current HVAC mode
-        """
-        if self._dispatcher:
-            target_temp = getattr(self._thermostat, "target_temperature", 0.0)
-            current_temp = getattr(self._thermostat, "_current_temp", 0.0)
-            self._dispatcher.emit(
-                CycleStartedEvent(
-                    hvac_mode=hvac_mode,
-                    timestamp=dt_util.utcnow(),
-                    target_temp=target_temp,
-                    current_temp=current_temp,
-                )
-            )
-
-    @callback
-    def _emit_heating_started_delayed(self, hvac_mode: HVACMode) -> None:
-        """Emit HeatingStartedEvent after valve actuation delay.
-
-        Args:
-            hvac_mode: Current HVAC mode
-        """
-        if self._dispatcher:
-            self._dispatcher.emit(
-                HeatingStartedEvent(
-                    hvac_mode=hvac_mode,
-                    timestamp=dt_util.utcnow(),
-                )
-            )
-        self._valve_open_timer = None
+    # ── Backward-compatible delegation: bookkeeper state ──────────────────────
 
     @property
-    def committed_heat_at_last_turnoff(self) -> float:
-        """Seconds of committed heat captured at the last valve-close command.
+    def _cycle_active(self) -> bool:
+        return self._bookkeeper.cycle_active
 
-        Snapshotted by ``async_turn_off`` before calling ``pipeline.valve_closed()``.
-        Used by CycleMetricsRecorder to split overshoot into controllable vs committed.
-        """
-        return self._last_committed_heat_snapshot
+    @_cycle_active.setter
+    def _cycle_active(self, value: bool) -> None:
+        self._bookkeeper.cycle_active = value
 
-    @callback
-    def _emit_heating_ended_delayed(self, hvac_mode: HVACMode, committed_heat_seconds: float = 0.0) -> None:
-        """Emit HeatingEndedEvent after half valve actuation delay.
+    @property
+    def _has_demand(self) -> bool:
+        return self._bookkeeper.has_demand
 
-        Args:
-            hvac_mode: Current HVAC mode
-            committed_heat_seconds: In-flight heat snapshot from the pipeline at valve close
-        """
-        if self._dispatcher:
-            self._dispatcher.emit(
-                HeatingEndedEvent(
-                    hvac_mode=hvac_mode,
-                    timestamp=dt_util.utcnow(),
-                    committed_heat_seconds=committed_heat_seconds,
-                )
-            )
-        self._valve_close_timer = None
+    @_has_demand.setter
+    def _has_demand(self, value: bool) -> None:
+        self._bookkeeper.has_demand = value
 
-    def update_open_closed_times(
-        self,
-        min_open_time: float,
-        min_closed_time: float,
-    ) -> None:
-        """Update the minimum cycle durations.
+    @property
+    def _last_heater_state(self) -> bool:
+        return self._bookkeeper.last_heater_state
 
-        This is used when the PID mode changes, as different modes
-        may have different minimum cycle requirements.
+    @_last_heater_state.setter
+    def _last_heater_state(self, value: bool) -> None:
+        self._bookkeeper.last_heater_state = value
 
-        Args:
-            min_open_time: Minimum open time in seconds
-            min_closed_time: Minimum closed time in seconds
-        """
-        self._min_open_time = min_open_time
-        self._min_closed_time = min_closed_time
-        if self._pwm_controller:
-            self._pwm_controller.update_open_closed_times(min_open_time, min_closed_time)
+    @property
+    def _last_cooler_state(self) -> bool:
+        return self._bookkeeper.last_cooler_state
 
-    def set_transport_delay(self, delay_seconds: float) -> None:
-        """Set the manifold transport delay.
+    @_last_cooler_state.setter
+    def _last_cooler_state(self, value: bool) -> None:
+        self._bookkeeper.last_cooler_state = value
 
-        Propagates to both PWMController (legacy path) and HeatPipeline
-        (exponential model) so both stay in sync.
+    @property
+    def _heater_cycle_count(self) -> int:
+        return self._bookkeeper.heater_cycle_count
 
-        Args:
-            delay_seconds: Transport delay in seconds (0 if manifold warm)
-        """
-        self._transport_delay = delay_seconds
-        if self._pwm_controller:
-            self._pwm_controller.set_transport_delay(delay_seconds)
-        if self._heat_pipeline is not None:
-            self._heat_pipeline.transport_delay = delay_seconds
+    @property
+    def _cooler_cycle_count(self) -> int:
+        return self._bookkeeper.cooler_cycle_count
+
+    def _get_pid_was_clamped(self) -> bool:
+        return self._bookkeeper.get_pid_was_clamped()
+
+    def _reset_pid_clamp_state(self) -> None:
+        self._bookkeeper.reset_pid_clamp_state()
+
+    # ── Backward-compatible delegation: timer handles ─────────────────────────
+
+    @property
+    def _demand_zero_timer(self) -> Any | None:
+        return self._timers._demand_zero_timer
+
+    @_demand_zero_timer.setter
+    def _demand_zero_timer(self, value: Any | None) -> None:
+        self._timers._demand_zero_timer = value
+
+    @property
+    def _low_output_timer(self) -> Any | None:
+        return self._timers._low_output_timer
+
+    @_low_output_timer.setter
+    def _low_output_timer(self, value: Any | None) -> None:
+        self._timers._low_output_timer = value
+
+    def _emit_settling_started_debounced(self, hvac_mode: HVACMode, was_clamped: bool) -> None:
+        """Kept for test compatibility — delegates to HeaterTimerManager._on_demand_zero."""
+        self._timers._on_demand_zero(hvac_mode, was_clamped)
+
+    # ── Public API ────────────────────────────────────────────────────────────
 
     @property
     def heater_control_failed(self) -> bool:
         """Return True if the last heater control operation failed."""
-        return self._heater_control_failed
+        return self._service_caller.heater_control_failed
 
     @property
     def last_heater_error(self) -> str | None:
         """Return the last heater error message, if any."""
-        return self._last_heater_error
+        return self._service_caller.last_heater_error
 
     @property
     def heater_cycle_count(self) -> int:
         """Return the total number of heater on→off cycles."""
-        return self._heater_cycle_count
+        return self._bookkeeper.heater_cycle_count
 
     @property
     def cooler_cycle_count(self) -> int:
         """Return the total number of cooler on→off cycles."""
-        return self._cooler_cycle_count
+        return self._bookkeeper.cooler_cycle_count
+
+    @property
+    def cycle_active(self) -> bool:
+        """Whether a cycle is currently active."""
+        return self._bookkeeper.cycle_active
+
+    @property
+    def has_demand(self) -> bool:
+        """Whether there is current demand (control_output > 0)."""
+        return self._bookkeeper.has_demand
+
+    def restore_cycle_state(self, cycle_active: bool, has_demand: bool) -> None:
+        """Restore cycle tracking state after HA restart."""
+        self._bookkeeper.restore(cycle_active, has_demand)
+
+    def set_heater_cycle_count(self, count: int) -> None:
+        """Set heater cycle count (used during state restoration)."""
+        self._bookkeeper.set_heater_cycle_count(count)
+
+    def set_cooler_cycle_count(self, count: int) -> None:
+        """Set cooler cycle count (used during state restoration)."""
+        self._bookkeeper.set_cooler_cycle_count(count)
+
+    def cancel_pending_timers(self) -> None:
+        """Cancel all pending timers (call on entity removal/shutdown)."""
+        self._timers.cancel_all()
+
+    def abort_active_cycle(self) -> None:
+        """Abort the current cycle without emitting SETTLING_STARTED.
+
+        Used when operating conditions change fundamentally (e.g., night setback).
+        """
+        self._timers.cancel_all()
+        self._bookkeeper.abort()
+
+    async def _async_call_heater_service(self, entity_id: str, domain: str, service: str, data: dict) -> bool:
+        """Delegate to HeaterServiceCaller with error handling."""
+        return await self._service_caller.async_call(entity_id, domain, service, data)
+
+    # ── PWM controller pass-throughs ──────────────────────────────────────────
 
     @property
     def _max_accumulator(self) -> float:
-        """Return maximum accumulator value (2x min_open_time)."""
         if self._pwm_controller:
             return self._pwm_controller._max_accumulator
         return 2.0 * self._min_open_time
 
     @property
     def _duty_accumulator_seconds(self) -> float:
-        """Return the current duty accumulator value (for test compatibility)."""
         if self._pwm_controller:
             return self._pwm_controller._duty_accumulator_seconds
         return 0.0
 
     @_duty_accumulator_seconds.setter
     def _duty_accumulator_seconds(self, value: float) -> None:
-        """Set the duty accumulator value (for test compatibility)."""
         if self._pwm_controller:
             self._pwm_controller._duty_accumulator_seconds = value
 
     @property
     def _last_accumulator_calc_time(self) -> float | None:
-        """Return the last accumulator calculation time (for test compatibility)."""
         if self._pwm_controller:
             return self._pwm_controller._last_accumulator_calc_time
         return None
 
     @_last_accumulator_calc_time.setter
     def _last_accumulator_calc_time(self, value: float | None) -> None:
-        """Set the last accumulator calculation time (for test compatibility)."""
         if self._pwm_controller:
             self._pwm_controller._last_accumulator_calc_time = value
 
@@ -467,141 +366,66 @@ class HeaterController:
         """Return the cooling system type for compressor protection."""
         return self._cooling_type
 
-    def set_duty_accumulator(self, seconds: float) -> None:
-        """Set the duty accumulator value (used during state restoration).
+    @property
+    def committed_heat_at_last_turnoff(self) -> float:
+        """Seconds of committed heat captured at the last valve-close command.
 
-        Args:
-            seconds: Accumulator value in seconds
+        Snapshotted by ``async_turn_off`` before calling ``pipeline.valve_closed()``.
+        Used by CycleMetricsRecorder to split overshoot into controllable vs committed.
         """
+        return self._last_committed_heat_snapshot
+
+    def set_duty_accumulator(self, seconds: float) -> None:
+        """Set duty accumulator (used during state restoration)."""
         if self._pwm_controller:
             self._pwm_controller.set_duty_accumulator(seconds)
 
     def reset_duty_accumulator(self) -> None:
-        """Reset duty accumulator to zero.
-
-        Called when:
-        - Setpoint changes significantly (>0.5°C)
-        - HVAC mode changes to OFF
-        - Contact sensor opens (window/door)
-        """
+        """Reset duty accumulator to zero."""
         if self._pwm_controller:
             self._pwm_controller.reset_duty_accumulator()
 
-    def set_heater_cycle_count(self, count: int) -> None:
-        """Set the heater cycle count (used during state restoration).
+    def update_open_closed_times(self, min_open_time: float, min_closed_time: float) -> None:
+        """Update minimum cycle durations when PID mode changes."""
+        self._min_open_time = min_open_time
+        self._min_closed_time = min_closed_time
+        if self._pwm_controller:
+            self._pwm_controller.update_open_closed_times(min_open_time, min_closed_time)
 
-        Args:
-            count: Cycle count to restore
-        """
-        self._heater_cycle_count = count
+    def set_transport_delay(self, delay_seconds: float) -> None:
+        """Set the manifold transport delay, propagating to PWMController and HeatPipeline."""
+        self._transport_delay = delay_seconds
+        if self._pwm_controller:
+            self._pwm_controller.set_transport_delay(delay_seconds)
+        if self._heat_pipeline is not None:
+            self._heat_pipeline.transport_delay = delay_seconds
 
-    def set_cooler_cycle_count(self, count: int) -> None:
-        """Set the cooler cycle count (used during state restoration).
-
-        Args:
-            count: Cycle count to restore
-        """
-        self._cooler_cycle_count = count
-
-    @property
-    def cycle_active(self) -> bool:
-        """Whether a cycle is currently active."""
-        return self._cycle_active
-
-    @property
-    def has_demand(self) -> bool:
-        """Whether there is current demand (control_output > 0)."""
-        return self._has_demand
-
-    def restore_cycle_state(self, cycle_active: bool, has_demand: bool) -> None:
-        """Restore cycle tracking state after HA restart.
-
-        On restore with active cycle: marks as active but the in-progress cycle
-        will not be used for learning because no fresh CYCLE_STARTED was emitted
-        in this session. This prevents spurious CYCLE_STARTED emissions from
-        resetting CycleTrackerManager timestamps.
-
-        Args:
-            cycle_active: Whether a cycle was active before restart.
-            has_demand: Whether demand was present before restart.
-        """
-        self._cycle_active = cycle_active
-        self._has_demand = has_demand
-
-    def _increment_cycle_count(self, hvac_mode: HVACMode, is_now_off: bool) -> None:
-        """Increment cycle counter on on→off transition.
-
-        Args:
-            hvac_mode: Current HVAC mode
-            is_now_off: Whether device just turned off
-        """
-        if not is_now_off:
-            return
-
-        # Increment heater or cooler based on mode
-        if hvac_mode == HVACMode.COOL:
-            if self._last_cooler_state and is_now_off:
-                self._cooler_cycle_count += 1
-                _LOGGER.debug(
-                    "%s: Cooler cycle count incremented to %d", self._thermostat.entity_id, self._cooler_cycle_count
-                )
-            self._last_cooler_state = not is_now_off
-        else:
-            if self._last_heater_state and is_now_off:
-                self._heater_cycle_count += 1
-                _LOGGER.debug(
-                    "%s: Heater cycle count incremented to %d", self._thermostat.entity_id, self._heater_cycle_count
-                )
-            self._last_heater_state = not is_now_off
+    # ── Entity helpers ─────────────────────────────────────────────────────────
 
     def get_entities(self, hvac_mode: HVACMode) -> list[str]:
-        """Return the entities to be controlled based on HVAC MODE.
-
-        Returns heater or cooler entities based on mode, plus any demand_switch
-        entities which are controlled regardless of heat/cool mode.
-
-        Args:
-            hvac_mode: Current HVAC mode
-
-        Returns:
-            List of entity IDs to control
-        """
+        """Return entities to control based on HVAC mode (heater/cooler + demand switches)."""
         entities = []
 
-        # Add heater or cooler based on mode
         if hvac_mode == HVACMode.COOL and self._cooler_entity_id is not None:
             entities.extend(self._cooler_entity_id)
         elif self._heater_entity_id is not None:
             entities.extend(self._heater_entity_id)
 
-        # Add demand_switch entities (controlled in both heat and cool modes)
         if self._demand_switch_entity_id is not None:
             entities.extend(self._demand_switch_entity_id)
 
         return entities
 
     def is_active(self, hvac_mode: HVACMode) -> bool:
-        """Check if the controlled device is currently active.
-
-        For PWM devices, checks if any entity is in the expected ON state.
-        For valve devices, checks if any entity has a value > 0.
-
-        Args:
-            hvac_mode: Current HVAC mode
-
-        Returns:
-            True if the device is active
-        """
+        """Return True if the controlled device is currently active."""
         entities = self.get_entities(hvac_mode)
 
         if self._pwm:
-            # If the toggleable device is currently active
             expected = STATE_ON
             if self._heater_polarity_invert:
                 expected = STATE_OFF
             return any([self._hass.states.is_state(entity, expected) for entity in entities])
         else:
-            # If the valve device is currently active
             is_active = False
             try:
                 for entity in entities:
@@ -618,110 +442,7 @@ class HeaterController:
                 _LOGGER.debug("Entity state not available during device active check: %s", ex)
                 return False
 
-    def _fire_heater_control_failed_event(
-        self,
-        entity_id: str,
-        operation: str,
-        error: str,
-    ) -> None:
-        """Fire an event when heater control fails.
-
-        Args:
-            entity_id: Entity that failed to control
-            operation: Operation that failed (turn_on, turn_off, set_value)
-            error: Error message
-        """
-        self._hass.bus.async_fire(
-            EVENT_HEATER_CONTROL_FAILED,
-            {
-                "climate_entity_id": self._thermostat.entity_id,
-                "heater_entity_id": entity_id,
-                "operation": operation,
-                "error": error,
-            },
-        )
-
-    async def _async_call_heater_service(
-        self,
-        entity_id: str,
-        domain: str,
-        service: str,
-        data: dict,
-    ) -> bool:
-        """Call a heater/cooler service with error handling.
-
-        Args:
-            entity_id: Entity ID being controlled
-            domain: Service domain (homeassistant, light, valve, number, etc.)
-            service: Service name (turn_on, turn_off, set_value, etc.)
-            data: Service call data
-
-        Returns:
-            True if successful, False otherwise
-        """
-        thermostat_entity_id = self._thermostat.entity_id
-
-        try:
-            await self._hass.services.async_call(domain, service, data)
-            # Clear failure state on success
-            self._heater_control_failed = False
-            self._last_heater_error = None
-            return True
-
-        except ServiceNotFound as e:
-            _LOGGER.error(
-                "%s: Service '%s.%s' not found for %s: %s",
-                thermostat_entity_id,
-                domain,
-                service,
-                entity_id,
-                e,
-            )
-            self._heater_control_failed = True
-            self._last_heater_error = f"Service not found: {domain}.{service}"
-            self._fire_heater_control_failed_event(entity_id, service, str(e))
-            return False
-
-        except HomeAssistantError as e:
-            _LOGGER.error(
-                "%s: Home Assistant error calling %s.%s on %s: %s",
-                thermostat_entity_id,
-                domain,
-                service,
-                entity_id,
-                e,
-            )
-            self._heater_control_failed = True
-            self._last_heater_error = str(e)
-            self._fire_heater_control_failed_event(entity_id, service, str(e))
-            return False
-
-        except Exception as e:
-            _LOGGER.error(
-                "%s: Unexpected error calling %s.%s on %s: %s",
-                thermostat_entity_id,
-                domain,
-                service,
-                entity_id,
-                e,
-            )
-            self._heater_control_failed = True
-            self._last_heater_error = str(e)
-            self._fire_heater_control_failed_event(entity_id, service, str(e))
-            return False
-
-    @staticmethod
-    def _get_number_entity_domain(entity_id: str) -> str:
-        """Get the domain for a number entity.
-
-        Args:
-            entity_id: Entity ID to check
-
-        Returns:
-            Either INPUT_NUMBER_DOMAIN or NUMBER_DOMAIN
-        """
-        domain, _ = split_entity_id(entity_id)
-        return INPUT_NUMBER_DOMAIN if domain == "input_number" else NUMBER_DOMAIN
+    # ── Core control methods ───────────────────────────────────────────────────
 
     async def async_turn_on(
         self,
@@ -730,28 +451,19 @@ class HeaterController:
         set_is_heating: Callable[[bool], None],
         set_last_heat_cycle_time: Callable[[float], None],
     ) -> None:
-        """Turn heater toggleable device on.
-
-        Args:
-            hvac_mode: Current HVAC mode
-            get_cycle_start_time: Callable that returns cycle start time
-            set_is_heating: Callback to set heating state
-            set_last_heat_cycle_time: Callback to set last heat cycle time
-        """
+        """Turn heater toggleable device on."""
         entities = self.get_entities(hvac_mode)
         thermostat_entity_id = self._thermostat.entity_id
-
         is_device_active = self.is_active(hvac_mode)
 
         if is_device_active:
-            # It's a state refresh call from control interval, just force switch ON
+            # State refresh call — device already on
             _LOGGER.debug("%s: Refresh state ON %s", thermostat_entity_id, ", ".join(entities))
             # Handle restart case: device already on but cycle not tracked
-            if not self._cycle_active and self._has_demand:
-                self._cycle_active = True
-                self._reset_pid_clamp_state()
-                self._emit_cycle_started(hvac_mode)
-            # Device already in correct state - skip redundant service call
+            if not self._bookkeeper.cycle_active and self._bookkeeper.has_demand:
+                self._bookkeeper.cycle_active = True
+                self._bookkeeper.reset_pid_clamp_state()
+                self._bookkeeper.emit_cycle_started(hvac_mode)
             return
         elif time.monotonic() - get_cycle_start_time() >= self._min_closed_time:
             _LOGGER.info("%s: Turning ON %s", thermostat_entity_id, ", ".join(entities))
@@ -759,47 +471,34 @@ class HeaterController:
 
             # Update state tracking for cycle counting (off→on transition)
             if hvac_mode == HVACMode.COOL:
-                self._last_cooler_state = True
+                self._bookkeeper.last_cooler_state = True
             else:
-                self._last_heater_state = True
+                self._bookkeeper.last_heater_state = True
 
             set_is_heating(True)
 
             # Emit CYCLE_STARTED on first heater turn-on in this demand period
-            if not self._cycle_active and self._has_demand:
-                self._cycle_active = True
-                self._reset_pid_clamp_state()
-                self._emit_cycle_started(hvac_mode)
+            if not self._bookkeeper.cycle_active and self._bookkeeper.has_demand:
+                self._bookkeeper.cycle_active = True
+                self._bookkeeper.reset_pid_clamp_state()
+                self._bookkeeper.emit_cycle_started(hvac_mode)
 
-            # Emit HEATING_STARTED event (delayed if valve_actuation_time > 0)
             if self._dispatcher:
                 if self._pwm and self._valve_actuation_time > 0:
-                    # Schedule delayed demand signal for PWM mode with valve actuation time
-                    self._valve_open_timer = async_call_later(
-                        self._hass,
-                        self._valve_actuation_time,
-                        lambda _: self._emit_heating_started_delayed(hvac_mode),
-                    )
+                    self._timers.schedule_heating_started(hvac_mode)
                 else:
-                    # Immediate signal for valve mode or when valve_actuation_time=0
-                    self._dispatcher.emit(
-                        HeatingStartedEvent(
-                            hvac_mode=hvac_mode,
-                            timestamp=dt_util.utcnow(),
-                        )
-                    )
+                    self._bookkeeper.emit_heating_started(hvac_mode)
         else:
             _LOGGER.info(
-                "%s: Reject request turning ON %s: Cycle is too short", thermostat_entity_id, ", ".join(entities)
+                "%s: Reject request turning ON %s: Cycle is too short",
+                thermostat_entity_id,
+                ", ".join(entities),
             )
             return
 
         for entity in entities:
             data = {ATTR_ENTITY_ID: entity}
-            if self._heater_polarity_invert:
-                service = SERVICE_TURN_OFF
-            else:
-                service = SERVICE_TURN_ON
+            service = SERVICE_TURN_OFF if self._heater_polarity_invert else SERVICE_TURN_ON
             await self._async_call_heater_service(entity, HA_DOMAIN, service, data)
 
         # Pipeline: record valve-open timestamp so committed heat starts rising
@@ -814,77 +513,36 @@ class HeaterController:
         set_last_heat_cycle_time: Callable[[float], None],
         force: bool = False,
     ) -> None:
-        """Turn heater toggleable device off.
-
-        Enforces minimum on-time protection for compressor-based cooling systems
-        (forced_air, mini_split) to prevent short-cycling damage. Chilled water
-        systems (no compressor) have min_cycle=0 and can turn off immediately.
-
-        Args:
-            hvac_mode: Current HVAC mode
-            get_cycle_start_time: Callable that returns cycle start time
-            set_is_heating: Callback to set heating state
-            set_last_heat_cycle_time: Callback to set last heat cycle time
-            force: Force turn off regardless of cycle duration (for emergency shutdowns)
-        """
-        # Cancel pending timers on forced turn-off (mode switch, not normal PWM cycles)
+        """Turn heater toggleable device off. Enforces min-on-time for compressor protection."""
         if force:
-            self.cancel_pending_timers()
+            self._timers.cancel_all()
 
         entities = self.get_entities(hvac_mode)
         thermostat_entity_id = self._thermostat.entity_id
         is_device_active = self.is_active(hvac_mode)
 
         if not is_device_active:
-            # It's a state refresh call from control interval, just force switch OFF
+            # State refresh call — device already off
             _LOGGER.debug("%s: Refresh state OFF %s", thermostat_entity_id, ", ".join(entities))
-            # Device already in correct state - skip redundant service call
             return
         elif time.monotonic() - get_cycle_start_time() >= self.effective_min_open_time or force:
-            # Minimum cycle protection: Only turn off if effective_min_open_time has elapsed
-            # (includes valve_actuation_time + transport_delay + min_open_time) or force=True
-            # (for emergency shutdowns). This ensures heat actually reaches the zone before
-            # turning off, and protects compressors from short-cycling damage.
             _LOGGER.info("%s: Turning OFF %s", thermostat_entity_id, ", ".join(entities))
             set_last_heat_cycle_time(time.monotonic())
 
-            # Increment cycle counter for wear tracking (on→off transition)
-            self._increment_cycle_count(hvac_mode, is_now_off=True)
+            self._bookkeeper.increment_cycle_count(hvac_mode, is_now_off=True)
+            self._timers.cancel_valve_open()
 
-            # Cancel any pending valve open timer
-            if self._valve_open_timer is not None:
-                self._valve_open_timer()
-                self._valve_open_timer = None
-
-            # Pipeline: snapshot committed heat then mark valve as closing.
-            # Must happen before emitting HEATING_ENDED so the event carries the value.
             if self._heat_pipeline is not None:
                 _now = time.monotonic()
                 self._last_committed_heat_snapshot = self._heat_pipeline.committed_heat_remaining(_now)
                 self._heat_pipeline.valve_closed(_now)
 
-            # Emit HEATING_ENDED event (delayed by half valve_actuation_time if > 0)
             if self._dispatcher:
                 if self._pwm and self._valve_actuation_time > 0:
-                    # Schedule delayed demand removal for PWM mode with valve actuation time
-                    half_valve_time = self._valve_actuation_time / 2.0
-                    _committed = self._last_committed_heat_snapshot
-                    self._valve_close_timer = async_call_later(
-                        self._hass,
-                        half_valve_time,
-                        lambda _, c=_committed: self._emit_heating_ended_delayed(hvac_mode, committed_heat_seconds=c),
-                    )
+                    self._timers.schedule_heating_ended(hvac_mode, self._last_committed_heat_snapshot)
                 else:
-                    # Immediate signal for valve mode or when valve_actuation_time=0
-                    self._dispatcher.emit(
-                        HeatingEndedEvent(
-                            hvac_mode=hvac_mode,
-                            timestamp=dt_util.utcnow(),
-                            committed_heat_seconds=self._last_committed_heat_snapshot,
-                        )
-                    )
+                    self._bookkeeper.emit_heating_ended(hvac_mode, self._last_committed_heat_snapshot)
 
-            # Reset heating state for zone linking
             set_is_heating(False)
         else:
             elapsed = time.monotonic() - get_cycle_start_time()
@@ -899,31 +557,16 @@ class HeaterController:
 
         for entity in entities:
             data = {ATTR_ENTITY_ID: entity}
-            if self._heater_polarity_invert:
-                service = SERVICE_TURN_ON
-            else:
-                service = SERVICE_TURN_OFF
+            service = SERVICE_TURN_ON if self._heater_polarity_invert else SERVICE_TURN_OFF
             await self._async_call_heater_service(entity, HA_DOMAIN, service, data)
 
-    async def async_set_valve_value(
-        self,
-        value: float,
-        hvac_mode: HVACMode,
-    ) -> None:
-        """Set the valve value for non-PWM devices.
-
-        Args:
-            value: Value to set (0-100)
-            hvac_mode: Current HVAC mode
-        """
+    async def async_set_valve_value(self, value: float, hvac_mode: HVACMode) -> None:
+        """Set valve value for non-PWM devices (0-100)."""
         entities = self.get_entities(hvac_mode)
         thermostat_entity_id = self._thermostat.entity_id
 
-        # Track old active state for cycle tracker
         old_active = self.is_active(hvac_mode)
-
-        # Track demand state for cycle tracking (valve mode)
-        self._has_demand = value > 0
+        self._bookkeeper.has_demand = value > 0
 
         _LOGGER.info("%s: Change state of %s to %s", thermostat_entity_id, ", ".join(entities), value)
 
@@ -931,87 +574,40 @@ class HeaterController:
             domain, _ = split_entity_id(entity)
             if domain == "light":
                 data = {ATTR_ENTITY_ID: entity, ATTR_BRIGHTNESS_PCT: value}
-                await self._async_call_heater_service(
-                    entity,
-                    LIGHT_DOMAIN,
-                    SERVICE_TURN_LIGHT_ON,
-                    data,
-                )
+                await self._async_call_heater_service(entity, LIGHT_DOMAIN, SERVICE_TURN_LIGHT_ON, data)
             elif domain == "valve":
                 data = {ATTR_ENTITY_ID: entity, ATTR_POSITION: value}
-                await self._async_call_heater_service(
-                    entity,
-                    VALVE_DOMAIN,
-                    SERVICE_SET_VALVE_POSITION,
-                    data,
-                )
+                await self._async_call_heater_service(entity, VALVE_DOMAIN, SERVICE_SET_VALVE_POSITION, data)
             else:
+                number_domain = INPUT_NUMBER_DOMAIN if domain == "input_number" else NUMBER_DOMAIN
                 data = {ATTR_ENTITY_ID: entity, ATTR_VALUE: value}
-                await self._async_call_heater_service(
-                    entity,
-                    self._get_number_entity_domain(entity),
-                    SERVICE_SET_VALUE,
-                    data,
-                )
+                await self._async_call_heater_service(entity, number_domain, SERVICE_SET_VALUE, data)
 
-        # Track new active state after valve change for cycle counting
         new_active = value > 0
 
-        # Check if we should emit SETTLING_STARTED for valve mode
-        # Criteria: demand < 5% AND temp within 0.5°C of target
-        if self._cycle_active and value < 5.0:
+        # Emit SETTLING_STARTED for valve mode: demand < 5% AND within 0.5°C of target
+        if self._bookkeeper.cycle_active and value < 5.0:
             target_temp = getattr(self._thermostat, "target_temperature", 0.0)
             current_temp = getattr(self._thermostat, "_current_temp", 0.0)
             if abs(current_temp - target_temp) <= 0.5:
-                if self._dispatcher:
-                    self._dispatcher.emit(
-                        SettlingStartedEvent(
-                            hvac_mode=hvac_mode,
-                            timestamp=dt_util.utcnow(),
-                            was_clamped=self._get_pid_was_clamped(),
-                        )
-                    )
-                self._cycle_active = False  # Reset for next cycle
+                self._bookkeeper.emit_settling_started(hvac_mode, self._bookkeeper.get_pid_was_clamped())
+                self._bookkeeper.cycle_active = False
 
-        # Detect heating started transition (was off, now on)
         if not old_active and new_active:
-            # Update state tracking for cycle counting
             if hvac_mode == HVACMode.COOL:
-                self._last_cooler_state = True
+                self._bookkeeper.last_cooler_state = True
             else:
-                self._last_heater_state = True
+                self._bookkeeper.last_heater_state = True
 
-        # Emit CYCLE_STARTED on first valve open in this demand period
-        # Also handles restart case where valve is already open but cycle not tracked
-        if new_active and not self._cycle_active and self._has_demand:
-            self._cycle_active = True
-            self._reset_pid_clamp_state()
-            self._emit_cycle_started(hvac_mode)
-
-            # Emit HEATING_STARTED event
-            if self._dispatcher:
-                self._dispatcher.emit(
-                    HeatingStartedEvent(
-                        hvac_mode=hvac_mode,
-                        timestamp=dt_util.utcnow(),
-                    )
-                )
-        # Detect heating stopped transition (was on, now off)
+        if new_active and not self._bookkeeper.cycle_active and self._bookkeeper.has_demand:
+            self._bookkeeper.cycle_active = True
+            self._bookkeeper.reset_pid_clamp_state()
+            self._bookkeeper.emit_cycle_started(hvac_mode)
+            self._bookkeeper.emit_heating_started(hvac_mode)
         elif old_active and not new_active:
-            # Increment cycle counter for wear tracking (on→off transition)
-            self._increment_cycle_count(hvac_mode, is_now_off=True)
-
-            # Emit HEATING_ENDED event
-            if self._dispatcher:
-                self._dispatcher.emit(
-                    HeatingEndedEvent(
-                        hvac_mode=hvac_mode,
-                        timestamp=dt_util.utcnow(),
-                    )
-                )
-
-            # Reset cycle tracking for next cycle
-            self._cycle_active = False
+            self._bookkeeper.increment_cycle_count(hvac_mode, is_now_off=True)
+            self._bookkeeper.emit_heating_ended(hvac_mode)
+            self._bookkeeper.cycle_active = False
 
     async def async_set_control_value(
         self,
@@ -1027,21 +623,7 @@ class HeaterController:
         set_force_on: Callable[[bool], None],
         set_force_off: Callable[[bool], None],
     ) -> None:
-        """Set output value for heater.
-
-        Args:
-            control_output: Current PID control output
-            hvac_mode: Current HVAC mode
-            get_cycle_start_time: Callable that returns cycle start time
-            set_is_heating: Callback to set heating state
-            set_last_heat_cycle_time: Callback to set last heat cycle time
-            time_changed: Last time state changed
-            set_time_changed: Callback to set time changed
-            force_on: Force turn on flag
-            force_off: Force turn off flag
-            set_force_on: Callback to set force on flag
-            set_force_off: Callback to set force off flag
-        """
+        """Dispatch PID control_output to the appropriate heater/valve action."""
         entities = self.get_entities(hvac_mode)
         thermostat_entity_id = self._thermostat.entity_id
 
@@ -1049,62 +631,29 @@ class HeaterController:
         device_is_active = self.is_active(hvac_mode)
 
         # Track demand state for cycle tracking
-        old_has_demand = self._has_demand
+        old_has_demand = self._bookkeeper.has_demand
         new_has_demand = abs(control_output) > 0
-        self._has_demand = new_has_demand
+        self._bookkeeper.has_demand = new_has_demand
 
-        # Handle demand dropping to 0: debounce SETTLING_STARTED for PWM mode
-        if old_has_demand and not new_has_demand and self._cycle_active:
+        # Demand dropped to 0 → debounce SETTLING_STARTED
+        if old_has_demand and not new_has_demand and self._bookkeeper.cycle_active:
             if self._pwm and self._dispatcher:
-                # Cancel any pending low-output timer before starting demand-zero debounce
-                if self._low_output_timer is not None:
-                    self._low_output_timer()
-                    self._low_output_timer = None
-                # PWM mode: start debounce timer (2×PWM period) to allow brief demand=0 dips
-                # during multi-cycle aggregation without prematurely ending the heating session.
-                # _cycle_active stays True until timer fires or demand returns.
-                was_clamped = self._get_pid_was_clamped()
-                self._demand_zero_timer = async_call_later(
-                    self._hass,
-                    float(2 * self._pwm),
-                    lambda _: self._emit_settling_started_debounced(hvac_mode, was_clamped),
-                )
+                self._timers.schedule_demand_zero_debounce(hvac_mode, self._bookkeeper.get_pid_was_clamped())
             else:
-                # Non-PWM (valve mode) or no dispatcher: emit immediately and reset cycle
                 if self._dispatcher:
-                    self._dispatcher.emit(
-                        SettlingStartedEvent(
-                            hvac_mode=hvac_mode,
-                            timestamp=dt_util.utcnow(),
-                            was_clamped=self._get_pid_was_clamped(),
-                        )
-                    )
-                self._cycle_active = False  # Reset for next cycle
+                    self._bookkeeper.emit_settling_started(hvac_mode, self._bookkeeper.get_pid_was_clamped())
+                self._bookkeeper.cycle_active = False
+        elif new_has_demand and self._timers.demand_zero_active:
+            self._timers.cancel_demand_zero()
 
-        # Cancel demand=0 debounce timer if demand has returned
-        elif new_has_demand and self._demand_zero_timer is not None:
-            self._demand_zero_timer()
-            self._demand_zero_timer = None
-
-        # Low-output maintenance timeout: handles maintenance cycles where output
-        # hovers below MIN_OUTPUT_THRESHOLD without ever reaching 0.
-        # Timer fires after 2×PWM period to emit SETTLING_STARTED and close the session.
-        if self._pwm and self._cycle_active and self._dispatcher:
+        # Low-output maintenance timeout (maintenance cycles that never reach 0)
+        if self._pwm and self._bookkeeper.cycle_active and self._dispatcher:
             low_output = 0 < abs(control_output) < MIN_OUTPUT_THRESHOLD
             if low_output:
-                # Start timer if not already running (demand-zero timer takes precedence)
-                if self._low_output_timer is None and self._demand_zero_timer is None:
-                    was_clamped = self._get_pid_was_clamped()
-                    self._low_output_timer = async_call_later(
-                        self._hass,
-                        float(2 * self._pwm),
-                        lambda _: self._emit_settling_started_low_output(hvac_mode, was_clamped),
-                    )
+                if not self._timers.low_output_active and not self._timers.demand_zero_active:
+                    self._timers.schedule_low_output_timeout(hvac_mode, self._bookkeeper.get_pid_was_clamped())
             elif abs(control_output) >= MIN_OUTPUT_THRESHOLD:
-                # Output rose above threshold — cancel the low-output timer
-                if self._low_output_timer is not None:
-                    self._low_output_timer()
-                    self._low_output_timer = None
+                self._timers.cancel_low_output()
 
         if self._pwm:
             if abs(control_output) == self._difference:
@@ -1163,23 +712,7 @@ class HeaterController:
         set_force_on: Callable[[bool], None],
         set_force_off: Callable[[bool], None],
     ) -> None:
-        """Turn off and on the heater proportionally to control_value.
-
-        Delegates to PWMController for PWM logic and duty accumulation.
-
-        Args:
-            control_output: Current PID control output
-            hvac_mode: Current HVAC mode
-            get_cycle_start_time: Callable that returns cycle start time
-            set_is_heating: Callback to set heating state
-            set_last_heat_cycle_time: Callback to set last heat cycle time
-            time_changed: Last time state changed
-            set_time_changed: Callback to set time changed
-            force_on: Force turn on flag
-            force_off: Force turn off flag
-            set_force_on: Callback to set force on flag
-            set_force_off: Callback to set force off flag
-        """
+        """Proportional PWM switching — delegates to PWMController."""
         if self._pwm_controller:
             await self._pwm_controller.async_pwm_switch(
                 control_output=control_output,
