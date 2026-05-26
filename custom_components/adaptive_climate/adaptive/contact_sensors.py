@@ -18,6 +18,7 @@ class ContactAction(Enum):
 
     PAUSE = "pause"  # Stop heating completely
     FROST_PROTECTION = "frost_protection"  # Lower to frost protection temp (e.g., 5°C)
+    NONE = "none"  # M05: Observe-only — track sensor state but take no heating action
 
 
 class ContactSensorHandler:

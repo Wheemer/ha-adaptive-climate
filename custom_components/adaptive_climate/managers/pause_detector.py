@@ -97,11 +97,14 @@ class PauseDetector:
             except (TypeError, AttributeError):
                 pass
 
-        # 2. Any contact sensor open
+        # 2. Any contact sensor open — but only when action is not NONE (observe-only)
         if self._contact_sensor_handler is not None:
             try:
-                if self._contact_sensor_handler.is_any_contact_open():
-                    return True
+                from ..adaptive.contact_sensors import ContactAction
+
+                if self._contact_sensor_handler.action != ContactAction.NONE:
+                    if self._contact_sensor_handler.is_any_contact_open():
+                        return True
             except (TypeError, AttributeError):
                 pass
 

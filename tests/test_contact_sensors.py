@@ -481,3 +481,76 @@ class TestContactAccumulatorReset:
         sim.tick(t0 + timedelta(minutes=5))
 
         mock_heater_controller.reset_duty_accumulator.assert_not_called()
+
+
+class TestContactActionNone:
+    """M05: contact_action=none must never pause heating or learning."""
+
+    def test_none_action_does_not_pause_control(self):
+        """M05: is_control_paused() must return False when action is NONE and sensor is open.
+
+        Bug: climate.py maps contact_action='none' to ContactAction.FROST_PROTECTION
+        (binary else branch), so the zone gets a frost-protection setpoint instead of
+        no action at all.
+
+        Fix (step 1): add ContactAction.NONE to the enum so it can be expressed.
+        Fix (step 2): climate.py maps 'none' -> ContactAction.NONE.
+        PauseDetector.is_control_paused() already works because it checks
+        ``get_action() == PAUSE``; NONE != PAUSE so no pause fires.
+        """
+        from custom_components.adaptive_climate.managers.pause_detector import PauseDetector
+
+        handler = ContactSensorHandler(
+            contact_sensors=["binary_sensor.window"],
+            contact_delay_seconds=0,  # no delay — action fires immediately
+            action=ContactAction.NONE,
+        )
+        t0 = datetime(2024, 1, 1, 10, 0)
+        handler.update_contact_states({"binary_sensor.window": True}, t0)
+
+        pause_detector = PauseDetector(contact_sensor_handler=handler)
+
+        assert not pause_detector.is_control_paused("heat"), (
+            "M05: contact_action=none must not pause heating control "
+            "even when the sensor is open and the delay has elapsed."
+        )
+
+    def test_none_action_does_not_pause_learning(self):
+        """M05: is_learning_paused() must return False when action is NONE and sensor is open.
+
+        Bug: PauseDetector.is_learning_paused() calls is_any_contact_open() directly,
+        without checking whether the configured action is NONE (observe-only).  When
+        a sensor is open with action=NONE, learning is incorrectly paused.
+
+        Fix: is_learning_paused() must skip the pause check when handler.action == NONE.
+        """
+        from custom_components.adaptive_climate.managers.pause_detector import PauseDetector
+
+        handler = ContactSensorHandler(
+            contact_sensors=["binary_sensor.window"],
+            contact_delay_seconds=0,
+            action=ContactAction.NONE,
+        )
+        t0 = datetime(2024, 1, 1, 10, 0)
+        handler.update_contact_states({"binary_sensor.window": True}, t0)
+
+        pause_detector = PauseDetector(contact_sensor_handler=handler)
+
+        assert not pause_detector.is_learning_paused(), (
+            "M05: contact_action=none must not pause learning analysis "
+            "when a sensor is open — NONE is observe-only, not a pause trigger."
+        )
+
+    def test_none_action_does_not_adjust_setpoint(self):
+        """M05: get_adjusted_setpoint() must return None (no change) for action=NONE."""
+        handler = ContactSensorHandler(
+            contact_sensors=["binary_sensor.window"],
+            contact_delay_seconds=0,
+            action=ContactAction.NONE,
+        )
+        t0 = datetime(2024, 1, 1, 10, 0)
+        handler.update_contact_states({"binary_sensor.window": True}, t0)
+
+        result = handler.get_adjusted_setpoint(base_setpoint=20.0, current_time=t0)
+
+        assert result is None, f"M05: contact_action=none must not adjust setpoint, got {result!r}."

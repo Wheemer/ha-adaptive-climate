@@ -257,7 +257,13 @@ class AdaptiveThermostat(
         if config.contact_sensors:
             contact_action = config.contact_action
             contact_delay = config.contact_delay  # Already int (seconds) from schema
-            action_enum = ContactAction.PAUSE if contact_action == "pause" else ContactAction.FROST_PROTECTION
+            # M05: map all three valid values; "none" = observe-only, no heating action
+            if contact_action == "pause":
+                action_enum = ContactAction.PAUSE
+            elif contact_action == "frost_protection":
+                action_enum = ContactAction.FROST_PROTECTION
+            else:
+                action_enum = ContactAction.NONE
             self._contact_sensor_handler = ContactSensorHandler(
                 contact_sensors=config.contact_sensors,
                 contact_delay_seconds=contact_delay,
