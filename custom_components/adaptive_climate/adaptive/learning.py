@@ -2,51 +2,29 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 from typing import Any, TYPE_CHECKING
-import statistics
 import logging
-
-from homeassistant.util import dt as dt_util
 
 if TYPE_CHECKING:
     from homeassistant.components.climate import HVACMode
 
 from ..const import (
-    PID_LIMITS,
     MIN_CYCLES_FOR_LEARNING,
     MAX_CYCLE_HISTORY,
-    MAX_UNDERSHOOT_KI_MULTIPLIER,
     MIN_ADJUSTMENT_INTERVAL,
     MIN_ADJUSTMENT_CYCLES,
-    MIN_CONVERGENCE_CYCLES_FOR_KE,
-    CONVERGENCE_CONFIDENCE_HIGH,
-    CONFIDENCE_INCREASE_PER_GOOD_CYCLE,
-    CLAMPED_OVERSHOOT_MULTIPLIER,
-    DEFAULT_CLAMPED_OVERSHOOT_MULTIPLIER,
-    PIDChangeReason,
     get_convergence_thresholds,
     get_rule_thresholds,
     HeatingType as HeatingTypeEnum,
 )
 
-# Import PID rule engine components
-from .pid_rules import (
-    PIDRule,
-    PIDRuleResult,
-    RuleStateTracker,
-    evaluate_pid_rules,
-    detect_rule_conflicts,
-    resolve_rule_conflicts,
-)
+# RuleStateTracker is used by __init__; others are backward-compat re-exports
+from .pid_rules import RuleStateTracker
+from .pid_rules import PIDRule, PIDRuleResult, evaluate_pid_rules, detect_rule_conflicts, resolve_rule_conflicts
 
-# Import robust statistics for outlier rejection
-from .robust_stats import robust_average
-
-# Import and re-export ThermalRateLearner for backward compatibility
+# Backward-compat re-exports (tests import these from learning.py)
 from .thermal_rates import ThermalRateLearner
-
-# Import and re-export cycle analysis components for backward compatibility
 from .cycle_analysis import (
     PhaseAwareOvershootTracker,
     CycleMetrics,
@@ -55,8 +33,6 @@ from .cycle_analysis import (
     count_oscillations,
     calculate_settling_time,
 )
-
-# Import and re-export PWM tuning utilities for backward compatibility
 from .pwm_tuning import calculate_pwm_adjustment, ValveCycleTracker
 
 # Import validation manager for safety checks
@@ -66,10 +42,7 @@ from .validation import ValidationManager
 from .confidence import ConfidenceTracker
 
 # Import serialization utilities for state persistence
-from .learner_serialization import (
-    learner_to_dict,
-    restore_learner_from_dict,
-)
+from .learner_serialization import learner_to_dict
 
 # Import auto-apply manager for safety gates and threshold management
 from .auto_apply import AutoApplyManager, get_auto_apply_thresholds
@@ -77,7 +50,7 @@ from .auto_apply import AutoApplyManager, get_auto_apply_thresholds
 # Import undershoot detector for persistent temperature deficit detection
 from .undershoot_detector import UndershootDetector
 
-# Import weighted learning components
+# Import weighted learning components (CycleOutcome used internally in clear_history enum check)
 from .cycle_weight import CycleWeightCalculator, CycleOutcome
 from .confidence_contribution import ConfidenceContributionTracker
 
@@ -87,68 +60,23 @@ from .heating_rate_learner import HeatingRateLearner
 # Import HVAC mode helpers
 from ..helpers.hvac_mode import mode_to_str, get_hvac_heat_mode, get_hvac_cool_mode
 
+# Import computation helpers from extracted modules
+# _get_last/physics_baseline_ki re-exported for climate.py lazy import backward compat
+from .learning_adjustments import (
+    _get_last_adjustment_time_from_history,
+    _get_physics_baseline_ki_from_history,
+    check_convergence as _check_convergence_fn,
+    check_rate_limit as _check_rate_limit_fn,
+    update_convergence_tracking as _update_convergence_tracking_fn,
+)
+from .learning_coordinator import (
+    calculate_pid_adjustment as _calculate_pid_adjustment,
+    update_convergence_confidence as _update_convergence_confidence,
+    check_undershoot_adjustment as _check_undershoot_adjustment,
+    apply_restored_state,
+)
+
 _LOGGER = logging.getLogger(__name__)
-
-
-def _get_last_adjustment_time_from_history(
-    pid_history: list[dict],
-    reason: str,
-) -> datetime | None:
-    """Get the timestamp of the last Ki adjustment for a given reason.
-
-    Args:
-        pid_history: List of PID history entries from PIDGainsManager
-        reason: The reason string to filter by (e.g., "undershoot_ki_boost")
-
-    Returns:
-        datetime in UTC if found, None otherwise
-    """
-    for entry in reversed(pid_history):
-        if entry.get("reason") == reason:
-            timestamp_str = entry.get("timestamp")
-            if timestamp_str:
-                # PID history uses ISO format from dt_util.utcnow().isoformat()
-                try:
-                    dt = datetime.fromisoformat(timestamp_str)
-                except (ValueError, TypeError):
-                    _LOGGER.warning("Could not parse PID history timestamp: %s", timestamp_str)
-                    continue
-                # Ensure timezone-aware (dt_util.utcnow() is UTC)
-                if dt.tzinfo is None:
-                    dt = dt.replace(tzinfo=timezone.utc)
-                return dt
-    return None
-
-
-def _get_physics_baseline_ki_from_history(pid_history: list[dict]) -> float | None:
-    """Get the physics baseline Ki from PID history.
-
-    Looks for the most recent entry with reason "physics_init" or "physics_reset".
-    Falls back to the first entry's Ki value if no physics entry exists.
-
-    Args:
-        pid_history: List of PID history entries from PIDGainsManager.
-                     Each entry has format: {"timestamp": "...", "kp": ..., "ki": ..., "reason": "..."}
-
-    Returns:
-        Ki value from the most recent physics entry, or from first entry as fallback.
-        None if pid_history is empty.
-    """
-    if not pid_history:
-        return None
-
-    # Look for most recent physics entry (reversed = newest first)
-    for entry in reversed(pid_history):
-        reason = entry.get("reason", "")
-        if reason in ("physics_init", "physics_reset"):
-            ki = entry.get("ki")
-            if ki is not None:
-                return float(ki)
-
-    # No fallback - if no physics entry exists, return None
-    # This forces the cap logic to use cumulative_ki_multiplier instead
-    # of a potentially-boosted "baseline" from truncated history
-    return None
 
 
 # Adaptive learning (CycleMetrics imported from cycle_analysis)
@@ -198,8 +126,7 @@ class AdaptiveLearner:
         # Auto-apply manager for safety gates and threshold-based decisions
         self._auto_apply = AutoApplyManager(heating_type)
 
-        # Undershoot detector for persistent temperature deficit detection (unified real-time + cycle)
-        # Convert string to HeatingType enum if needed (default to RADIATOR if None)
+        # Undershoot detector for persistent temperature deficit detection
         if heating_type is None:
             undershoot_heating_type = HeatingTypeEnum.RADIATOR
         else:
@@ -217,25 +144,20 @@ class AdaptiveLearner:
         self._heating_rate_learner = HeatingRateLearner(heating_type or "radiator")
 
         # Optional reference to PIDGainsManager; wired from climate.py after init.
-        # Enables seasonal-limit safety gate to use real pid_history (C02 fix).
         self._pid_gains_manager: Any = None
 
     def set_pid_gains_manager(self, manager: Any) -> None:
-        """Wire the PIDGainsManager so seasonal-limit safety gates use real history.
-
-        Args:
-            manager: PIDGainsManager instance (or None to remove)
-        """
+        """Wire the PIDGainsManager so seasonal-limit safety gates use real history."""
         self._pid_gains_manager = manager
 
     @property
     def cycle_history(self) -> list[CycleMetrics]:
-        """Return cycle history for external access (defaults to heating for backward compatibility)."""
+        """Return heating cycle history (backward compat for sensors/pid_tuning)."""
         return self._heating_cycle_history
 
     @cycle_history.setter
     def cycle_history(self, value: list[CycleMetrics]) -> None:
-        """Set cycle history (primarily for testing, defaults to heating for backward compatibility)."""
+        """Set heating cycle history (primarily for testing)."""
         self._heating_cycle_history = value
 
     # Backward-compatible aliases for private attributes (used by tests)
@@ -246,48 +168,38 @@ class AdaptiveLearner:
 
     @_cycle_history.setter
     def _cycle_history(self, value: list[CycleMetrics]) -> None:
-        """Backward-compatible alias setter for _heating_cycle_history."""
         self._heating_cycle_history = value
 
-    # Backward-compatible aliases for confidence tracker attributes (used by tests)
     @property
     def _heating_convergence_confidence(self) -> float:
-        """Backward-compatible alias for confidence tracker's heating confidence."""
         return self._confidence._heating_convergence_confidence
 
     @_heating_convergence_confidence.setter
     def _heating_convergence_confidence(self, value: float) -> None:
-        """Backward-compatible alias setter for confidence tracker's heating confidence."""
         self._confidence._heating_convergence_confidence = value
 
     @property
     def _cooling_convergence_confidence(self) -> float:
-        """Backward-compatible alias for confidence tracker's cooling confidence."""
         return self._confidence._cooling_convergence_confidence
 
     @_cooling_convergence_confidence.setter
     def _cooling_convergence_confidence(self, value: float) -> None:
-        """Backward-compatible alias setter for confidence tracker's cooling confidence."""
         self._confidence._cooling_convergence_confidence = value
 
     @property
     def _heating_auto_apply_count(self) -> int:
-        """Backward-compatible alias for confidence tracker's heating auto-apply count."""
         return self._confidence._heating_auto_apply_count
 
     @_heating_auto_apply_count.setter
     def _heating_auto_apply_count(self, value: int) -> None:
-        """Backward-compatible alias setter for confidence tracker's heating auto-apply count."""
         self._confidence._heating_auto_apply_count = value
 
     @property
     def _cooling_auto_apply_count(self) -> int:
-        """Backward-compatible alias for confidence tracker's cooling auto-apply count."""
         return self._confidence._cooling_auto_apply_count
 
     @_cooling_auto_apply_count.setter
     def _cooling_auto_apply_count(self, value: int) -> None:
-        """Backward-compatible alias setter for confidence tracker's cooling auto-apply count."""
         self._confidence._cooling_auto_apply_count = value
 
     @property
@@ -297,18 +209,10 @@ class AdaptiveLearner:
 
     @_auto_apply_count.setter
     def _auto_apply_count(self, value: int) -> None:
-        """Backward-compatible alias setter for _heating_auto_apply_count."""
         self._confidence._heating_auto_apply_count = value
 
     def increment_auto_apply_count(self, mode: HVACMode = None) -> int:
-        """Increment and return the auto-apply counter for the specified mode.
-
-        Args:
-            mode: HVACMode (HEAT or COOL) to increment. Defaults to HEAT.
-
-        Returns:
-            The new counter value after incrementing.
-        """
+        """Increment and return the auto-apply counter for the specified mode."""
         self._confidence.increment_auto_apply_count(mode)
         return self._confidence.get_auto_apply_count(mode)
 
@@ -319,79 +223,57 @@ class AdaptiveLearner:
 
     @_convergence_confidence.setter
     def _convergence_confidence(self, value: float) -> None:
-        """Backward-compatible alias setter for _heating_convergence_confidence."""
         self._confidence._heating_convergence_confidence = value
 
     # Backward-compatible aliases for validation manager attributes (used by tests)
     @property
     def _validation_mode(self) -> bool:
-        """Backward-compatible alias for validation manager's validation mode."""
         return self._validation.is_in_validation_mode()
 
     @property
     def _validation_cycles(self) -> list[CycleMetrics]:
-        """Backward-compatible alias for validation manager's validation cycles."""
         return self._validation._validation_cycles
 
     @property
     def _validation_baseline_overshoot(self) -> float | None:
-        """Backward-compatible alias for validation manager's baseline overshoot."""
         return self._validation._validation_baseline_overshoot
 
     @property
     def _last_seasonal_check(self) -> datetime | None:
-        """Backward-compatible alias for validation manager's last seasonal check."""
         return self._validation._last_seasonal_check
 
     @_last_seasonal_check.setter
     def _last_seasonal_check(self, value: datetime | None) -> None:
-        """Backward-compatible alias setter for validation manager's last seasonal check."""
         self._validation._last_seasonal_check = value
 
     @property
     def _last_seasonal_shift(self) -> datetime | None:
-        """Backward-compatible alias for validation manager's last seasonal shift."""
         return self._validation._last_seasonal_shift
 
     @_last_seasonal_shift.setter
     def _last_seasonal_shift(self, value: datetime | None) -> None:
-        """Backward-compatible alias setter for validation manager's last seasonal shift."""
         self._validation._last_seasonal_shift = value
 
     @property
     def _outdoor_temp_history(self) -> list[float]:
-        """Backward-compatible alias for validation manager's outdoor temp history."""
         return self._validation._outdoor_temp_history
 
     @property
     def _physics_baseline_kp(self) -> float | None:
-        """Backward-compatible alias for validation manager's physics baseline Kp."""
         return self._validation._physics_baseline_kp
 
     @property
     def _physics_baseline_ki(self) -> float | None:
-        """Backward-compatible alias for validation manager's physics baseline Ki."""
         return self._validation._physics_baseline_ki
 
     @property
     def _physics_baseline_kd(self) -> float | None:
-        """Backward-compatible alias for validation manager's physics baseline Kd."""
         return self._validation._physics_baseline_kd
 
     def add_cycle_metrics(self, metrics: CycleMetrics, mode: HVACMode = None) -> None:
-        """
-        Add a cycle's performance metrics to history.
-
-        Implements FIFO eviction when history exceeds max_history.
-        Increments cycle counter for hybrid rate limiting.
-
-        Args:
-            metrics: CycleMetrics object with performance data
-            mode: HVACMode (HEAT or COOL) to route cycle to correct history (defaults to HEAT)
-        """
+        """Add a cycle's performance metrics to history (FIFO eviction at max_history)."""
         if mode is None:
             mode = get_hvac_heat_mode()
-        # Route to correct history based on mode
         if mode == get_hvac_cool_mode():
             cycle_history = self._cooling_cycle_history
         else:
@@ -399,7 +281,6 @@ class AdaptiveLearner:
 
         cycle_history.append(metrics)
 
-        # Log detailed cycle metrics for debugging
         _LOGGER.debug(
             "Cycle recorded [%s mode, %d/%d]: overshoot=%.3f, undershoot=%.3f, "
             "settling_time=%.1f, oscillations=%d, rise_time=%.1f, "
@@ -423,21 +304,15 @@ class AdaptiveLearner:
             metrics.was_clamped,
         )
 
-        # Increment cycle counter for hybrid rate limiting
         self._cycles_since_last_adjustment += 1
 
-        # Feed cycle to unified undershoot detector for chronic approach detection
-        # Calculate cycle duration if timestamps available
+        # Feed to undershoot detector for cycle-mode chronic approach detection
         cycle_duration_minutes = None
         if metrics.rise_time is not None or metrics.settling_time is not None:
-            # If we have timing metrics, approximate total cycle duration
-            # rise_time + settling_time gives us a reasonable cycle duration
-            rise = metrics.rise_time or 0.0
-            settling = metrics.settling_time or 0.0
-            cycle_duration_minutes = rise + settling
+            cycle_duration_minutes = (metrics.rise_time or 0.0) + (metrics.settling_time or 0.0)
         self._undershoot_detector.add_cycle(metrics, cycle_duration_minutes)
 
-        # FIFO eviction: remove oldest entries when exceeding max history (in-place for efficiency)
+        # FIFO eviction
         if len(cycle_history) > self._max_history:
             evicted_count = len(cycle_history) - self._max_history
             if mode == get_hvac_cool_mode():
@@ -445,26 +320,17 @@ class AdaptiveLearner:
             else:
                 del self._heating_cycle_history[:evicted_count]
             _LOGGER.debug(
-                f"Cycle history ({mode_to_str(mode)} mode) exceeded max ({self._max_history}), "
-                f"evicted {evicted_count} oldest entries"
+                "Cycle history (%s mode) exceeded max (%d), evicted %d oldest entries",
+                mode_to_str(mode),
+                self._max_history,
+                evicted_count,
             )
 
     def get_cycle_count(self, mode: HVACMode = None) -> int:
-        """
-        Get number of stored cycle metrics.
-
-        Args:
-            mode: HVACMode (HEAT or COOL) to check (defaults to HEAT)
-
-        Returns:
-            Number of cycles in history for specified mode
-        """
+        """Get number of stored cycle metrics for the specified mode."""
         if mode is None:
             mode = get_hvac_heat_mode()
-        if mode == get_hvac_cool_mode():
-            return len(self._cooling_cycle_history)
-        else:
-            return len(self._heating_cycle_history)
+        return len(self._cooling_cycle_history) if mode == get_hvac_cool_mode() else len(self._heating_cycle_history)
 
     def _check_convergence(
         self,
@@ -476,98 +342,27 @@ class AdaptiveLearner:
         avg_settling_mae: float = 0.0,
         avg_undershoot: float = 0.0,
     ) -> bool:
-        """
-        Check if the system has converged (is well-tuned).
-
-        Convergence occurs when ALL performance metrics are within acceptable bounds
-        defined by heating-type-specific thresholds (or default thresholds if heating type unknown).
-
-        Args:
-            avg_overshoot: Average overshoot in °C
-            avg_oscillations: Average number of oscillations
-            avg_settling_time: Average settling time in minutes
-            avg_rise_time: Average rise time in minutes
-            avg_inter_cycle_drift: Average inter-cycle drift in °C (default 0.0)
-            avg_settling_mae: Average settling MAE in °C (default 0.0)
-            avg_undershoot: Average undershoot in °C (default 0.0)
-
-        Returns:
-            True if converged, False otherwise
-        """
-        is_converged = (
-            avg_overshoot <= self._convergence_thresholds["overshoot_max"]
-            and avg_oscillations <= self._convergence_thresholds["oscillations_max"]
-            and avg_settling_time <= self._convergence_thresholds["settling_time_max"]
-            and avg_rise_time <= self._convergence_thresholds["rise_time_max"]
-            and abs(avg_inter_cycle_drift) <= self._convergence_thresholds.get("inter_cycle_drift_max", 0.3)
-            and avg_settling_mae <= self._convergence_thresholds.get("settling_mae_max", 0.3)
-            and avg_undershoot <= self._convergence_thresholds.get("undershoot_max", 0.2)
+        """Check if system has converged. Delegates to learning_adjustments.check_convergence."""
+        return _check_convergence_fn(
+            self._convergence_thresholds,
+            avg_overshoot,
+            avg_oscillations,
+            avg_settling_time,
+            avg_rise_time,
+            avg_inter_cycle_drift,
+            avg_settling_mae,
+            avg_undershoot,
         )
-
-        if is_converged:
-            _LOGGER.info(
-                f"PID convergence detected - system tuned: "
-                f"overshoot={avg_overshoot:.2f}°C, oscillations={avg_oscillations:.1f}, "
-                f"settling={avg_settling_time:.1f}min, rise={avg_rise_time:.1f}min, "
-                f"inter_cycle_drift={avg_inter_cycle_drift:.2f}°C, settling_mae={avg_settling_mae:.2f}°C, "
-                f"undershoot={avg_undershoot:.2f}°C"
-            )
-
-        return is_converged
 
     def _check_rate_limit(
         self,
         min_interval_hours: int = MIN_ADJUSTMENT_INTERVAL,
         min_cycles: int = MIN_ADJUSTMENT_CYCLES,
     ) -> bool:
-        """
-        Check if enough time AND cycles have passed since the last PID adjustment.
-
-        Implements hybrid rate limiting with two gates (both must be satisfied):
-        1. Time gate: minimum hours between adjustments
-        2. Cycle gate: minimum cycles between adjustments
-
-        Args:
-            min_interval_hours: Minimum hours between adjustments
-            min_cycles: Minimum cycles between adjustments
-
-        Returns:
-            True if rate limited (adjustment should be skipped), False if OK to adjust
-        """
-        # First adjustment - no rate limiting
-        if self._last_adjustment_time is None:
-            return False
-
-        # Check time gate
-        time_since_last = dt_util.utcnow() - self._last_adjustment_time
-        min_interval = timedelta(hours=min_interval_hours)
-        time_gate_satisfied = time_since_last >= min_interval
-
-        # Check cycle gate
-        cycle_gate_satisfied = self._cycles_since_last_adjustment >= min_cycles
-
-        # Both gates must be satisfied
-        if not time_gate_satisfied:
-            hours_remaining = (min_interval - time_since_last).total_seconds() / 3600
-            _LOGGER.info(
-                f"PID adjustment rate limited (time gate): last adjustment was "
-                f"{time_since_last.total_seconds() / 3600:.1f}h ago, "
-                f"minimum interval is {min_interval_hours}h "
-                f"({hours_remaining:.1f}h remaining)"
-            )
-            return True
-
-        if not cycle_gate_satisfied:
-            cycles_remaining = min_cycles - self._cycles_since_last_adjustment
-            _LOGGER.info(
-                f"PID adjustment rate limited (cycle gate): "
-                f"{self._cycles_since_last_adjustment} cycles since last adjustment, "
-                f"minimum is {min_cycles} cycles "
-                f"({cycles_remaining} cycles remaining)"
-            )
-            return True
-
-        return False
+        """Check hybrid rate limit. Delegates to learning_adjustments.check_rate_limit."""
+        return _check_rate_limit_fn(
+            self._last_adjustment_time, self._cycles_since_last_adjustment, min_interval_hours, min_cycles
+        )
 
     def calculate_pid_adjustment(
         self,
@@ -582,358 +377,35 @@ class AdaptiveLearner:
         outdoor_temp: float | None = None,
         mode: HVACMode = None,
     ) -> dict[str, float] | None:
-        """
-        Calculate PID adjustments based on observed cycle performance.
-
-        Implements priority-based rule conflict resolution:
-        - Priority 3 (highest): Oscillation rules (safety)
-        - Priority 2: Overshoot rules (stability)
-        - Priority 1 (lowest): Response time rules (performance)
-
-        When rules conflict (e.g., overshoot says decrease Kp, slow response says increase),
-        the higher priority rule wins.
-
-        Also detects convergence (system is well-tuned) and skips adjustments.
-        Rate limiting prevents adjustments too frequently using hybrid gates
-        (both time AND cycles must be satisfied).
-
-        When check_auto_apply is True, additional safety gates are enforced:
-        - Validation mode check (skip if in validation)
-        - Lifetime and seasonal auto-apply limits
-        - Cumulative drift from physics baseline limit
-        - Seasonal shift blocking
-        - Heating-type-specific confidence thresholds
-
-        Args:
-            current_kp: Current proportional gain
-            current_ki: Current integral gain
-            current_kd: Current derivative gain
-            min_cycles: Minimum cycles required before making recommendations
-            min_interval_hours: Minimum hours between adjustments (hybrid time gate)
-            min_adjustment_cycles: Minimum cycles between adjustments (hybrid cycle gate)
-            pwm_seconds: PWM period in seconds (0 for valve mode, >0 for PWM mode)
-            check_auto_apply: If True, enforce auto-apply safety gates and use
-                heating-type-specific thresholds
-            outdoor_temp: Current outdoor temperature for seasonal shift detection
-            mode: HVACMode (HEAT or COOL) to use correct history (defaults to HEAT)
-
-        Returns:
-            Dictionary with recommended kp, ki, kd values, or None if insufficient data,
-            system is converged, rate limited, or blocked by auto-apply safety gates
-        """
-        # Select the correct cycle history based on mode
-        if mode is None:
-            mode = get_hvac_heat_mode()
-        cycle_history = self._cooling_cycle_history if mode == get_hvac_cool_mode() else self._heating_cycle_history
-        convergence_confidence = (
-            self._cooling_convergence_confidence
-            if mode == get_hvac_cool_mode()
-            else self._heating_convergence_confidence
+        """Calculate PID adjustments. Full implementation in learning_coordinator.py."""
+        return _calculate_pid_adjustment(
+            self,
+            current_kp,
+            current_ki,
+            current_kd,
+            min_cycles,
+            min_interval_hours,
+            min_adjustment_cycles,
+            pwm_seconds,
+            check_auto_apply,
+            outdoor_temp,
+            mode,
         )
-
-        # Auto-apply safety gates (when called for automatic PID application)
-        if check_auto_apply:
-            # Pull real pid_history from PIDGainsManager if wired; fall back to empty list.
-            _pid_history = self._pid_gains_manager.get_history(mode) if self._pid_gains_manager is not None else []
-            gates_passed, min_interval_hours, min_adjustment_cycles, min_cycles = (
-                self._auto_apply.check_auto_apply_safety_gates(
-                    validation_manager=self._validation,
-                    confidence_tracker=self._confidence,
-                    current_kp=current_kp,
-                    current_ki=current_ki,
-                    current_kd=current_kd,
-                    outdoor_temp=outdoor_temp,
-                    pid_history=_pid_history,
-                    mode=mode,
-                    contribution_tracker=self._contribution_tracker,
-                )
-            )
-
-            if not gates_passed:
-                return None
-
-            # Use the adjusted parameters from auto-apply manager
-            # (already includes heating-type-specific thresholds and subsequent learning multiplier)
-
-        # Check hybrid rate limiting first (both time AND cycles)
-        if self._check_rate_limit(min_interval_hours, min_adjustment_cycles):
-            return None
-
-        if len(cycle_history) < min_cycles:
-            _LOGGER.debug(
-                f"Insufficient cycles for learning ({mode_to_str(mode)} mode): {len(cycle_history)} < {min_cycles}"
-            )
-            return None
-
-        # Calculate average metrics from recent cycles
-        # Filter out disturbed cycles for more accurate learning
-        recent_cycles = cycle_history[-min_cycles * 2 :]  # Get more cycles to account for filtering
-        undisturbed_cycles = [c for c in recent_cycles if not c.is_disturbed]
-
-        # If too many cycles were filtered out, we don't have enough data
-        if len(undisturbed_cycles) < min_cycles:
-            _LOGGER.debug(
-                f"Insufficient undisturbed cycles for learning: "
-                f"{len(undisturbed_cycles)} undisturbed out of {len(recent_cycles)} total "
-                f"(need {min_cycles})"
-            )
-            return None
-
-        # Use only undisturbed cycles for learning
-        recent_cycles = undisturbed_cycles[-min_cycles:]
-
-        # Use robust averaging with outlier detection (v0.7.0+)
-        # MAD-based outlier rejection with max 30% removal, min 4 valid cycles
-
-        # Apply clamped overshoot multiplier to cycles that were clamped
-        # Clamping hides true overshoot potential, so we amplify to compensate
-        clamped_multiplier = CLAMPED_OVERSHOOT_MULTIPLIER.get(self._heating_type, DEFAULT_CLAMPED_OVERSHOOT_MULTIPLIER)
-        clamped_cycle_count = 0
-        split_overshoot_count = 0
-        overshoot_values = []
-        for c in recent_cycles:
-            # Prefer controllable_overshoot when available (excludes committed heat)
-            # This ensures learning only penalizes controllable overshoot, not unavoidable
-            # overshoot from in-flight heat (valve actuation time)
-            overshoot_value = getattr(c, "controllable_overshoot", None)
-            if overshoot_value is not None:
-                split_overshoot_count += 1
-            else:
-                # Fall back to total overshoot for backward compatibility
-                overshoot_value = c.overshoot
-
-            if overshoot_value is not None:
-                if getattr(c, "was_clamped", False):
-                    overshoot_values.append(overshoot_value * clamped_multiplier)
-                    clamped_cycle_count += 1
-                else:
-                    overshoot_values.append(overshoot_value)
-
-        if overshoot_values:
-            avg_overshoot, overshoot_outliers = robust_average(overshoot_values)
-            if overshoot_outliers:
-                _LOGGER.debug(
-                    f"Removed {len(overshoot_outliers)} overshoot outliers from {len(overshoot_values)} cycles"
-                )
-            if clamped_cycle_count > 0:
-                _LOGGER.debug(
-                    f"{clamped_cycle_count} of {len(overshoot_values)} recent cycles clamped, "
-                    f"overshoot amplified by {clamped_multiplier}x ({self._heating_type})"
-                )
-            if split_overshoot_count > 0:
-                _LOGGER.debug(
-                    f"{split_overshoot_count} of {len(overshoot_values)} recent cycles using controllable overshoot "
-                    f"(excluding committed heat from valve actuation time)"
-                )
-        else:
-            avg_overshoot = 0.0
-
-        undershoot_values = [c.undershoot for c in recent_cycles if c.undershoot is not None]
-        if undershoot_values:
-            avg_undershoot, undershoot_outliers = robust_average(undershoot_values)
-            if undershoot_outliers:
-                _LOGGER.debug(
-                    f"Removed {len(undershoot_outliers)} undershoot outliers from {len(undershoot_values)} cycles"
-                )
-        else:
-            avg_undershoot = 0.0
-
-        settling_time_values = [c.settling_time for c in recent_cycles if c.settling_time is not None]
-        if settling_time_values:
-            avg_settling_time, settling_outliers = robust_average(settling_time_values)
-            if settling_outliers:
-                _LOGGER.debug(
-                    f"Removed {len(settling_outliers)} settling_time outliers from {len(settling_time_values)} cycles"
-                )
-        else:
-            avg_settling_time = 0.0
-
-        oscillation_values = [c.oscillations for c in recent_cycles]
-        avg_oscillations, oscillation_outliers = robust_average(oscillation_values)
-        if oscillation_outliers:
-            _LOGGER.debug(
-                f"Removed {len(oscillation_outliers)} oscillation outliers from {len(oscillation_values)} cycles"
-            )
-
-        rise_time_values = [c.rise_time for c in recent_cycles if c.rise_time is not None]
-        if rise_time_values:
-            avg_rise_time, rise_outliers = robust_average(rise_time_values)
-            if rise_outliers:
-                _LOGGER.debug(f"Removed {len(rise_outliers)} rise_time outliers from {len(rise_time_values)} cycles")
-        else:
-            avg_rise_time = 0.0
-
-        # Extract outdoor temperature averages for correlation analysis
-        outdoor_temp_values = [c.outdoor_temp_avg for c in recent_cycles if c.outdoor_temp_avg is not None]
-
-        # Extract decay metrics for rule evaluation
-        decay_contribution_values = [c.decay_contribution for c in recent_cycles if c.decay_contribution is not None]
-        avg_decay_contribution = statistics.mean(decay_contribution_values) if decay_contribution_values else None
-
-        integral_at_tolerance_values = [
-            c.integral_at_tolerance_entry for c in recent_cycles if c.integral_at_tolerance_entry is not None
-        ]
-        avg_integral_at_tolerance = (
-            statistics.mean(integral_at_tolerance_values) if integral_at_tolerance_values else None
-        )
-
-        # Extract inter_cycle_drift values from recent cycles
-        drift_values = [c.inter_cycle_drift for c in recent_cycles if c.inter_cycle_drift is not None]
-        avg_inter_cycle_drift = sum(drift_values) / len(drift_values) if drift_values else 0.0
-
-        # Extract settling_mae values
-        settling_mae_values = [c.settling_mae for c in recent_cycles if c.settling_mae is not None]
-        avg_settling_mae = sum(settling_mae_values) / len(settling_mae_values) if settling_mae_values else 0.0
-
-        # Log averaged metrics used for learning decisions
-        _LOGGER.debug(
-            "Learning evaluation using %d cycles: avg_overshoot=%.3f, avg_undershoot=%.3f, "
-            "avg_oscillations=%.1f, avg_settling_time=%.1f, avg_rise_time=%.1f, "
-            "avg_inter_cycle_drift=%.3f, avg_settling_mae=%.3f, avg_decay=%.3f",
-            len(recent_cycles),
-            avg_overshoot,
-            avg_undershoot,
-            avg_oscillations,
-            avg_settling_time,
-            avg_rise_time,
-            avg_inter_cycle_drift,
-            avg_settling_mae,
-            avg_decay_contribution or 0.0,
-        )
-
-        # Check for convergence - skip adjustments if system is tuned
-        if self._check_convergence(
-            avg_overshoot,
-            avg_oscillations,
-            avg_settling_time,
-            avg_rise_time,
-            avg_inter_cycle_drift=avg_inter_cycle_drift,
-            avg_settling_mae=avg_settling_mae,
-            avg_undershoot=avg_undershoot,
-        ):
-            _LOGGER.info("Skipping PID adjustment - system has converged")
-            return None
-
-        # Evaluate all applicable rules with hysteresis tracking
-        rule_results = evaluate_pid_rules(
-            avg_overshoot,
-            avg_undershoot,
-            avg_oscillations,
-            avg_rise_time,
-            avg_settling_time,
-            recent_rise_times=rise_time_values,
-            recent_outdoor_temps=outdoor_temp_values,
-            state_tracker=self._rule_state_tracker,
-            rule_thresholds=self._rule_thresholds,
-            decay_contribution=avg_decay_contribution,
-            integral_at_tolerance_entry=avg_integral_at_tolerance,
-            avg_inter_cycle_drift=avg_inter_cycle_drift,
-        )
-
-        if not rule_results:
-            _LOGGER.debug("No PID rules triggered - metrics within acceptable ranges")
-            return None
-
-        # Filter out oscillation rules in PWM mode
-        # PWM cycling is expected behavior and should not trigger oscillation rules
-        if pwm_seconds > 0:
-            from ..const import RULE_PRIORITY_OSCILLATION
-
-            original_count = len(rule_results)
-            rule_results = [r for r in rule_results if r.rule.priority != RULE_PRIORITY_OSCILLATION]
-            if len(rule_results) < original_count:
-                _LOGGER.debug(
-                    f"PWM mode active (period={pwm_seconds}s): filtered out "
-                    f"{original_count - len(rule_results)} oscillation rule(s). "
-                    "PWM cycles are expected behavior."
-                )
-            if not rule_results:
-                _LOGGER.debug("All rules filtered out in PWM mode - no adjustments needed")
-                return None
-
-        # Detect and resolve conflicts
-        conflicts = detect_rule_conflicts(rule_results)
-        if conflicts:
-            _LOGGER.info(f"Detected {len(conflicts)} PID rule conflict(s)")
-            rule_results = resolve_rule_conflicts(rule_results, conflicts)
-
-        # Get learning rate multiplier based on convergence confidence
-        learning_rate = self.get_learning_rate_multiplier(convergence_confidence)
-        if learning_rate != 1.0:
-            _LOGGER.info(
-                f"Applying learning rate multiplier: {learning_rate:.2f}x "
-                f"(confidence: {convergence_confidence:.2f}, mode: {mode_to_str(mode)})"
-            )
-
-        # Apply resolved rules with learning rate scaling
-        new_kp = current_kp
-        new_ki = current_ki
-        new_kd = current_kd
-
-        for result in rule_results:
-            # Scale adjustment factors by learning rate
-            # For factors < 1.0 (reductions), scale towards 1.0
-            # For factors > 1.0 (increases), scale away from 1.0
-            scaled_kp_factor = 1.0 + (result.kp_factor - 1.0) * learning_rate
-            scaled_ki_factor = 1.0 + (result.ki_factor - 1.0) * learning_rate
-            scaled_kd_factor = 1.0 + (result.kd_factor - 1.0) * learning_rate
-
-            if result.kp_factor != 1.0:
-                _LOGGER.info(f"{result.reason}: Kp *= {result.kp_factor:.2f} (scaled: {scaled_kp_factor:.2f})")
-            if result.ki_factor != 1.0:
-                _LOGGER.info(f"{result.reason}: Ki *= {result.ki_factor:.2f} (scaled: {scaled_ki_factor:.2f})")
-            if result.kd_factor != 1.0:
-                _LOGGER.info(f"{result.reason}: Kd *= {result.kd_factor:.2f} (scaled: {scaled_kd_factor:.2f})")
-
-            new_kp *= scaled_kp_factor
-            new_ki *= scaled_ki_factor
-            new_kd *= scaled_kd_factor
-
-        # Enforce PID limits
-        new_kp = max(PID_LIMITS["kp_min"], min(PID_LIMITS["kp_max"], new_kp))
-        new_ki = max(PID_LIMITS["ki_min"], min(PID_LIMITS["ki_max"], new_ki))
-        new_kd = max(PID_LIMITS["kd_min"], min(PID_LIMITS["kd_max"], new_kd))
-
-        # Record adjustment time and reset cycle counter for hybrid rate limiting
-        self._last_adjustment_time = dt_util.utcnow()
-        self._cycles_since_last_adjustment = 0
-
-        return {
-            "kp": new_kp,
-            "ki": new_ki,
-            "kd": new_kd,
-        }
 
     def get_last_adjustment_time(self) -> datetime | None:
-        """
-        Get the timestamp of the last PID adjustment.
-
-        Returns:
-            datetime of last adjustment, or None if no adjustment has been made
-        """
+        """Get the timestamp of the last PID adjustment."""
         return self._last_adjustment_time
 
     def clear_history(self) -> None:
-        """Clear all stored cycle metrics, reset adjustment tracking, and exit validation mode.
-
-        This resets:
-        - Cycle history (both heating and cooling)
-        - Last adjustment time and cycle counter
-        - Convergence confidence (both heating and cooling)
-        - Validation mode state and collected validation cycles
-        - Undershoot detector state (consecutive failures, Ki multiplier)
-        - Confidence contribution tracker (maintenance, heating rate caps)
-        - Heating rate learner (all observations)
-        """
+        """Clear cycle history, reset tracking, and exit validation mode."""
         self._heating_cycle_history.clear()
         self._cooling_cycle_history.clear()
         self._last_adjustment_time = None
         self._cycles_since_last_adjustment = 0
-        self._confidence.reset_confidence()  # Reset both modes
+        self._confidence.reset_confidence()
         self._validation.reset_validation_state()
-        self._undershoot_detector.reset_all()  # Reset all undershoot state
+        self._undershoot_detector.reset_all()
 
-        # Reset contribution tracker (no reset method - create fresh instance)
         if self._heating_type is None:
             heating_type_enum = HeatingTypeEnum.RADIATOR
         elif isinstance(self._heating_type, str):
@@ -941,402 +413,82 @@ class AdaptiveLearner:
         else:
             heating_type_enum = self._heating_type
         self._contribution_tracker = ConfidenceContributionTracker(heating_type_enum)
-
-        # Reset heating rate learner (no reset method - create fresh instance)
         self._heating_rate_learner = HeatingRateLearner(self._heating_type or "radiator")
 
     def set_physics_baseline(self, kp: float, ki: float, kd: float) -> None:
-        """Set the physics-based baseline PID values for drift calculation.
-
-        The baseline represents the initial physics-calculated PID values.
-        Used to calculate how far the adaptive tuning has drifted from
-        the original physics-based estimates.
-
-        Args:
-            kp: Physics-based proportional gain
-            ki: Physics-based integral gain
-            kd: Physics-based derivative gain
-        """
+        """Set the physics-based baseline PID values for drift calculation."""
         self._validation.set_physics_baseline(kp, ki, kd)
 
-    def calculate_drift_from_baseline(
-        self,
-        current_kp: float,
-        current_ki: float,
-        current_kd: float,
-    ) -> float:
-        """Calculate how far current PID values have drifted from physics baseline.
-
-        Returns the maximum percentage drift across all three PID parameters.
-        Used to enforce safety limits on cumulative adaptive changes.
-
-        Args:
-            current_kp: Current proportional gain
-            current_ki: Current integral gain
-            current_kd: Current derivative gain
-
-        Returns:
-            Maximum drift as a decimal (e.g., 0.5 = 50% drift).
-            Returns 0.0 if no baseline is set.
-        """
+    def calculate_drift_from_baseline(self, current_kp: float, current_ki: float, current_kd: float) -> float:
+        """Calculate max percentage drift from physics baseline (0.0 if no baseline)."""
         return self._validation.calculate_drift_from_baseline(current_kp, current_ki, current_kd)
 
     def update_convergence_tracking(self, metrics: CycleMetrics) -> bool:
-        """Update convergence tracking based on latest cycle metrics.
-
-        Tracks consecutive converged cycles to determine when PID is stable
-        enough for Ke learning to begin.
-
-        Args:
-            metrics: The latest cycle metrics to evaluate
-
-        Returns:
-            True if PID is now converged for Ke learning, False otherwise
-        """
-        # Check if this cycle meets convergence thresholds
-        overshoot = metrics.overshoot if metrics.overshoot is not None else 0.0
-        undershoot = metrics.undershoot if metrics.undershoot is not None else 0.0
-        oscillations = metrics.oscillations
-        settling_time = metrics.settling_time if metrics.settling_time is not None else 0.0
-        rise_time = metrics.rise_time if metrics.rise_time is not None else 0.0
-
-        is_cycle_converged = (
-            overshoot <= self._convergence_thresholds["overshoot_max"]
-            and undershoot <= self._convergence_thresholds.get("undershoot_max", 0.2)
-            and oscillations <= self._convergence_thresholds["oscillations_max"]
-            and settling_time <= self._convergence_thresholds["settling_time_max"]
-            and rise_time <= self._convergence_thresholds["rise_time_max"]
-        )
-
-        if is_cycle_converged:
-            self._consecutive_converged_cycles += 1
-            _LOGGER.debug(
-                "Convergence tracking: cycle converged (%d consecutive)",
-                self._consecutive_converged_cycles,
-            )
-
-            # Check if we've reached the threshold for Ke learning
-            if self._consecutive_converged_cycles >= MIN_CONVERGENCE_CYCLES_FOR_KE and not self._pid_converged_for_ke:
-                self._pid_converged_for_ke = True
-                _LOGGER.info(
-                    "PID converged for Ke learning after %d consecutive cycles",
-                    self._consecutive_converged_cycles,
-                )
-        else:
-            # Reset consecutive counter on non-converged cycle
-            if self._consecutive_converged_cycles > 0:
-                _LOGGER.debug(
-                    "Convergence tracking: cycle not converged, resetting counter (was %d)",
-                    self._consecutive_converged_cycles,
-                )
-            self._consecutive_converged_cycles = 0
-            self._pid_converged_for_ke = False
-
-        return self._pid_converged_for_ke
+        """Update convergence tracking for Ke learning activation. Delegates to learning_adjustments."""
+        return _update_convergence_tracking_fn(self, metrics)
 
     def is_pid_converged_for_ke(self) -> bool:
-        """Check if PID has converged sufficiently for Ke learning.
-
-        Returns:
-            True if PID has had MIN_CONVERGENCE_CYCLES_FOR_KE consecutive
-            converged cycles, False otherwise
-        """
+        """Check if PID has converged sufficiently for Ke learning."""
         return self._pid_converged_for_ke
 
     def get_consecutive_converged_cycles(self) -> int:
-        """Get the number of consecutive converged cycles.
-
-        Returns:
-            Number of consecutive cycles meeting convergence thresholds
-        """
+        """Get the number of consecutive converged cycles."""
         return self._consecutive_converged_cycles
 
     def reset_ke_convergence(self) -> None:
-        """Reset Ke convergence tracking.
-
-        Call this when PID values are changed or Ke learning needs to restart.
-        """
+        """Reset Ke convergence tracking (call when PID values change)."""
         old_converged = self._pid_converged_for_ke
         old_count = self._consecutive_converged_cycles
         self._consecutive_converged_cycles = 0
         self._pid_converged_for_ke = False
         if old_converged or old_count > 0:
-            _LOGGER.info(
-                "Ke convergence reset (was: converged=%s, consecutive=%d)",
-                old_converged,
-                old_count,
-            )
+            _LOGGER.info("Ke convergence reset (was: converged=%s, consecutive=%d)", old_converged, old_count)
 
     def get_convergence_confidence(self, mode: HVACMode = None) -> float:
-        """Get current convergence confidence level for specified mode.
-
-        Args:
-            mode: HVACMode (HEAT or COOL) to check (defaults to HEAT)
-
-        Returns:
-            Confidence in range [0.0, 1.0]
-        """
+        """Get current convergence confidence for specified mode."""
         return self._confidence.get_convergence_confidence(mode)
 
     def get_auto_apply_count(self, mode: HVACMode = None) -> int:
-        """Get number of times PID has been auto-applied for specified mode.
-
-        Args:
-            mode: HVACMode (HEAT or COOL) to check (defaults to HEAT)
-
-        Returns:
-            Total count of auto-applied PID adjustments for the specified mode.
-        """
+        """Get number of auto-applied PID adjustments for specified mode."""
         return self._confidence.get_auto_apply_count(mode)
 
     def update_convergence_confidence(self, metrics: CycleMetrics, mode: HVACMode = None) -> None:
-        """Update convergence confidence based on cycle performance with weighted learning.
-
-        Confidence increases when cycles meet convergence criteria, and is used
-        to scale learning rate adjustments. Uses weighted cycle learning to give
-        different weight to maintenance vs recovery cycles.
-
-        Args:
-            metrics: CycleMetrics from the latest completed cycle
-            mode: HVACMode (HEAT or COOL) to update (defaults to HEAT)
-        """
-        if mode is None:
-            mode = get_hvac_heat_mode()
-
-        # Get current confidence for determining if system is stable
-        if mode == get_hvac_cool_mode():
-            current_confidence = self._confidence._cooling_convergence_confidence
-        else:
-            current_confidence = self._confidence._heating_convergence_confidence
-
-        # Determine if this is a recovery cycle (needs rise_time) or maintenance cycle (rise_time optional)
-        # Use simplified stability check for determining recovery threshold
-        tier1_base = 0.4
-        is_stable = current_confidence >= (tier1_base * 0.8)  # Floor scaling approximation
-        is_recovery = metrics.starting_delta is not None and self._weight_calculator.is_recovery_cycle(
-            metrics.starting_delta, is_stable
-        )
-
-        # Check if this cycle meets convergence criteria
-        # For recovery cycles: require rise_time to be measured (cycle must reach target)
-        # For maintenance cycles: rise_time=None is acceptable (already at target)
-        rise_time_ok = (
-            metrics.rise_time is not None  # Recovery: just require system reached setpoint, no max check
-            if is_recovery
-            else (metrics.rise_time is None or metrics.rise_time <= self._convergence_thresholds["rise_time_max"])
-        )
-
-        is_good_cycle = (
-            (metrics.overshoot is None or metrics.overshoot <= self._convergence_thresholds["overshoot_max"])
-            and (
-                metrics.undershoot is None
-                or metrics.undershoot <= self._convergence_thresholds.get("undershoot_max", 0.2)
-            )
-            and metrics.oscillations <= self._convergence_thresholds["oscillations_max"]
-            and (
-                metrics.settling_time is None
-                or metrics.settling_time <= self._convergence_thresholds["settling_time_max"]
-            )
-            and rise_time_ok
-        )
-
-        # Determine cycle outcome from metrics
-        if is_good_cycle:
-            outcome = CycleOutcome.CLEAN
-        elif metrics.overshoot is not None and metrics.overshoot > self._convergence_thresholds["overshoot_max"]:
-            outcome = CycleOutcome.OVERSHOOT
-        elif metrics.undershoot is not None and metrics.undershoot > self._convergence_thresholds.get(
-            "undershoot_max", 0.2
-        ):
-            outcome = CycleOutcome.UNDERSHOOT
-        elif is_recovery and metrics.rise_time is None:
-            # Recovery cycle that stalled without reaching target (rise_time=None means
-            # the setpoint was never crossed). Classified as undershoot so weight/Ki rules
-            # can treat it as a persistent deficit rather than a one-off miss.
-            outcome = CycleOutcome.UNDERSHOOT
-        else:
-            # Maintenance cycle with no clear overshoot/undershoot signal — treat as clean.
-            outcome = CycleOutcome.CLEAN
-
-        # Calculate weight for this cycle (requires starting_delta)
-        weight = 1.0  # Default weight if no starting_delta
-        if metrics.starting_delta is not None:
-            # Determine if system is stable based on confidence
-            # Stable = at least tier 1 threshold (40% base, scaled by heating type)
-            # Simplified: Use 0.4 as approximation (floor_hydronic scaled to ~0.32)
-            tier1_base = 0.4
-            is_stable = current_confidence >= (tier1_base * 0.8)  # Floor scaling approximation
-
-            weight = self._weight_calculator.calculate_weight(
-                starting_delta=metrics.starting_delta,
-                is_stable=is_stable,
-                outcome=outcome,
-                effective_duty=None,
-                outdoor_temp=metrics.outdoor_temp_avg,
-                is_night_setback_recovery=False,
-            )
-
-            # Track recovery cycles for tier gating
-            if self._weight_calculator.is_recovery_cycle(metrics.starting_delta, is_stable):
-                self._contribution_tracker.add_recovery_cycle(mode)
-
-        if is_good_cycle:
-            # Apply weighted confidence gain with caps for maintenance cycles
-            weighted_gain = CONFIDENCE_INCREASE_PER_GOOD_CYCLE * weight
-
-            # Route through contribution tracker caps based on cycle type
-            # Only apply maintenance cap if we can definitively identify the cycle type
-            is_recovery = None  # None means unknown
-            is_maintenance = False
-            if metrics.starting_delta is not None:
-                # Determine if system is stable for threshold selection
-                tier1_base = 0.4
-                is_stable = current_confidence >= (tier1_base * 0.8)
-                is_recovery = self._weight_calculator.is_recovery_cycle(metrics.starting_delta, is_stable)
-                is_maintenance = not is_recovery
-
-            if is_maintenance:
-                # Maintenance cycles: route through cap with diminishing returns
-                actual_gain = self._contribution_tracker.apply_maintenance_gain(weighted_gain, mode)
-            else:
-                # Recovery cycles or unknown (no starting_delta): add gain directly
-                actual_gain = weighted_gain
-
-            # Track heating rate contribution if rise_time was measured (separate from main confidence)
-            if metrics.rise_time is not None:
-                self._contribution_tracker.apply_heating_rate_gain(actual_gain)
-
-            current_confidence = min(CONVERGENCE_CONFIDENCE_HIGH, current_confidence + actual_gain)
-            _LOGGER.debug(
-                f"Convergence confidence ({mode_to_str(mode)} mode) increased to {current_confidence:.2f} "
-                f"(good cycle with weight {weight:.2f}, actual_gain={actual_gain:.3f}, "
-                f"is_recovery={is_recovery}, outcome={outcome.value}: "
-                f"overshoot={metrics.overshoot or 0.0:.2f}°C, "
-                f"oscillations={metrics.oscillations}, "
-                f"settling={metrics.settling_time or 0.0:.1f}min, "
-                f"starting_delta={metrics.starting_delta or 0.0:.2f}°C)"
-            )
-        else:
-            # Poor cycle - reduce confidence slightly (no weighting on penalties)
-            current_confidence = max(0.0, current_confidence - CONFIDENCE_INCREASE_PER_GOOD_CYCLE * 0.5)
-            _LOGGER.debug(
-                f"Convergence confidence ({mode_to_str(mode)} mode) decreased to {current_confidence:.2f} "
-                f"(poor cycle detected, outcome={outcome.value})"
-            )
-
-        # Store updated confidence back
-        if mode == get_hvac_cool_mode():
-            self._confidence._cooling_convergence_confidence = current_confidence
-        else:
-            self._confidence._heating_convergence_confidence = current_confidence
-
-        # Also increment cycle count
-        if mode == get_hvac_cool_mode():
-            self._confidence._cooling_cycle_count += 1
-        else:
-            self._confidence._heating_cycle_count += 1
+        """Update convergence confidence based on cycle performance. Delegates to learning_coordinator."""
+        _update_convergence_confidence(self, metrics, mode)
 
     def check_performance_degradation(self, baseline_window: int = 10, mode: HVACMode = None) -> bool:
-        """Check if recent performance has degraded compared to baseline.
-
-        Compares recent cycles to earlier baseline to detect if tuning has drifted.
-
-        Args:
-            baseline_window: Number of cycles to use for baseline comparison
-            mode: HVACMode (HEAT or COOL) to check (defaults to HEAT)
-
-        Returns:
-            True if performance has degraded significantly, False otherwise
-        """
+        """Check if recent performance has degraded compared to baseline."""
         if mode is None:
             mode = get_hvac_heat_mode()
         cycle_history = self._cooling_cycle_history if mode == get_hvac_cool_mode() else self._heating_cycle_history
         return self._validation.check_performance_degradation(cycle_history, baseline_window)
 
     def check_seasonal_shift(self, outdoor_temp: float | None = None) -> bool:
-        """Check if outdoor temperature regime has shifted significantly.
-
-        Detects seasonal changes (e.g., winter to spring) that may require
-        re-tuning. Uses 10°C shift threshold.
-
-        Args:
-            outdoor_temp: Current outdoor temperature in °C
-
-        Returns:
-            True if significant shift detected, False otherwise
-        """
+        """Check if outdoor temperature regime has shifted significantly."""
         return self._validation.check_seasonal_shift(outdoor_temp)
 
     def apply_confidence_decay(self) -> None:
-        """Apply daily confidence decay to account for drift over time.
-
-        Reduces confidence by CONFIDENCE_DECAY_RATE_DAILY (2% per day).
-        Call this once per day or on each cycle with appropriate scaling.
-        Decays both heating and cooling mode confidence.
-        """
+        """Apply daily confidence decay (2% per day) to both modes."""
         self._confidence.apply_confidence_decay()
 
     def get_learning_rate_multiplier(self, confidence: float | None = None) -> float:
-        """Get learning rate multiplier based on convergence confidence.
-
-        Args:
-            confidence: Optional confidence value to use. If None, uses heating mode confidence.
-
-        Returns:
-            Multiplier in range [0.5, 2.0]:
-            - Low confidence (0.0): 2.0x faster learning
-            - High confidence (1.0): 0.5x slower learning
-        """
+        """Get learning rate multiplier in [0.5, 2.0] based on convergence confidence."""
         return self._confidence.get_learning_rate_multiplier(confidence)
 
     def get_heating_rate(self, delta: float, outdoor_temp: float) -> tuple[float, str]:
-        """Get learned heating rate for given conditions.
-
-        Delegates to HeatingRateLearner.
-
-        Args:
-            delta: Temperature delta (setpoint - current)
-            outdoor_temp: Current outdoor temperature
-
-        Returns:
-            Tuple of (rate in C/hour, source string)
-        """
+        """Get learned heating rate for given conditions."""
         return self._heating_rate_learner.get_heating_rate(delta, outdoor_temp)
 
     def start_validation_mode(self, baseline_overshoot: float) -> None:
-        """Start validation mode after auto-applying PID changes.
-
-        Validation mode monitors the next VALIDATION_CYCLE_COUNT cycles
-        to verify the auto-applied changes don't degrade performance.
-
-        Args:
-            baseline_overshoot: Average overshoot from cycles before auto-apply,
-                               used as reference for degradation detection.
-        """
+        """Start validation mode after auto-applying PID changes."""
         self._validation.start_validation_mode(baseline_overshoot)
 
     def add_validation_cycle(self, metrics: CycleMetrics) -> str | None:
-        """Add a cycle to validation tracking and check for completion.
-
-        Collects cycles during validation mode and evaluates performance
-        once VALIDATION_CYCLE_COUNT cycles have been recorded.
-
-        Args:
-            metrics: CycleMetrics from the completed cycle
-
-        Returns:
-            None if still collecting cycles,
-            'success' if validation passed (performance maintained or improved),
-            'rollback' if validation failed (significant degradation detected).
-        """
+        """Add a cycle to validation tracking; returns None, 'success', or 'rollback'."""
         return self._validation.add_validation_cycle(metrics)
 
     def is_in_validation_mode(self) -> bool:
-        """Check if currently in validation mode.
-
-        Returns:
-            True if validation mode is active, False otherwise.
-        """
+        """Check if currently in validation mode."""
         return self._validation.is_in_validation_mode()
 
     def check_auto_apply_limits(
@@ -1347,22 +499,8 @@ class AdaptiveLearner:
     ) -> str | None:
         """Check if auto-apply is allowed based on safety limits.
 
-        Performs four safety checks before allowing auto-apply:
-        1. Lifetime limit: Maximum total auto-applies (prevents runaway drift)
-        2. Seasonal limit: Maximum auto-applies per 90-day season
-        3. Drift limit: Maximum cumulative drift from physics baseline
-        4. Seasonal shift block: Cooldown period after weather regime change
-
-        Args:
-            current_kp: Current proportional gain
-            current_ki: Current integral gain
-            current_kd: Current derivative gain
-
-        Returns:
-            None if all checks pass (OK to auto-apply),
-            Error message string if any check fails (blocked).
+        Returns None if OK, or an error message string if blocked.
         """
-        # Pull real pid_history from PIDGainsManager if wired; fall back to empty list.
         _pid_history = self._pid_gains_manager.get_history(None) if self._pid_gains_manager is not None else []
         return self._validation.check_auto_apply_limits(
             current_kp,
@@ -1374,33 +512,13 @@ class AdaptiveLearner:
         )
 
     def record_seasonal_shift(self) -> None:
-        """Record that a seasonal shift has occurred.
-
-        Sets the last_seasonal_shift timestamp to now, which starts
-        the SEASONAL_SHIFT_BLOCK_DAYS cooldown period for auto-apply.
-        This prevents auto-applying PID changes during weather regime transitions
-        when system behavior may be unstable.
-        """
+        """Record that a seasonal shift has occurred (starts cooldown for auto-apply)."""
         self._validation.record_seasonal_shift()
 
     def update_undershoot_detector(
-        self,
-        temp: float,
-        setpoint: float,
-        dt_seconds: float,
-        cold_tolerance: float,
+        self, temp: float, setpoint: float, dt_seconds: float, cold_tolerance: float
     ) -> None:
-        """Update undershoot detector with current temperature reading.
-
-        Delegates to the unified UndershootDetector to track time below target
-        and thermal debt accumulation (real-time mode). Call this on each temperature update.
-
-        Args:
-            temp: Current temperature in °C
-            setpoint: Target temperature in °C
-            dt_seconds: Time elapsed since last update in seconds
-            cold_tolerance: Acceptable temperature deficit in °C
-        """
+        """Update real-time undershoot detector with current temperature reading."""
         self._undershoot_detector.update_realtime(temp, setpoint, dt_seconds, cold_tolerance)
 
     def check_undershoot_adjustment(
@@ -1410,96 +528,8 @@ class AdaptiveLearner:
         pid_history: list[dict] | None = None,
         mode: HVACMode = None,
     ) -> float | None:
-        """Check if Ki adjustment is needed for persistent undershoot (unified real-time + cycle).
-
-        Checks if the unified undershoot detector has identified either:
-        1. Real-time mode: Persistent temperature deficit (time below target, thermal debt)
-        2. Cycle mode: Chronic approach failures (consecutive cycles failing to reach setpoint)
-
-        If adjustment is needed, applies the multiplier to Ki and updates convergence confidence.
-        The caller should scale the integral proportionally using PIDController.scale_integral()
-        to prevent sudden control output changes.
-
-        Args:
-            cycles_completed: Number of complete heating cycles observed
-            current_ki: Current integral gain value
-            pid_history: Optional list of PID history entries from PIDGainsManager
-            mode: HVACMode (HEAT or COOL) to update confidence for (defaults to HEAT)
-
-        Returns:
-            New Ki value if adjustment was applied, None otherwise
-        """
-        # Skip undershoot detection in COOL mode - the detector logic is heating-only
-        # In cooling mode, "undershoot" would mean failing to cool (temp above setpoint),
-        # but the detector tracks temp below setpoint, which is the opposite
-        if mode == get_hvac_cool_mode():
-            return None
-
-        # Extract last boost time from PID history (checks both reason strings)
-        last_boost_utc = None
-        physics_baseline_ki: float | None = None
-        if pid_history:
-            # Primary: use enum value to avoid drift if enum is ever renamed
-            undershoot_utc = _get_last_adjustment_time_from_history(pid_history, PIDChangeReason.UNDERSHOOT_BOOST.value)
-            # Legacy: "chronic_approach_ki_boost" was the old name before PIDChangeReason enum
-            # (written by versions prior to C09/H16; keep reading it for backward compatibility)
-            chronic_utc = _get_last_adjustment_time_from_history(pid_history, "chronic_approach_ki_boost")
-            # Use the most recent adjustment
-            if undershoot_utc and chronic_utc:
-                last_boost_utc = max(undershoot_utc, chronic_utc)
-            else:
-                last_boost_utc = undershoot_utc or chronic_utc
-
-            # Extract physics baseline Ki for physics-based cap check
-            physics_baseline_ki = _get_physics_baseline_ki_from_history(pid_history)
-
-        if not self._undershoot_detector.should_adjust_ki(
-            cycles_completed, last_boost_utc, current_ki, physics_baseline_ki
-        ):
-            return None
-
-        # Get and apply the adjustment (physics-based cap when baseline is available)
-        multiplier = self._undershoot_detector.apply_adjustment(current_ki, physics_baseline_ki)
-        new_ki = current_ki * multiplier
-
-        # Log with context about which mode triggered
-        _LOGGER.info(
-            "Undershoot detected: increasing Ki from %.4f to %.4f (%.1f%% increase, "
-            "time_below=%.1fh, thermal_debt=%.2f°C·h, consecutive_failures=%d, cumulative=%.2fx)",
-            current_ki,
-            new_ki,
-            (multiplier - 1.0) * 100,
-            self._undershoot_detector.time_below_target / 3600.0,
-            self._undershoot_detector.thermal_debt,
-            self._undershoot_detector._consecutive_failures,
-            self._undershoot_detector.cumulative_ki_multiplier,
-        )
-
-        # Update convergence confidence - decrease due to poor performance
-        # Undershoot indicates persistent poor tuning, similar to poor cycles
-        if mode is None:
-            mode = get_hvac_heat_mode()
-
-        if mode == get_hvac_cool_mode():
-            current_confidence = self._confidence._cooling_convergence_confidence
-        else:
-            current_confidence = self._confidence._heating_convergence_confidence
-
-        # Decrease confidence by same amount as poor cycles (CONFIDENCE_INCREASE_PER_GOOD_CYCLE * 0.5)
-        new_confidence = max(0.0, current_confidence - CONFIDENCE_INCREASE_PER_GOOD_CYCLE * 0.5)
-
-        if mode == get_hvac_cool_mode():
-            self._confidence._cooling_convergence_confidence = new_confidence
-        else:
-            self._confidence._heating_convergence_confidence = new_confidence
-
-        _LOGGER.debug(
-            "Convergence confidence (%s mode) decreased to %.2f due to undershoot detection",
-            mode_to_str(mode),
-            new_confidence,
-        )
-
-        return new_ki
+        """Check if Ki needs boosting for persistent undershoot. Delegates to learning_coordinator."""
+        return _check_undershoot_adjustment(self, cycles_completed, current_ki, pid_history, mode)
 
     def check_physics_rate_underperformance(
         self,
@@ -1510,38 +540,12 @@ class AdaptiveLearner:
     ) -> dict | None:
         """Check if learned heating rate is below physics-based expectations.
 
-        Compares the learned heating rate from HeatingRateLearner against
-        physics-predicted rates for the configured system. Returns adjustment
-        recommendation if significantly underperforming.
-
-        This is separate from the real-time/cycle-based undershoot detection
-        and provides a physics-grounded baseline for expected performance.
-
-        Args:
-            tau: Thermal time constant in hours.
-            area_m2: Zone floor area in square meters.
-            max_power_w: Total heater power in watts.
-            supply_temperature: Supply water temperature in °C.
-
-        Returns:
-            Dict with comparison results if underperforming, None otherwise:
-                - learned_rate: Average learned rate (°C/h)
-                - expected_rate: Physics-based expected rate (°C/h)
-                - ratio: learned/expected
-                - suggested_ki_boost: Suggested Ki multiplier
-                - observation_count: Number of observations used
+        Returns a dict with comparison data if underperforming, None otherwise.
         """
         result = self._heating_rate_learner.check_physics_underperformance(
-            tau=tau,
-            area_m2=area_m2,
-            max_power_w=max_power_w,
-            supply_temperature=supply_temperature,
+            tau=tau, area_m2=area_m2, max_power_w=max_power_w, supply_temperature=supply_temperature
         )
-
-        if result is None:
-            return None
-
-        if not result.get("is_underperforming", False):
+        if result is None or not result.get("is_underperforming", False):
             return None
 
         _LOGGER.warning(
@@ -1552,47 +556,19 @@ class AdaptiveLearner:
             result["ratio"] * 100,
             result.get("suggested_ki_boost", 1.0),
         )
-
         return result
 
     @property
     def undershoot_detector(self) -> UndershootDetector:
-        """Expose undershoot detector for serialization access.
-
-        Returns:
-            The UndershootDetector instance
-        """
+        """Expose undershoot detector for serialization access."""
         return self._undershoot_detector
 
     def can_reach_learning_tier(self, tier: int, mode: HVACMode) -> bool:
-        """Check if the system has enough recovery cycles to reach a learning tier.
-
-        Args:
-            tier: Learning tier (1, 2, or 3)
-            mode: HVACMode (HEAT or COOL) to check
-
-        Returns:
-            True if the system has enough recovery cycles for this tier, False otherwise
-        """
+        """Check if the system has enough recovery cycles to reach a learning tier."""
         return self._contribution_tracker.can_reach_tier(tier, mode)
 
     def to_dict(self) -> dict[str, Any]:
-        """Serialize AdaptiveLearner state to a dictionary in v9 format with backward compatibility.
-
-        Delegates to learner_serialization module for actual serialization logic.
-
-        Returns:
-            Dictionary containing:
-            - v9 structure with contribution_tracker state
-            - v8 structure with unified undershoot detector state (real-time + cycle modes)
-            - v7 structure with separate undershoot and chronic approach detector states
-            - v6 structure with undershoot detector state only
-            - v5 mode-keyed structure (heating/cooling sub-dicts)
-            - v4 backward-compatible top-level keys (cycle_history, auto_apply_count, etc.)
-
-        Note:
-            pid_history is no longer included as it's now managed by PIDGainsManager.
-        """
+        """Serialize AdaptiveLearner state to a dict. Delegates to learner_serialization."""
         return learner_to_dict(
             heating_cycle_history=self._heating_cycle_history,
             cooling_cycle_history=self._cooling_cycle_history,
@@ -1609,126 +585,5 @@ class AdaptiveLearner:
         )
 
     def restore_from_dict(self, data: dict[str, Any]) -> None:
-        """Restore AdaptiveLearner state from a dictionary.
-
-        Performs in-place restoration by clearing existing state and
-        repopulating from the provided data dictionary.
-
-        Delegates to learner_serialization module for actual deserialization logic.
-
-        Supports all historical versions (v4+) via learner_serialization migration chain.
-
-        Args:
-            data: Dictionary containing serialized learner data (any supported version)
-        """
-        # Delegate to serialization module for parsing
-        restored = restore_learner_from_dict(data)
-
-        # Clear existing state
-        self._heating_cycle_history.clear()
-        self._cooling_cycle_history.clear()
-
-        # Apply restored state to instance attributes
-        self._heating_cycle_history = restored["heating_cycle_history"]
-        self._cooling_cycle_history = restored["cooling_cycle_history"]
-        self._heating_auto_apply_count = restored["heating_auto_apply_count"]
-        self._cooling_auto_apply_count = restored["cooling_auto_apply_count"]
-        self._heating_convergence_confidence = restored["heating_convergence_confidence"]
-        self._cooling_convergence_confidence = restored["cooling_convergence_confidence"]
-        # pid_history is no longer stored here - it's managed by PIDGainsManager
-        self._last_adjustment_time = restored["last_adjustment_time"]
-        self._consecutive_converged_cycles = restored["consecutive_converged_cycles"]
-        self._pid_converged_for_ke = restored["pid_converged_for_ke"]
-
-        # C04: Restore cycle counts from cycle history length.
-        # The counters were never serialized so they defaulted to 0 on restart,
-        # causing learning_status to regress to 'collecting' until cycles re-accumulated.
-        self._confidence._heating_cycle_count = len(self._heating_cycle_history)
-        self._confidence._cooling_cycle_count = len(self._cooling_cycle_history)
-
-        # Restore unified undershoot detector state (migration chain in learner_serialization handles v4→v10)
-        undershoot_state = restored.get("undershoot_detector_state", {})
-        if undershoot_state:
-            # Real-time mode state
-            self._undershoot_detector.time_below_target = undershoot_state.get("time_below_target", 0.0)
-            self._undershoot_detector.thermal_debt = undershoot_state.get("thermal_debt", 0.0)
-            # Cycle mode state
-            self._undershoot_detector._consecutive_failures = undershoot_state.get("consecutive_failures", 0)
-            # Shared state — clamp to [1.0, cap] so a corrupt persisted value cannot
-            # permanently break the gate (negative would invert min(), >cap would block forever)
-            raw_cumulative = float(undershoot_state.get("cumulative_ki_multiplier", 1.0))
-            self._undershoot_detector.cumulative_ki_multiplier = min(
-                MAX_UNDERSHOOT_KI_MULTIPLIER, max(1.0, raw_cumulative)
-            )
-            # Restore cooldown timestamp (C09/C10): stored as ISO string; ignore old monotonic floats
-            last_adj_raw = undershoot_state.get("last_adjustment_time")
-            if isinstance(last_adj_raw, str):
-                try:
-                    adj_dt = datetime.fromisoformat(last_adj_raw)
-                    if adj_dt.tzinfo is None:
-                        adj_dt = adj_dt.replace(tzinfo=timezone.utc)
-                    if adj_dt <= dt_util.utcnow():  # Clamp to not-in-future
-                        self._undershoot_detector.last_adjustment_time = adj_dt
-                except (ValueError, TypeError):
-                    _LOGGER.info("Could not parse undershoot last_adjustment_time: %s — cooldown reset", last_adj_raw)
-            # else: None or old monotonic float — leave as None (reset cooldown)
-
-        # Restore contribution tracker state (migration chain handles v4→v10)
-        contribution_state = restored.get("contribution_tracker_state", {})
-        if contribution_state:
-            # Use from_dict to restore state
-            self._contribution_tracker = ConfidenceContributionTracker.from_dict(contribution_state, self._heating_type)
-
-        # Restore heating rate learner state (serialization module handles v9->v10 migration)
-        heating_rate_learner_state = restored.get("heating_rate_learner_state", {})
-        if heating_rate_learner_state:
-            # Use from_dict to restore state
-            self._heating_rate_learner = HeatingRateLearner.from_dict(heating_rate_learner_state, self._heating_type)
-        else:
-            # Migration from v9 and earlier: create fresh learner
-            self._heating_rate_learner = HeatingRateLearner(self._heating_type)
-
-        # Perform historic scan if enabled
-        if self._chronic_approach_historic_scan:
-            self._perform_historic_scan()
-
-    def _perform_historic_scan(self) -> None:
-        """Scan existing cycle history for chronic approach patterns using unified detector.
-
-        Called during restoration if chronic_approach_historic_scan flag is enabled.
-        Feeds all existing cycles to the unified undershoot detector's cycle mode in order.
-        If a pattern is detected, logs the finding (adjustment will be applied
-        by the normal learning flow).
-        """
-        if not self._heating_cycle_history:
-            _LOGGER.debug("No cycle history to scan for chronic approach patterns")
-            return
-
-        _LOGGER.info(
-            "Performing historic scan of %d cycles for chronic approach patterns", len(self._heating_cycle_history)
-        )
-
-        # Feed all cycles to unified detector in order
-        for cycle in self._heating_cycle_history:
-            # Calculate cycle duration if timing metrics available
-            cycle_duration_minutes = None
-            if cycle.rise_time is not None or cycle.settling_time is not None:
-                rise = cycle.rise_time or 0.0
-                settling = cycle.settling_time or 0.0
-                cycle_duration_minutes = rise + settling
-            # Add cycle to detector (this will track consecutive failures in cycle mode)
-            self._undershoot_detector.add_cycle(cycle, cycle_duration_minutes)
-
-        # Check if pattern detected (use cycle count from history length)
-        cycles_completed = len(self._heating_cycle_history)
-        if self._undershoot_detector.should_adjust_ki(cycles_completed):
-            _LOGGER.warning(
-                "Historic scan detected chronic approach pattern: %d consecutive failures",
-                self._undershoot_detector._consecutive_failures,
-            )
-            _LOGGER.info(
-                "Chronic approach Ki adjustment will be recommended: %.3fx multiplier",
-                self._undershoot_detector.get_adjustment(),
-            )
-        else:
-            _LOGGER.debug("No chronic approach pattern detected in historic scan")
+        """Restore AdaptiveLearner state from a dict. Delegates to learning_coordinator."""
+        apply_restored_state(self, data)

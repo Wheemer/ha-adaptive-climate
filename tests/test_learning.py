@@ -1837,8 +1837,12 @@ class TestRateLimiting:
         learner = AdaptiveLearner()
 
         fake_now = datetime.now()
-        with patch("custom_components.adaptive_climate.adaptive.learning.dt_util") as mock_dt_util:
+        with (
+            patch("custom_components.adaptive_climate.adaptive.learning_adjustments.dt_util") as mock_dt_util,
+            patch("custom_components.adaptive_climate.adaptive.learning_coordinator.dt_util") as mock_coord_dt,
+        ):
             mock_dt_util.utcnow.return_value = fake_now
+            mock_coord_dt.utcnow.return_value = fake_now
 
             # Add enough cycles
             for _ in range(6):
@@ -1891,8 +1895,12 @@ class TestRateLimiting:
 
         # Manually set last adjustment time to 25 hours ago
         fake_now = datetime.now()
-        with patch("custom_components.adaptive_climate.adaptive.learning.dt_util") as mock_dt_util:
+        with (
+            patch("custom_components.adaptive_climate.adaptive.learning_adjustments.dt_util") as mock_dt_util,
+            patch("custom_components.adaptive_climate.adaptive.learning_coordinator.dt_util") as mock_coord_dt,
+        ):
             mock_dt_util.utcnow.return_value = fake_now
+            mock_coord_dt.utcnow.return_value = fake_now
             learner._last_adjustment_time = fake_now - timedelta(hours=25)
 
             # Add more cycles
@@ -1931,8 +1939,12 @@ class TestRateLimiting:
 
         # Set last adjustment to 2 hours ago
         fake_now = datetime.now()
-        with patch("custom_components.adaptive_climate.adaptive.learning.dt_util") as mock_dt_util:
+        with (
+            patch("custom_components.adaptive_climate.adaptive.learning_adjustments.dt_util") as mock_dt_util,
+            patch("custom_components.adaptive_climate.adaptive.learning_coordinator.dt_util") as mock_coord_dt,
+        ):
             mock_dt_util.utcnow.return_value = fake_now
+            mock_coord_dt.utcnow.return_value = fake_now
             learner._last_adjustment_time = fake_now - timedelta(hours=2)
 
             # Add more cycles
@@ -1955,8 +1967,12 @@ class TestRateLimiting:
         learner = AdaptiveLearner()
 
         fake_now = datetime.now()
-        with patch("custom_components.adaptive_climate.adaptive.learning.dt_util") as mock_dt_util:
+        with (
+            patch("custom_components.adaptive_climate.adaptive.learning_adjustments.dt_util") as mock_dt_util,
+            patch("custom_components.adaptive_climate.adaptive.learning_coordinator.dt_util") as mock_coord_dt,
+        ):
             mock_dt_util.utcnow.return_value = fake_now
+            mock_coord_dt.utcnow.return_value = fake_now
 
             # Set last adjustment to exactly 8 hours ago (time gate at boundary)
             learner._last_adjustment_time = fake_now - timedelta(hours=8)
@@ -2017,8 +2033,12 @@ class TestRateLimiting:
             )
 
         fake_now = datetime.now()
-        with patch("custom_components.adaptive_climate.adaptive.learning.dt_util") as mock_dt_util:
+        with (
+            patch("custom_components.adaptive_climate.adaptive.learning_adjustments.dt_util") as mock_dt_util,
+            patch("custom_components.adaptive_climate.adaptive.learning_coordinator.dt_util") as mock_coord_dt,
+        ):
             mock_dt_util.utcnow.return_value = fake_now
+            mock_coord_dt.utcnow.return_value = fake_now
             result = learner.calculate_pid_adjustment(100.0, 1.0, 10.0)
 
             assert result is not None
@@ -2462,8 +2482,12 @@ class TestAdaptiveLearnerSerialization:
 
         # Trigger adjustment with mocked time
         fake_now = datetime.now()
-        with patch("custom_components.adaptive_climate.adaptive.learning.dt_util") as mock_dt_util:
+        with (
+            patch("custom_components.adaptive_climate.adaptive.learning_adjustments.dt_util") as mock_dt_util,
+            patch("custom_components.adaptive_climate.adaptive.learning_coordinator.dt_util") as mock_coord_dt,
+        ):
             mock_dt_util.utcnow.return_value = fake_now
+            mock_coord_dt.utcnow.return_value = fake_now
             learner.calculate_pid_adjustment(100.0, 1.0, 10.0)
 
         result2 = learner.to_dict()
@@ -3175,7 +3199,9 @@ class TestDecayMetricsPassing:
             )
 
         # Mock evaluate_pid_rules to inspect what it receives
-        with patch("custom_components.adaptive_climate.adaptive.learning.evaluate_pid_rules") as mock_evaluate:
+        with patch(
+            "custom_components.adaptive_climate.adaptive.learning_coordinator.evaluate_pid_rules"
+        ) as mock_evaluate:
             # Configure mock to return empty list (no rules triggered)
             mock_evaluate.return_value = []
 
@@ -3217,7 +3243,9 @@ class TestDecayMetricsPassing:
             )
 
         # Mock evaluate_pid_rules to inspect what it receives
-        with patch("custom_components.adaptive_climate.adaptive.learning.evaluate_pid_rules") as mock_evaluate:
+        with patch(
+            "custom_components.adaptive_climate.adaptive.learning_coordinator.evaluate_pid_rules"
+        ) as mock_evaluate:
             mock_evaluate.return_value = []
 
             # Call calculate_pid_adjustment
@@ -3260,7 +3288,9 @@ class TestDecayMetricsPassing:
                 )
 
         # Mock evaluate_pid_rules to inspect what it receives
-        with patch("custom_components.adaptive_climate.adaptive.learning.evaluate_pid_rules") as mock_evaluate:
+        with patch(
+            "custom_components.adaptive_climate.adaptive.learning_coordinator.evaluate_pid_rules"
+        ) as mock_evaluate:
             mock_evaluate.return_value = []
 
             # Call calculate_pid_adjustment
