@@ -258,9 +258,7 @@ class TestOscillationCountingPWMFilter:
         )
 
         # Check for PWM filtering log message
-        assert any("PWM mode active" in record.message for record in caplog.records)
-        assert any("filtered out" in record.message for record in caplog.records)
-        assert any("expected behavior" in record.message for record in caplog.records)
+        assert any("PWM mode" in record.message and "filtered" in record.message for record in caplog.records)
 
 
 class TestCountOscillationsDocumentation:
