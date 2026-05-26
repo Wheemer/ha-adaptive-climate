@@ -554,3 +554,145 @@ class TestHumidityDetector:
         # Humidity rises to 78% - peak should update
         detector.record_humidity(now + timedelta(seconds=240), 78.0)
         assert detector._peak_humidity == 78.0
+
+
+class TestHumidityIntegralDecay:
+    """M06: _last_control_time must be updated inside the humidity-pause code path.
+
+    Bug: climate_control.py computes
+        elapsed = time.monotonic() - self._last_control_time
+    and then returns early WITHOUT updating ``_last_control_time``.  On the next
+    paused call, ``elapsed`` grows by the full inter-call interval PLUS all
+    previous paused intervals, making the decay factor far too aggressive
+    (e.g. 0.81 per call instead of the intended 0.9 per 60-second call).
+    """
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _make_paused_stub(gains_manager: object, humidity_detector: object, initial_last_control_time: float) -> object:
+        """Create a minimal ClimateControlMixin stub in the humidity-paused state."""
+        import asyncio
+        from unittest.mock import AsyncMock, MagicMock
+
+        from custom_components.adaptive_climate.climate_control import ClimateControlMixin
+        from custom_components.adaptive_climate.const import DOMAIN
+
+        class _Stub(ClimateControlMixin):
+            """Minimal stub: active, heating, status_manager says paused."""
+
+            def __init__(self) -> None:
+                self.entity_id = "climate.bathroom"
+                self._temp_lock = asyncio.Lock()
+                self._active = True
+                self._current_temp = 20.0
+                self._target_temp = 22.0
+                # Follow the existing test pattern: use MagicMock so .value works
+                # regardless of StrEnum implementation in the test environment
+                mock_hvac = MagicMock()
+                mock_hvac.value = "heat"
+                self._hvac_mode = mock_hvac
+                self._force_off_state = False
+                # Route all coordinator lookups to None (no zone)
+                self.hass = MagicMock()
+                self.hass.data = {DOMAIN: {}}
+                self._zone_id = None
+
+                # Pause detector — always paused
+                _sm = MagicMock()
+                _sm.is_paused = MagicMock(return_value=True)
+                self._status_manager = _sm
+
+                # No contact sensor
+                self._contact_sensor_handler = None
+                self._contact_was_paused = False
+
+                # Humidity paused
+                self._humidity_detector = humidity_detector
+                self._gains_manager = gains_manager
+                self._pid_controller = MagicMock()
+
+                # Output path
+                self._pwm = False
+                self._control_output = 75.0
+                self._output_min = 0.0
+                self._async_set_valve_value = AsyncMock()
+                self.async_write_ha_state = MagicMock()
+
+                # The field under test
+                self._last_control_time = initial_last_control_time
+
+        return _Stub()
+
+    # ------------------------------------------------------------------
+    # Tests
+    # ------------------------------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_last_control_time_updated_after_humidity_pause(self):
+        """M06: _last_control_time must advance to current time after the paused branch.
+
+        If it is not updated, the next call's ``elapsed`` will be the sum of ALL
+        previous paused intervals and the decay becomes far too aggressive.
+        """
+        from unittest.mock import MagicMock, patch
+
+        humidity_detector = MagicMock()
+        humidity_detector.should_pause.return_value = True
+        gains_manager = MagicMock()
+
+        t_start = 0.0
+        t_call = 60.0  # 60 seconds later
+
+        stub = self._make_paused_stub(gains_manager, humidity_detector, t_start)
+
+        with patch("custom_components.adaptive_climate.climate_control.time") as mock_time:
+            mock_time.monotonic.return_value = t_call
+            await stub._async_control_heating()
+
+        assert stub._last_control_time == t_call, (
+            f"M06: _last_control_time must be set to current monotonic time ({t_call}) "
+            f"after the humidity-pause path executes, got {stub._last_control_time!r}. "
+            "Without this, successive paused calls compute a compounding stale elapsed."
+        )
+
+    @pytest.mark.asyncio
+    async def test_successive_paused_calls_use_interval_not_cumulative_elapsed(self):
+        """M06 regression: each paused call must apply ~1-call-interval of decay, not cumulative.
+
+        Scenario: control loop runs every 60 s; humidity pause active for 2 cycles.
+        Expected: each cycle decays by 0.9^1 = 0.9 (one 60-s step).
+        Bug: second call uses elapsed=120 → decay factor=0.9^2=0.81 (double-dip).
+        """
+        from unittest.mock import MagicMock, call, patch
+
+        humidity_detector = MagicMock()
+        humidity_detector.should_pause.return_value = True
+        gains_manager = MagicMock()
+
+        t0 = 0.0
+        t1 = 60.0
+        t2 = 120.0
+        expected_factor = 0.9**1  # one 60-s step each time
+
+        stub = self._make_paused_stub(gains_manager, humidity_detector, t0)
+
+        with patch("custom_components.adaptive_climate.climate_control.time") as mock_time:
+            mock_time.monotonic.return_value = t1
+            await stub._async_control_heating()
+
+            mock_time.monotonic.return_value = t2
+            await stub._async_control_heating()
+
+        calls = gains_manager.decay_integral.call_args_list
+        assert len(calls) == 2, f"Expected 2 decay_integral calls, got {len(calls)}"
+
+        for i, c in enumerate(calls):
+            factor_used = c[0][0]  # positional arg 0
+            assert abs(factor_used - expected_factor) < 1e-9, (
+                f"M06: paused call #{i + 1} used decay_factor={factor_used:.6f}, "
+                f"expected {expected_factor:.6f} (0.9^1 for a 60-s interval). "
+                "The stale _last_control_time causes compounding elapsed across calls."
+            )

@@ -104,12 +104,16 @@ class ClimateControlMixin:
 
                 # Decay integral for humidity pauses (~10%/min to prevent stale buildup)
                 if self._humidity_detector and self._humidity_detector.should_pause():
-                    elapsed = time.monotonic() - self._last_control_time
+                    current_time = time.monotonic()
+                    elapsed = current_time - self._last_control_time
                     decay_factor = 0.9 ** (elapsed / 60)  # 10% decay per minute
                     if self._gains_manager is not None:
                         self._gains_manager.decay_integral(decay_factor, PIDChangeReason.HUMIDITY_DECAY)
                     else:
                         self._pid_controller.decay_integral(decay_factor)
+                    # M06: advance the baseline so successive paused calls each see
+                    # only one call-interval of elapsed time, not an ever-growing sum.
+                    self._last_control_time = current_time
 
                 # Turn off heating
                 if self._pwm:
