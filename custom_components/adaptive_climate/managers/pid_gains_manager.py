@@ -1,11 +1,14 @@
-"""PID Gains Manager - centralized PID gain mutations with auto-history recording."""
+"""PID State Manager - centralized PID gain and integral mutations with auto-history recording."""
 
 from __future__ import annotations
 
+import logging
 import math
 from collections.abc import Callable
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
+
+_LOGGER = logging.getLogger(__name__)
 
 from homeassistant.components.climate import HVACMode
 from homeassistant.util import dt as dt_util
@@ -21,13 +24,16 @@ if TYPE_CHECKING:
     from ..pid_controller import PIDController, PIDGains
 
 
-class PIDGainsManager:
-    """Centralized manager for all PID gain mutations.
+class PIDStateManager:
+    """Centralized manager for all PID state mutations (gains + integral).
 
-    Single entry point for kp/ki/kd/ke changes. Auto-records to pid_history.
+    Single entry point for kp/ki/kd/ke and integral changes.
+    Auto-records gain changes to pid_history.
     Owns _heating_gains and _cooling_gains PIDGains objects.
 
-    Note: Integral stays in PIDController, not managed here.
+    Integral methods (boost_integral, decay_integral, scale_integral,
+    set_integral) all clamp the integral to [out_min - E - F, out_max - E - F]
+    after mutation, preventing windup beyond PID controller bounds.
     """
 
     def __init__(
@@ -436,3 +442,140 @@ class PIDGainsManager:
             }
 
         return state
+
+    # ── Integral management ────────────────────────────────────────────────
+
+    def _clamp_integral(self) -> None:
+        """Clamp PID integral to [out_min - E - F, out_max - E - F].
+
+        Must be called after every external integral mutation so the integral
+        never escapes the controller's anti-windup bounds, even when E or F
+        change between restarts or feedforward events.
+        """
+        self._pid_controller.clamp_integral(
+            external=self._pid_controller._external,
+            feedforward=self._pid_controller._feedforward,
+        )
+
+    def set_integral(self, value: float, reason: PIDChangeReason, metrics: dict[str, Any] | None = None) -> None:
+        """Set integral to an explicit value, then clamp.
+
+        Args:
+            value: New integral value (must be finite).
+            reason: Why integral is being set.
+            metrics: Optional context for debug logging.
+
+        Raises:
+            ValueError: If value is not finite.
+        """
+        if not math.isfinite(value):
+            raise ValueError(f"Integral value must be finite, got {value}")
+        self._pid_controller.integral = value
+        self._clamp_integral()
+        actor = REASON_TO_ACTOR.get(reason, PIDChangeActor.SYSTEM)
+        _LOGGER.debug(
+            "PID integral set: requested=%.2f clamped=%.2f reason=%s actor=%s%s",
+            value,
+            self._pid_controller.integral,
+            reason.value,
+            actor.value,
+            f" metrics={metrics}" if metrics else "",
+        )
+
+    def boost_integral(self, amount: float, reason: PIDChangeReason, metrics: dict[str, Any] | None = None) -> None:
+        """Add amount to integral, then clamp to controller bounds.
+
+        Use for setpoint-increase feedforward (amount > 0) or explicit
+        integral adjustments.  Negative amounts are allowed (reduce integral).
+
+        Args:
+            amount: Delta to add to integral (must be finite).
+            reason: Why integral is being boosted.
+            metrics: Optional context for debug logging.
+
+        Raises:
+            ValueError: If amount is not finite.
+        """
+        if not math.isfinite(amount):
+            raise ValueError(f"Boost amount must be finite, got {amount}")
+        pre = self._pid_controller.integral
+        self._pid_controller.integral += amount
+        self._clamp_integral()
+        actor = REASON_TO_ACTOR.get(reason, PIDChangeActor.SYSTEM)
+        _LOGGER.debug(
+            "PID integral boost: amount=%.2f reason=%s actor=%s %.2f -> %.2f%s",
+            amount,
+            reason.value,
+            actor.value,
+            pre,
+            self._pid_controller.integral,
+            f" metrics={metrics}" if metrics else "",
+        )
+
+    def decay_integral(self, factor: float, reason: PIDChangeReason, metrics: dict[str, Any] | None = None) -> None:
+        """Multiply integral by factor in [0, 1], then clamp.
+
+        Factor is clamped silently to [0, 1] so negative values zero the
+        integral and values > 1 are treated as 1 (no amplification).
+
+        Args:
+            factor: Decay factor in [0, 1].  NaN raises ValueError.
+            reason: Why integral is being decayed.
+            metrics: Optional context for debug logging.
+
+        Raises:
+            ValueError: If factor is NaN.
+        """
+        if math.isnan(factor):
+            raise ValueError("Decay factor must not be NaN")
+        factor = max(0.0, min(1.0, factor))
+        pre = self._pid_controller.integral
+        self._pid_controller.integral *= factor
+        self._clamp_integral()
+        actor = REASON_TO_ACTOR.get(reason, PIDChangeActor.SYSTEM)
+        _LOGGER.debug(
+            "PID integral decay: factor=%.3f reason=%s actor=%s %.2f -> %.2f%s",
+            factor,
+            reason.value,
+            actor.value,
+            pre,
+            self._pid_controller.integral,
+            f" metrics={metrics}" if metrics else "",
+        )
+
+    def scale_integral(self, factor: float, reason: PIDChangeReason, metrics: dict[str, Any] | None = None) -> None:
+        """Scale integral by a positive factor, then clamp.
+
+        Unlike decay_integral, factor must be > 0 and is not clamped to 1,
+        so it can amplify the integral.  Used when adjusting Ki to prevent
+        output spikes: pass ``old_ki / new_ki``.
+
+        Args:
+            factor: Scale factor, must be > 0 and finite.
+            reason: Why integral is being scaled.
+            metrics: Optional context for debug logging.
+
+        Raises:
+            ValueError: If factor is not finite or <= 0.
+        """
+        if not math.isfinite(factor):
+            raise ValueError(f"Scale factor must be finite, got {factor}")
+        if factor <= 0:
+            raise ValueError(f"Scale factor must be > 0, got {factor}")
+        pre = self._pid_controller.integral
+        self._pid_controller.integral *= factor
+        self._clamp_integral()
+        actor = REASON_TO_ACTOR.get(reason, PIDChangeActor.SYSTEM)
+        _LOGGER.debug(
+            "PID integral scale: factor=%.3f reason=%s actor=%s %.2f -> %.2f%s",
+            factor,
+            reason.value,
+            actor.value,
+            pre,
+            self._pid_controller.integral,
+            f" metrics={metrics}" if metrics else "",
+        )
+
+
+# Backward-compatibility alias — remove after all callers migrated to PIDStateManager.
+PIDGainsManager = PIDStateManager

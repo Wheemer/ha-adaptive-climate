@@ -146,7 +146,7 @@ class PIDTuningManager:
         )
 
         # Clear integral to avoid wind-up from old tuning
-        self._pid_controller.integral = 0.0
+        self._gains_manager.set_integral(0.0, PIDChangeReason.PHYSICS_RESET)
 
         # Set gains via PIDGainsManager (auto-records history)
         self._gains_manager.set_gains(
@@ -226,7 +226,7 @@ class PIDTuningManager:
         old_kd = self._state._kd
 
         # Clear integral to avoid wind-up from old tuning
-        self._pid_controller.integral = 0.0
+        self._gains_manager.set_integral(0.0, PIDChangeReason.ADAPTIVE_APPLY)
 
         # Apply the recommended values via PIDGainsManager (auto-records history)
         self._gains_manager.set_gains(
@@ -329,7 +329,7 @@ class PIDTuningManager:
         old_kd = self._state._kd
 
         # Clear integral to avoid wind-up from old tuning
-        self._pid_controller.integral = 0.0
+        self._gains_manager.set_integral(0.0, PIDChangeReason.AUTO_APPLY)
 
         # Apply the recommended values via PIDGainsManager (auto-records history)
         self._gains_manager.set_gains(
@@ -418,7 +418,7 @@ class PIDTuningManager:
         current_kd = self._state._kd
 
         # Clear integral to avoid wind-up
-        self._pid_controller.integral = 0.0
+        self._gains_manager.set_integral(0.0, PIDChangeReason.ROLLBACK)
 
         # Apply previous PID values via PIDGainsManager (auto-records history)
         self._gains_manager.set_gains(

@@ -110,6 +110,9 @@ class PIDChangeReason(StrEnum):
     CHRONIC_APPROACH_BOOST = "chronic_approach_ki_boost"
     SERVICE_CALL = "service_call"  # Manual set_pid service
     RESTORE = "restore"
+    SETPOINT_BOOST = "setpoint_boost"  # Integral boost/decay from setpoint change
+    HUMIDITY_DECAY = "humidity_decay"  # Integral decay during humidity pause
+    MODE_SWITCH = "mode_switch"  # Integral reset on HVAC mode switch
 
 
 # Mapping of PID change reasons to their initiating actor
@@ -126,6 +129,9 @@ REASON_TO_ACTOR: dict[PIDChangeReason, PIDChangeActor] = {
     PIDChangeReason.CHRONIC_APPROACH_BOOST: PIDChangeActor.LEARNING,
     PIDChangeReason.SERVICE_CALL: PIDChangeActor.USER,
     PIDChangeReason.RESTORE: PIDChangeActor.SYSTEM,
+    PIDChangeReason.SETPOINT_BOOST: PIDChangeActor.USER,
+    PIDChangeReason.HUMIDITY_DECAY: PIDChangeActor.SYSTEM,
+    PIDChangeReason.MODE_SWITCH: PIDChangeActor.USER,
 }
 
 DEFAULT_NAME = "Adaptive Climate"

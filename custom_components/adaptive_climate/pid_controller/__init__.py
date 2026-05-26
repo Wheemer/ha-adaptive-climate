@@ -341,6 +341,9 @@ class PID:
             raise ValueError("Decay factor must not be NaN")
         # Clamp to [0, 1]: negative would flip sign, >1 would amplify
         self._integral *= max(0.0, min(1.0, factor))
+        # Re-clamp to output bounds (H10): decay may push integral outside bounds
+        # when external/feedforward terms reduce available headroom.
+        self.clamp_integral(self._external, self._feedforward)
 
     def clamp_integral(self, external: float = 0.0, feedforward: float = 0.0) -> None:
         """Clamp integral to valid bounds given current out_min/out_max and offsets.
@@ -370,6 +373,8 @@ class PID:
         if factor <= 0:
             raise ValueError(f"Scale factor must be > 0, got {factor}")
         self._integral *= factor
+        # Re-clamp to output bounds (H10): scaling may push integral outside bounds.
+        self.clamp_integral(self._external, self._feedforward)
 
     def prepare_bumpless_transfer(self):
         """Prepare for bumpless transfer by setting integral to maintain continuity.

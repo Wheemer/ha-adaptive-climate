@@ -244,8 +244,8 @@ async def test_reset_pid_to_physics():
     # Reset PID to physics
     await manager.async_reset_pid_to_physics()
 
-    # Verify integral was cleared
-    assert pid_controller.integral == 0.0
+    # Verify integral was cleared via gains_manager (D4: centralized mutation)
+    gains_manager.set_integral.assert_called_once_with(0.0, PIDChangeReason.PHYSICS_RESET)
 
     # Verify gains manager was called with physics reset reason
     assert gains_manager.set_gains.called
@@ -319,8 +319,8 @@ async def test_apply_adaptive_pid():
     # Apply adaptive PID
     await manager.async_apply_adaptive_pid()
 
-    # Verify integral was cleared
-    assert pid_controller.integral == 0.0
+    # Verify integral was cleared via gains_manager (D4: centralized mutation)
+    gains_manager.set_integral.assert_called_once_with(0.0, PIDChangeReason.ADAPTIVE_APPLY)
 
     # Verify gains were set
     gains_manager.set_gains.assert_called_once_with(
@@ -409,8 +409,8 @@ async def test_auto_apply_adaptive_pid():
     assert result["applied"] is True
     assert result["recommendation"] is not None
 
-    # Verify integral was cleared
-    assert pid_controller.integral == 0.0
+    # Verify integral was cleared via gains_manager (D4: centralized mutation)
+    gains_manager.set_integral.assert_called_once_with(0.0, PIDChangeReason.AUTO_APPLY)
 
     # Verify gains were set with AUTO_APPLY reason
     assert gains_manager.set_gains.called
@@ -464,8 +464,8 @@ async def test_rollback_pid():
     # Verify success
     assert result is True
 
-    # Verify integral was cleared
-    assert pid_controller.integral == 0.0
+    # Verify integral was cleared via gains_manager (D4: centralized mutation)
+    gains_manager.set_integral.assert_called_once_with(0.0, PIDChangeReason.ROLLBACK)
 
     # Verify gains were set with ROLLBACK reason
     assert gains_manager.set_gains.called

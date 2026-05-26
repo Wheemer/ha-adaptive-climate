@@ -5,6 +5,8 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
+from ..const import PIDChangeReason
+
 if TYPE_CHECKING:
     from homeassistant.core import State
     from ..climate import AdaptiveThermostat
@@ -143,12 +145,19 @@ class StateRestorer:
             integral_value = old_state.attributes.get("pid_i")  # Legacy name
         if isinstance(integral_value, (float, int)) and not isinstance(integral_value, bool):
             thermostat._i = float(integral_value)
-            thermostat._pid_controller.integral = thermostat._i
-            # Clamp restored integral to current bounds (out_max/Ke/F may have changed across restart)
-            thermostat._pid_controller.clamp_integral(
-                external=thermostat._pid_controller._external,
-                feedforward=thermostat._pid_controller._feedforward,
-            )
+            if thermostat._gains_manager:
+                # Route through PIDStateManager so integral is clamped to current
+                # [out_min - E - F, out_max - E - F] bounds — handles the case where
+                # out_max / Ke / F changed across restart (C05).
+                thermostat._gains_manager.set_integral(thermostat._i, PIDChangeReason.RESTORE)
+                # Sync _i to the post-clamp value stored in the PID controller
+                thermostat._i = thermostat._pid_controller.integral
+            else:
+                thermostat._pid_controller.integral = thermostat._i
+                thermostat._pid_controller.clamp_integral(
+                    external=thermostat._pid_controller._external,
+                    feedforward=thermostat._pid_controller._feedforward,
+                )
             _LOGGER.info("%s: Restored integral=%.2f", thermostat.entity_id, thermostat._i)
         else:
             _LOGGER.warning(

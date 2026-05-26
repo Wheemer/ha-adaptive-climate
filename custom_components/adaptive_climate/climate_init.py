@@ -96,6 +96,7 @@ async def async_setup_managers(thermostat: AdaptiveThermostat) -> None:
             else None
         ),
         valve_actuation_time=thermostat._valve_actuation_time,
+        heating_type=thermostat._heating_type,
     )
 
     # Initialize PreheatLearner if preheat is enabled
@@ -330,6 +331,7 @@ async def async_setup_managers(thermostat: AdaptiveThermostat) -> None:
         enabled=thermostat._setpoint_boost,
         boost_factor=thermostat._setpoint_boost_factor,
         debounce_seconds=thermostat._setpoint_debounce,
+        gains_manager=thermostat._gains_manager,
     )
     _LOGGER.info(
         "%s: Setpoint boost manager initialized (enabled=%s, debounce=%ds)",

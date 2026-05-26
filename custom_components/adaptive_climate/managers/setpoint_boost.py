@@ -12,11 +12,14 @@ from ..const import (
     HEATING_TYPE_BOOST_FACTORS,
     DEFAULT_SETPOINT_DEBOUNCE,
     HeatingType,
+    PIDChangeReason,
 )
 
 if TYPE_CHECKING:
     from datetime import datetime
     from ..pid_controller import PID
+
+    from .pid_gains_manager import PIDStateManager
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -45,21 +48,26 @@ class SetpointBoostManager:
         enabled: bool = True,
         boost_factor: float | None = None,
         debounce_seconds: int = DEFAULT_SETPOINT_DEBOUNCE,
+        gains_manager: PIDStateManager | None = None,
     ):
         """Initialize the SetpointBoostManager.
 
         Args:
             hass: Home Assistant instance
             heating_type: Heating system type
-            pid_controller: PID controller instance
+            pid_controller: PID controller instance (retained for bound reads)
             is_night_period_cb: Callback to check if night setback is active
             enabled: Whether setpoint boost is enabled
             boost_factor: Override default boost factor for this heating type
             debounce_seconds: Debounce window in seconds
+            gains_manager: PIDStateManager for centralized integral mutations.
+                If provided, integral changes are routed through it (with
+                clamping); otherwise falls back to direct PID mutation.
         """
         self._hass = hass
         self._heating_type = heating_type
         self._pid = pid_controller
+        self._gains_manager = gains_manager
         self._is_night_period_cb = is_night_period_cb
         self._enabled = enabled
         self._debounce_seconds = debounce_seconds
@@ -144,10 +152,19 @@ class SetpointBoostManager:
         if delta > 0:
             # Setpoint INCREASE - boost integral
             boost = delta * self._boost_factor
-            cap = max(abs(self._pid.integral) * 0.5, 15.0)
+
+            # M31: cap by output headroom so integral cannot exceed clamp bound
+            headroom = max(
+                0.0,
+                (self._pid._out_max - self._pid._external - self._pid._feedforward) - self._pid.integral,
+            )
+            cap = min(max(abs(self._pid.integral) * 0.5, 15.0), headroom)
             boost = min(boost, cap)
 
-            self._pid.integral += boost
+            if self._gains_manager is not None:
+                self._gains_manager.boost_integral(boost, PIDChangeReason.SETPOINT_BOOST)
+            else:
+                self._pid.integral += boost
 
             _LOGGER.debug(
                 "Setpoint boost: delta=+%.2f, boost=%.2f, new_integral=%.2f",
@@ -159,7 +176,11 @@ class SetpointBoostManager:
             # Setpoint DECREASE - decay integral
             decay = max(0.3, 1.0 - abs(delta) * self._decay_rate)
             old_integral = self._pid.integral
-            self._pid.integral *= decay
+
+            if self._gains_manager is not None:
+                self._gains_manager.decay_integral(decay, PIDChangeReason.SETPOINT_BOOST)
+            else:
+                self._pid.integral *= decay
 
             _LOGGER.debug(
                 "Setpoint decay: delta=%.2f, decay_factor=%.2f, integral %.2f -> %.2f",

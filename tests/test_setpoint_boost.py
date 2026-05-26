@@ -24,6 +24,12 @@ def mock_pid():
     """Create a mock PID controller."""
     pid = Mock(spec=PID)
     pid.integral = 50.0
+    # Private attrs accessed by M31 headroom calculation (boost path only).
+    # Use a large out_max so headroom never constrains existing test assertions;
+    # tests that specifically exercise the headroom cap set a smaller value.
+    pid._out_max = 1000.0
+    pid._external = 0.0
+    pid._feedforward = 0.0
     return pid
 
 
@@ -844,12 +850,61 @@ class TestSetpointBoostEdgeCases:
 
         # Delta = 10.0°C (very large)
         # Boost = 10.0 * 25.0 = 250.0
-        # Cap = max(abs(200.0) * 0.5, 15.0) = max(100.0, 15.0) = 100.0
+        # Headroom = max(0, 1000 - 0 - 0 - 200) = 800 (large, not binding)
+        # Cap = min(max(abs(200.0) * 0.5, 15.0), 800) = min(100.0, 800) = 100.0
         # Final boost = min(250.0, 100.0) = 100.0
         manager._pending_delta = 10.0
         await manager._apply_boost(datetime.now())
 
         assert mock_pid.integral == 300.0  # 200.0 + 100.0
+
+    @pytest.mark.asyncio
+    async def test_boost_headroom_cap_m31(self, mock_hass, mock_pid, is_night_period_callback):
+        """Test M31: boost is capped by output headroom when integral near out_max."""
+        # Integral almost at out_max — headroom should be the binding constraint.
+        mock_pid.integral = 90.0
+        mock_pid._out_max = 100.0  # Small headroom: 100 - 0 - 0 - 90 = 10
+        mock_pid._external = 0.0
+        mock_pid._feedforward = 0.0
+
+        manager = SetpointBoostManager(
+            hass=mock_hass,
+            heating_type=HeatingType.RADIATOR,
+            pid_controller=mock_pid,
+            is_night_period_cb=is_night_period_callback,
+        )
+
+        # Delta = 5.0°C
+        # Boost = 5.0 * 18.0 = 90.0
+        # Headroom = max(0, 100 - 0 - 0 - 90) = 10.0  ← binding constraint
+        # cap = min(max(45.0, 15.0), 10.0) = min(45.0, 10.0) = 10.0
+        # Final boost = min(90.0, 10.0) = 10.0
+        manager._pending_delta = 5.0
+        await manager._apply_boost(datetime.now())
+
+        # Integral is limited to headroom, not the integral-based cap
+        assert mock_pid.integral == pytest.approx(100.0)  # 90.0 + 10.0
+
+    @pytest.mark.asyncio
+    async def test_boost_no_headroom_skips(self, mock_hass, mock_pid, is_night_period_callback):
+        """Test M31: boost is skipped when integral already at/above out_max."""
+        mock_pid.integral = 100.0
+        mock_pid._out_max = 100.0  # No headroom
+        mock_pid._external = 0.0
+        mock_pid._feedforward = 0.0
+
+        manager = SetpointBoostManager(
+            hass=mock_hass,
+            heating_type=HeatingType.RADIATOR,
+            pid_controller=mock_pid,
+            is_night_period_cb=is_night_period_callback,
+        )
+
+        manager._pending_delta = 2.0
+        await manager._apply_boost(datetime.now())
+
+        # Headroom = 0, so boost = 0; integral unchanged
+        assert mock_pid.integral == 100.0
 
     @pytest.mark.asyncio
     async def test_very_small_boost_below_threshold_skipped(self, mock_hass, mock_pid, is_night_period_callback):
