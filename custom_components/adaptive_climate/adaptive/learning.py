@@ -70,6 +70,7 @@ from .learning_coordinator import (
     check_undershoot_adjustment as _check_undershoot_adjustment,
     apply_restored_state,
 )
+from .learning_health_monitor import HealthReport, LearningHealthMonitor
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -577,6 +578,43 @@ class AdaptiveLearner:
         """Expose undershoot detector for serialization access."""
         return self._undershoot_detector
 
+    @property
+    def health(self) -> HealthReport:
+        """Compute and return the current learning health report.
+
+        Aggregates Ki multiplier, PID drift, and maintenance cap usage into a
+        single 0–100 score.  Current PID gains are retrieved from the
+        PIDGainsManager when available; drift is omitted (0 penalty) otherwise.
+
+        Returns:
+            HealthReport with score, status, and per-signal breakdown.
+        """
+        if self._heating_type is None:
+            heating_type_enum = HeatingTypeEnum.RADIATOR
+        elif isinstance(self._heating_type, str):
+            heating_type_enum = HeatingTypeEnum(self._heating_type)
+        else:
+            heating_type_enum = self._heating_type
+
+        monitor = LearningHealthMonitor(
+            heating_type=heating_type_enum,
+            undershoot_detector=self._undershoot_detector,
+            validation_manager=self._validation,
+            contribution_tracker=self._contribution_tracker,
+        )
+
+        # Pull current gains if PIDGainsManager is wired in
+        kp: float | None = None
+        ki: float | None = None
+        kd: float | None = None
+        if self._pid_gains_manager is not None:
+            gains = self._pid_gains_manager.get_gains()
+            kp = gains.kp
+            ki = gains.ki
+            kd = gains.kd
+
+        return monitor.assess(current_kp=kp, current_ki=ki, current_kd=kd)
+
     def can_reach_learning_tier(self, tier: int, mode: HVACMode) -> bool:
         """Check if the system has enough recovery cycles to reach a learning tier."""
         return self._contribution_tracker.can_reach_tier(tier, mode)
@@ -596,6 +634,7 @@ class AdaptiveLearner:
             undershoot_detector=self._undershoot_detector,
             contribution_tracker=self._contribution_tracker,
             heating_rate_learner=self._heating_rate_learner,
+            last_seasonal_shift=self._validation._last_seasonal_shift,
         )
 
     def restore_from_dict(self, data: dict[str, Any]) -> None:
