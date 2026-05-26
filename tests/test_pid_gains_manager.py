@@ -1711,6 +1711,52 @@ class TestCoolingGainsRestore:
         assert cooling_gains.kp == pytest.approx(initial_cooling_gains.kp)
         assert cooling_gains.ki == pytest.approx(initial_cooling_gains.ki)
 
+    def test_cooling_history_restored_when_initial_cooling_gains_none(self, mock_pid_controller, initial_heating_gains):
+        """M10: cooling history must be restored even when manager starts without cooling gains.
+
+        Bug: ``restore_from_state`` checks ``if self._cooling_gains is not None`` before
+        applying the last cooling history entry.  When the zone is initialised without
+        cooling gains (lazy-init, the common case), ``_cooling_gains`` is None and the
+        check skips the restore — cooling history is loaded into ``_pid_history["cooling"]``
+        but ``_cooling_gains`` stays None.  On the next COOL call the manager falls back
+        to heating gains, discarding the stored cooling tuning.
+
+        Fix: restore from cooling history unconditionally when cooling history is present.
+        """
+        # Manager created with NO initial cooling gains (the lazy-init default)
+        mgr = PIDGainsManager(mock_pid_controller, initial_heating_gains)
+        assert mgr._cooling_gains is None, "Pre-condition: cooling gains must be unset"
+
+        old_state = Mock()
+        old_state.attributes = {
+            "pid_history": {
+                "heating": [],
+                "cooling": [
+                    {
+                        "kp": 2.5,
+                        "ki": 0.02,
+                        "kd": 25.0,
+                        "ke": 0.4,
+                        "timestamp": "2024-01-01T00:00:00",
+                        "reason": "adaptive_apply",
+                        "actor": "user",
+                    }
+                ],
+            }
+        }
+        mgr.restore_from_state(old_state)
+
+        cooling_gains = mgr.get_gains(HVACMode.COOL)
+        assert cooling_gains.kp == pytest.approx(2.5), (
+            f"M10: cooling kp must be restored from history (expected 2.5, got {cooling_gains.kp}). "
+            "restore_from_state skipped cooling restore because initial_cooling_gains was None."
+        )
+        assert cooling_gains.ki == pytest.approx(0.02), (
+            f"M10: cooling ki must be restored from history (expected 0.02, got {cooling_gains.ki})."
+        )
+        assert cooling_gains.kd == pytest.approx(25.0)
+        assert cooling_gains.ke == pytest.approx(0.4)
+
 
 class TestSmallGainChangesRecorded:
     """M09: gain changes < 0.005 must appear in history.

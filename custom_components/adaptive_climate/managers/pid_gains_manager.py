@@ -258,19 +258,23 @@ class PIDStateManager:
                 mode=HVACMode.HEAT,
             )
 
-        # 3. Restore cooling gains if present
-        if self._cooling_gains is not None:
-            cooling_history = self._pid_history.get("cooling", [])
-            if cooling_history:
-                last_cooling = cooling_history[-1]
-                self.set_gains(
-                    PIDChangeReason.RESTORE,
-                    kp=last_cooling.get("kp", self._cooling_gains.kp),
-                    ki=last_cooling.get("ki", self._cooling_gains.ki),
-                    kd=last_cooling.get("kd", self._cooling_gains.kd),
-                    ke=last_cooling.get("ke", 0.0),
-                    mode=HVACMode.COOL,
-                )
+        # 3. Restore cooling gains if history present.
+        # M10: do NOT gate on _cooling_gains is not None — when the zone was
+        # initialised without cooling gains (the lazy-init default), _cooling_gains
+        # is None but cooling history may still exist and must be restored.
+        cooling_history = self._pid_history.get("cooling", [])
+        if cooling_history:
+            last_cooling = cooling_history[-1]
+            # Use stored cooling gains as key fallback; fall back to heating if unset
+            fallback = self._cooling_gains if self._cooling_gains is not None else self._heating_gains
+            self.set_gains(
+                PIDChangeReason.RESTORE,
+                kp=last_cooling.get("kp", fallback.kp),
+                ki=last_cooling.get("ki", fallback.ki),
+                kd=last_cooling.get("kd", fallback.kd),
+                ke=last_cooling.get("ke", 0.0),
+                mode=HVACMode.COOL,
+            )
 
     def _restore_history(self, old_history: Any) -> None:
         """Restore history from state attributes.
