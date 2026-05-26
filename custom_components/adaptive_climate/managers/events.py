@@ -220,7 +220,7 @@ class CycleEventDispatcher:
         if event_type not in self._listeners:
             return
 
-        for callback in self._listeners[event_type]:
+        for callback in self._listeners[event_type].copy():
             try:
                 callback(event)
             except Exception:

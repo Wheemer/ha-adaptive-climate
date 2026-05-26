@@ -3,8 +3,6 @@
 from datetime import datetime
 from unittest.mock import MagicMock
 
-import pytest
-
 from custom_components.adaptive_climate.managers.events import (
     CycleEventType,
     CycleStartedEvent,
@@ -376,3 +374,36 @@ class TestCycleEventDispatcher:
 
         cycle_callback.assert_called_once_with(cycle_event)
         heating_callback.assert_not_called()
+
+    def test_dispatcher_one_shot_listener_unsubscribes_during_emit(self):
+        """One-shot listener that unsubscribes itself during emit raises no RuntimeError."""
+        dispatcher = CycleEventDispatcher()
+        received_events: list[CycleStartedEvent] = []
+
+        # Subscribe a one-shot listener that removes itself on first call
+        unsubscribe: list  # mutable cell so the inner function can reference it
+        unsubscribe = []
+
+        def one_shot(event: CycleStartedEvent) -> None:
+            received_events.append(event)
+            unsubscribe[0]()  # unsubscribe self during dispatch
+
+        unsub = dispatcher.subscribe(CycleEventType.CYCLE_STARTED, one_shot)
+        unsubscribe.append(unsub)
+
+        event = CycleStartedEvent(
+            hvac_mode="heat",
+            timestamp=datetime.now(),
+            target_temp=21.0,
+            current_temp=19.0,
+        )
+
+        # Must not raise RuntimeError: list changed size during iteration
+        dispatcher.emit(event)
+
+        assert len(received_events) == 1
+        assert received_events[0] is event
+
+        # Subsequent emit must not call the one-shot listener again
+        dispatcher.emit(event)
+        assert len(received_events) == 1
