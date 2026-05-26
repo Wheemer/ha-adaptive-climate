@@ -247,6 +247,13 @@ async def async_setup_platform(hass: HomeAssistant, config: ConfigType, async_ad
             if manifold_state:
                 manifold_registry.restore_state(manifold_state)
                 _LOGGER.info("Restored manifold state for %d manifolds", len(manifold_state))
+
+        # M02: Trigger number platform discovery once so LearningWindowNumber exists.
+        # Done here (first zone only) because number entities are system-wide, not
+        # per-zone, and must be created before any zone reads learning_window_days.
+        hass.data[DOMAIN]["number_platform_loaded"] = True
+        hass.async_create_task(discovery.async_load_platform(hass, "number", DOMAIN, {}, config))
+        _LOGGER.info("Triggered number platform discovery for LearningWindowNumber")
     else:
         learning_store = hass.data[DOMAIN]["learning_store"]
 

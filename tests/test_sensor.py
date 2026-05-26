@@ -1582,4 +1582,72 @@ def test_heat_output():
     flow = sensor._get_sensor_value("sensor.flow_rate")
     assert flow == 0.75, "Flow rate retrieval failed"
 
+
+class TestSystemSensorSetup:
+    """M03: SystemHealthSensor must be created on first zone setup."""
+
+    @pytest.mark.asyncio
+    async def test_system_health_sensor_instantiated_on_first_zone_setup(self):
+        """M03: async_setup_platform must instantiate SystemHealthSensor(hass) and
+        include it in the entities passed to async_add_entities during first zone setup.
+        """
+        from custom_components.adaptive_climate.sensor import async_setup_platform
+
+        mock_hass = MagicMock()
+        mock_hass.data = {
+            DOMAIN: {
+                # No 'system_sensors_created' flag → first zone setup
+            }
+        }
+
+        discovery_info = {
+            "zone_id": "test_zone",
+            "zone_name": "Test Zone",
+            "climate_entity_id": "climate.test_zone",
+        }
+
+        added_entities = []
+
+        def capture_add_entities(entities, update_before_add=False):
+            added_entities.extend(entities)
+
+        with patch("custom_components.adaptive_climate.sensor.SystemHealthSensor") as mock_health:
+            mock_health_instance = MagicMock()
+            mock_health.return_value = mock_health_instance
+            await async_setup_platform(mock_hass, {}, capture_add_entities, discovery_info)
+
+        assert mock_health.called, (
+            "SystemHealthSensor was never instantiated. "
+            "M03: sensor.py must create SystemHealthSensor(hass) in the system sensors block."
+        )
+        mock_health.assert_called_once_with(mock_hass)
+        assert mock_health_instance in added_entities, (
+            "SystemHealthSensor instance was not passed to async_add_entities."
+        )
+
+    @pytest.mark.asyncio
+    async def test_system_health_sensor_not_created_twice(self):
+        """M03 regression: SystemHealthSensor must not be created on subsequent zone setups."""
+        from custom_components.adaptive_climate.sensor import async_setup_platform
+
+        mock_hass = MagicMock()
+        mock_hass.data = {
+            DOMAIN: {
+                "system_sensors_created": True,  # Already created on first zone
+            }
+        }
+
+        discovery_info = {
+            "zone_id": "second_zone",
+            "zone_name": "Second Zone",
+            "climate_entity_id": "climate.second_zone",
+        }
+
+        with patch("custom_components.adaptive_climate.sensor.SystemHealthSensor") as mock_health:
+            await async_setup_platform(mock_hass, {}, MagicMock(), discovery_info)
+
+        assert not mock_health.called, (
+            "SystemHealthSensor must not be created again when system_sensors_created is True."
+        )
+
     print("All heat output tests passed!")

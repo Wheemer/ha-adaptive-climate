@@ -37,6 +37,7 @@ from .sensors.comfort import (
     ComfortScoreSensor,
 )
 from .sensors.actuator_wear import ActuatorWearSensor
+from .sensors.health import SystemHealthSensor
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -127,6 +128,9 @@ async def async_setup_platform(
         # Get energy configuration from domain data
         energy_meter = hass.data[DOMAIN].get("energy_meter_entity")
         energy_cost = hass.data[DOMAIN].get("energy_cost_entity")
+
+        # M03: Create SystemHealthSensor
+        sensors.append(SystemHealthSensor(hass))
 
         # Create TotalPowerSensor
         total_power_sensor = TotalPowerSensor(hass)

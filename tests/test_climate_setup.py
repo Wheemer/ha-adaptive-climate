@@ -246,3 +246,82 @@ class TestSensorDiscoveryPayload:
         assert payload.get("return_temp_sensor") is None
         assert payload.get("flow_rate_sensor") is None
         assert payload.get("fallback_flow_rate") == DEFAULT_FALLBACK_FLOW_RATE
+
+
+class TestNumberPlatformDiscovery:
+    """M02: number platform must be discovered for LearningWindowNumber to exist."""
+
+    @pytest.mark.asyncio
+    async def test_number_platform_loaded_on_first_zone_setup(self):
+        """M02: discovery.async_load_platform('number') must be called once on first
+        zone setup so LearningWindowNumber is created.
+        """
+        from unittest.mock import AsyncMock, MagicMock, patch
+        from custom_components.adaptive_climate.climate_setup import async_setup_platform
+        from custom_components.adaptive_climate.const import DOMAIN
+
+        mock_store = AsyncMock()
+        mock_store.async_load = AsyncMock()
+        mock_store.async_load_manifold_state = AsyncMock(return_value=None)
+
+        hass = MagicMock()
+        hass.data = {
+            DOMAIN: {
+                # No learning_store yet — first zone setup
+            }
+        }
+        hass.config.units.temperature_unit = "°C"
+
+        config = {"name": "Test Zone"}  # No heater → early return after store creation
+
+        with (
+            patch(
+                "custom_components.adaptive_climate.climate_setup.LearningDataStore",
+                return_value=mock_store,
+            ),
+            patch("custom_components.adaptive_climate.climate_setup.CONF_NAME", "name"),
+            patch("custom_components.adaptive_climate.climate_setup.discovery") as mock_discovery,
+            patch("custom_components.adaptive_climate.climate_setup.entity_platform") as mock_ep,
+        ):
+            mock_ep.current_platform.get.return_value = MagicMock()
+            await async_setup_platform(hass, config, MagicMock())
+
+        # Verify 'number' platform was discovered
+        number_calls = [c for c in mock_discovery.async_load_platform.call_args_list if c[0][1] == "number"]
+        assert len(number_calls) == 1, (
+            f"Expected exactly 1 call to async_load_platform('number'), got {len(number_calls)}. "
+            "M02: climate_setup must trigger number platform discovery for LearningWindowNumber."
+        )
+
+    @pytest.mark.asyncio
+    async def test_number_platform_not_loaded_twice(self):
+        """M02 regression: number platform must only be discovered once (guard flag)."""
+        from unittest.mock import AsyncMock, MagicMock, patch
+        from custom_components.adaptive_climate.climate_setup import async_setup_platform
+        from custom_components.adaptive_climate.const import DOMAIN
+
+        mock_existing_store = AsyncMock()
+
+        hass = MagicMock()
+        hass.data = {
+            DOMAIN: {
+                "learning_store": mock_existing_store,
+                "number_platform_loaded": True,  # already loaded on first zone
+            }
+        }
+        hass.config.units.temperature_unit = "°C"
+
+        config = {"name": "Test Zone 2"}  # No heater → early return
+
+        with (
+            patch("custom_components.adaptive_climate.climate_setup.CONF_NAME", "name"),
+            patch("custom_components.adaptive_climate.climate_setup.discovery") as mock_discovery,
+            patch("custom_components.adaptive_climate.climate_setup.entity_platform") as mock_ep,
+        ):
+            mock_ep.current_platform.get.return_value = MagicMock()
+            await async_setup_platform(hass, config, MagicMock())
+
+        number_calls = [c for c in mock_discovery.async_load_platform.call_args_list if c[0][1] == "number"]
+        assert len(number_calls) == 0, (
+            "number platform must not be loaded again when number_platform_loaded flag is set."
+        )
