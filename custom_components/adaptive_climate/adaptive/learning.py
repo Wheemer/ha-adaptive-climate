@@ -31,7 +31,6 @@ from .cycle_analysis import (
     calculate_overshoot,
     calculate_undershoot,
     count_oscillations,
-    calculate_settling_time,
 )
 from .pwm_tuning import calculate_pwm_adjustment, ValveCycleTracker
 
@@ -50,8 +49,7 @@ from .auto_apply import AutoApplyManager, get_auto_apply_thresholds
 # Import undershoot detector for persistent temperature deficit detection
 from .undershoot_detector import UndershootDetector
 
-# Import weighted learning components (CycleOutcome used internally in clear_history enum check)
-from .cycle_weight import CycleWeightCalculator, CycleOutcome
+from .cycle_weight import CycleWeightCalculator
 from .confidence_contribution import ConfidenceContributionTracker
 
 # Import heating rate learner for unified heating rate learning
@@ -61,10 +59,7 @@ from .heating_rate_learner import HeatingRateLearner
 from ..helpers.hvac_mode import mode_to_str, get_hvac_heat_mode, get_hvac_cool_mode
 
 # Import computation helpers from extracted modules
-# _get_last/physics_baseline_ki re-exported for climate.py lazy import backward compat
 from .learning_adjustments import (
-    _get_last_adjustment_time_from_history,
-    _get_physics_baseline_ki_from_history,
     check_convergence as _check_convergence_fn,
     check_rate_limit as _check_rate_limit_fn,
     update_convergence_tracking as _update_convergence_tracking_fn,
@@ -77,6 +72,25 @@ from .learning_coordinator import (
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+# Explicit re-exports — keeps Pyright happy and documents the public surface
+__all__ = [
+    "AdaptiveLearner",
+    "CycleMetrics",
+    "PIDRule",
+    "PIDRuleResult",
+    "PhaseAwareOvershootTracker",
+    "ThermalRateLearner",
+    "ValveCycleTracker",
+    "calculate_overshoot",
+    "calculate_pwm_adjustment",
+    "calculate_undershoot",
+    "count_oscillations",
+    "detect_rule_conflicts",
+    "evaluate_pid_rules",
+    "get_auto_apply_thresholds",
+    "resolve_rule_conflicts",
+]
 
 
 # Adaptive learning (CycleMetrics imported from cycle_analysis)

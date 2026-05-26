@@ -32,7 +32,7 @@ _LOGGER = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
-def _get_last_adjustment_time_from_history(
+def get_last_adjustment_time_from_history(
     pid_history: list[dict],
     reason: str,
 ) -> datetime | None:
@@ -60,7 +60,7 @@ def _get_last_adjustment_time_from_history(
     return None
 
 
-def _get_physics_baseline_ki_from_history(pid_history: list[dict]) -> float | None:
+def get_physics_baseline_ki_from_history(pid_history: list[dict]) -> float | None:
     """Get the physics baseline Ki from PID history.
 
     Looks for the most recent entry with reason "physics_init" or "physics_reset".

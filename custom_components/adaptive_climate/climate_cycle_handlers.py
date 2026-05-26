@@ -169,11 +169,11 @@ class ClimateCycleHandlersMixin:
             return  # Performing adequately
 
         # Check if we've already boosted Ki to the cap relative to physics baseline
-        from .adaptive.learning import _get_physics_baseline_ki_from_history
+        from .adaptive.learning_adjustments import get_physics_baseline_ki_from_history
 
         old_ki = self._pid_controller.ki
         pid_history = self._gains_manager.get_history()
-        physics_baseline_ki = _get_physics_baseline_ki_from_history(pid_history)
+        physics_baseline_ki = get_physics_baseline_ki_from_history(pid_history)
 
         if physics_baseline_ki is not None and physics_baseline_ki > 0:
             actual_ratio = old_ki / physics_baseline_ki

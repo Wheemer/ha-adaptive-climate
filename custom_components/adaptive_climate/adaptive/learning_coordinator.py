@@ -24,8 +24,8 @@ from ..const import (
     PIDChangeReason,
 )
 from .learning_adjustments import (
-    _get_last_adjustment_time_from_history,
-    _get_physics_baseline_ki_from_history,
+    get_last_adjustment_time_from_history,
+    get_physics_baseline_ki_from_history,
     check_convergence,
     check_rate_limit,
     compute_cycle_averages,
@@ -341,13 +341,13 @@ def check_undershoot_adjustment(
     last_boost_utc = None
     physics_baseline_ki: float | None = None
     if pid_history:
-        undershoot_utc = _get_last_adjustment_time_from_history(pid_history, PIDChangeReason.UNDERSHOOT_BOOST.value)
-        chronic_utc = _get_last_adjustment_time_from_history(pid_history, "chronic_approach_ki_boost")
+        undershoot_utc = get_last_adjustment_time_from_history(pid_history, PIDChangeReason.UNDERSHOOT_BOOST.value)
+        chronic_utc = get_last_adjustment_time_from_history(pid_history, "chronic_approach_ki_boost")
         if undershoot_utc and chronic_utc:
             last_boost_utc = max(undershoot_utc, chronic_utc)
         else:
             last_boost_utc = undershoot_utc or chronic_utc
-        physics_baseline_ki = _get_physics_baseline_ki_from_history(pid_history)
+        physics_baseline_ki = get_physics_baseline_ki_from_history(pid_history)
 
     if not learner._undershoot_detector.should_adjust_ki(
         cycles_completed, last_boost_utc, current_ki, physics_baseline_ki
