@@ -195,6 +195,26 @@ def validate_pwm_compatibility(config):
     return config
 
 
+def _resolve_pwm(
+    config_pwm: timedelta | None,
+    domain_pwm: timedelta | None,
+) -> timedelta:
+    """Resolve PWM with None-aware logic (timedelta(0) is valid, not falsy).
+
+    Priority: entity config → domain config → 15-min default.
+    Uses explicit None checks so that timedelta(0) (valve mode) is preserved
+    instead of being treated as falsy and falling through to the default.
+
+    The default (15 min) mirrors const.DEFAULT_PWM = "00:15:00".
+    Expressed as a timedelta literal to avoid a cv dependency inside the helper.
+    """
+    if config_pwm is not None:
+        return config_pwm
+    if domain_pwm is not None:
+        return domain_pwm
+    return timedelta(minutes=15)  # const.DEFAULT_PWM = "00:15:00"
+
+
 async def async_setup_platform(hass: HomeAssistant, config: ConfigType, async_add_entities, discovery_info=None):
     """Set up the generic thermostat platform."""
     # Import here to avoid circular dependency
@@ -289,7 +309,7 @@ async def async_setup_platform(hass: HomeAssistant, config: ConfigType, async_ad
         control_interval=config.get(const.CONF_CONTROL_INTERVAL),
         sampling_period=config.get(const.CONF_SAMPLING_PERIOD),
         sensor_stall=config.get(const.CONF_SENSOR_STALL),
-        pwm=config.get(const.CONF_PWM) or domain_data.get("pwm") or cv.time_period(const.DEFAULT_PWM),
+        pwm=_resolve_pwm(config.get(const.CONF_PWM), domain_data.get("pwm")),
         valve_actuation_time=valve_actuation_seconds,
         # Output
         output_safety=config.get(const.CONF_OUTPUT_SAFETY),

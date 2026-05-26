@@ -9,6 +9,7 @@ import voluptuous as vol
 
 from custom_components.adaptive_climate.climate_setup import (
     validate_pwm_compatibility,
+    _resolve_pwm,
 )
 from custom_components.adaptive_climate.const import (
     CONF_VALVE_ACTUATION_TIME,
@@ -103,3 +104,32 @@ class TestPWMValidation:
         # Should not raise (no pwm key means pwm defaults later)
         validated = validate_pwm_compatibility(config)
         assert validated == config
+
+
+class TestResolvePwm:
+    """Test _resolve_pwm helper for None-aware PWM resolution."""
+
+    def test_explicit_zero_entity_config_is_respected(self):
+        """H01: explicit pwm=timedelta(0) must not fall through to 15-min default."""
+        result = _resolve_pwm(timedelta(seconds=0), None)
+        assert result == timedelta(seconds=0), "timedelta(0) is falsy but valid — must NOT fall through to default"
+
+    def test_explicit_nonzero_entity_config_wins(self):
+        """Entity-level nonzero PWM overrides domain and default."""
+        result = _resolve_pwm(timedelta(minutes=10), timedelta(minutes=5))
+        assert result == timedelta(minutes=10)
+
+    def test_entity_config_none_falls_through_to_domain(self):
+        """When entity config is absent, domain PWM is used."""
+        result = _resolve_pwm(None, timedelta(minutes=5))
+        assert result == timedelta(minutes=5)
+
+    def test_domain_zero_is_respected(self):
+        """Domain-level zero PWM must not fall through to default either."""
+        result = _resolve_pwm(None, timedelta(seconds=0))
+        assert result == timedelta(seconds=0)
+
+    def test_both_none_returns_default(self):
+        """When both entity and domain configs are None, returns 15-min default."""
+        result = _resolve_pwm(None, None)
+        assert result == timedelta(minutes=15)
