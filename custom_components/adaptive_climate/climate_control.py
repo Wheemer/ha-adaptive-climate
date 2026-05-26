@@ -295,12 +295,6 @@ class ClimateControlMixin:
                             self._cycle_tracker.abort_cycle("night_setback_started")
             await self.set_control_value()
 
-            # Update zone demand for CentralController (based on actual device state, not PID output)
-            if coordinator:
-                coordinator.update_zone_demand(
-                    self._zone_id, self._is_device_active, self._hvac_mode.value if self._hvac_mode else None
-                )
-
             # Record Ke observation if at steady state
             self._maybe_record_ke_observation()
 
@@ -368,6 +362,11 @@ class ClimateControlMixin:
         # This must happen BEFORE async_set_control_value for PWM calculation
         coordinator = self.hass.data.get(DOMAIN, {}).get("coordinator") if self._zone_id else None
         if coordinator:
+            # H05: update zone demand FIRST so get_transport_delay_for_zone sees this
+            # zone as active.  Previously, demand was updated AFTER set_control_value()
+            # returned, so the first cold-manifold cycle always got delay=0.
+            hvac_mode_str = self._hvac_mode.value if self._hvac_mode else None
+            coordinator.update_zone_demand(self._zone_id, self._is_device_active, hvac_mode_str)
             # C03: manifold registry is keyed by entity_id (e.g. "climate.living_room"),
             # NOT by zone slug.  Using self._zone_id (slug) previously caused a silent
             # lookup miss so the heater controller never received the transport delay.
