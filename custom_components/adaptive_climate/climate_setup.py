@@ -199,6 +199,7 @@ async def async_setup_platform(hass: HomeAssistant, config: ConfigType, async_ad
     """Set up the generic thermostat platform."""
     # Import here to avoid circular dependency
     from .climate import AdaptiveThermostat
+    from .thermostat_config import AdaptiveThermostatConfig
 
     platform = entity_platform.current_platform.get()
     assert platform
@@ -234,106 +235,117 @@ async def async_setup_platform(hass: HomeAssistant, config: ConfigType, async_ad
         _LOGGER.error("%s: Configuration error - %s", name, ex)
         raise
 
-    parameters = {
-        "name": name,
-        "unique_id": config.get(CONF_UNIQUE_ID),
-        "heater_entity_id": config.get(const.CONF_HEATER),
-        "cooler_entity_id": config.get(const.CONF_COOLER),
-        "demand_switch_entity_id": config.get(const.CONF_DEMAND_SWITCH),
-        "invert_heater": config.get(const.CONF_INVERT_HEATER),
-        "sensor_entity_id": config.get(const.CONF_SENSOR),
-        "ext_sensor_entity_id": hass.data.get(DOMAIN, {}).get("outdoor_sensor"),
-        "weather_entity_id": hass.data.get(DOMAIN, {}).get("weather_entity"),
-        "wind_speed_sensor_entity_id": hass.data.get(DOMAIN, {}).get("wind_speed_sensor"),
-        # Temperature range: entity → domain → default
-        "min_temp": config.get(const.CONF_MIN_TEMP)
-        or hass.data.get(DOMAIN, {}).get("min_temp", const.DEFAULT_MIN_TEMP),
-        "max_temp": config.get(const.CONF_MAX_TEMP)
-        or hass.data.get(DOMAIN, {}).get("max_temp", const.DEFAULT_MAX_TEMP),
-        "target_temp": config.get(const.CONF_TARGET_TEMP) or hass.data.get(DOMAIN, {}).get("target_temp"),
-        # Tolerances: entity → domain → default
-        "hot_tolerance": config.get(const.CONF_HOT_TOLERANCE)
-        or hass.data.get(DOMAIN, {}).get("hot_tolerance", const.DEFAULT_TOLERANCE),
-        "cold_tolerance": config.get(const.CONF_COLD_TOLERANCE)
-        or hass.data.get(DOMAIN, {}).get("cold_tolerance", const.DEFAULT_TOLERANCE),
-        # Derive ac_mode from cooler presence (zone or controller level)
-        "ac_mode": bool(cooler) or bool(hass.data.get(DOMAIN, {}).get("main_cooler_switch")),
-        "force_off_state": config.get(const.CONF_FORCE_OFF_STATE),
-        # Cycle durations: entity → domain → default
-        "min_open_time": config.get(const.CONF_MIN_OPEN_TIME)
-        or hass.data.get(DOMAIN, {}).get("min_open_time")
-        or timedelta(0),
-        "min_closed_time": config.get(const.CONF_MIN_CLOSED_TIME) or hass.data.get(DOMAIN, {}).get("min_closed_time"),
-        "min_open_time_pid_off": config.get(const.CONF_MIN_OPEN_TIME_PID_OFF),
-        "min_closed_time_pid_off": config.get(const.CONF_MIN_CLOSED_TIME_PID_OFF),
-        "control_interval": config.get(const.CONF_CONTROL_INTERVAL),
-        "sampling_period": config.get(const.CONF_SAMPLING_PERIOD),
-        "sensor_stall": config.get(const.CONF_SENSOR_STALL),
-        "output_safety": config.get(const.CONF_OUTPUT_SAFETY),
-        "initial_hvac_mode": config.get(const.CONF_INITIAL_HVAC_MODE),
-        "preset_sync_mode": hass.data.get(DOMAIN, {}).get("preset_sync_mode"),
-        "away_temp": hass.data.get(DOMAIN, {}).get("away_temp"),
-        "eco_temp": hass.data.get(DOMAIN, {}).get("eco_temp"),
-        "boost_temp": hass.data.get(DOMAIN, {}).get("boost_temp"),
-        "comfort_temp": hass.data.get(DOMAIN, {}).get("comfort_temp"),
-        "home_temp": hass.data.get(DOMAIN, {}).get("home_temp"),
-        "activity_temp": hass.data.get(DOMAIN, {}).get("activity_temp"),
-        # Precision and step: entity → domain → default
-        "precision": config.get(const.CONF_PRECISION)
-        or hass.data.get(DOMAIN, {}).get("precision", const.DEFAULT_PRECISION),
-        "target_temp_step": config.get(const.CONF_TARGET_TEMP_STEP)
-        or hass.data.get(DOMAIN, {}).get("target_temp_step", const.DEFAULT_TARGET_TEMP_STEP),
-        "unit": hass.config.units.temperature_unit,
-        "output_precision": config.get(const.CONF_OUTPUT_PRECISION),
-        "output_min": config.get(const.CONF_OUTPUT_MIN),
-        "output_max": config.get(const.CONF_OUTPUT_MAX),
-        "output_clamp_low": config.get(const.CONF_OUT_CLAMP_LOW),
-        "output_clamp_high": config.get(const.CONF_OUT_CLAMP_HIGH),
-        # PWM: entity → domain → default
-        "pwm": config.get(const.CONF_PWM) or hass.data.get(DOMAIN, {}).get("pwm") or cv.time_period(const.DEFAULT_PWM),
-        "boost_pid_off": hass.data.get(DOMAIN, {}).get("boost_pid_off"),
-        # New adaptive learning parameters
-        "zone_id": zone_id,
-        "heating_type": config.get(const.CONF_HEATING_TYPE),
-        "derivative_filter_alpha": config.get(const.CONF_DERIVATIVE_FILTER),
-        "auto_apply_pid": config.get(const.CONF_AUTO_APPLY_PID),
-        "area_m2": config.get(const.CONF_AREA_M2),
-        "ceiling_height": config.get(const.CONF_CEILING_HEIGHT),
-        "window_area_m2": config.get(const.CONF_WINDOW_AREA_M2),
-        "window_orientation": config.get(const.CONF_WINDOW_ORIENTATION),
-        # Window rating: use zone-level config, fall back to controller default
-        "window_rating": config.get(const.CONF_WINDOW_RATING)
-        or hass.data.get(DOMAIN, {}).get("window_rating", const.DEFAULT_WINDOW_RATING),
-        "contact_sensors": config.get(const.CONF_CONTACT_SENSORS),
-        "contact_action": config.get(const.CONF_CONTACT_ACTION),
-        "contact_delay": config.get(const.CONF_CONTACT_DELAY),
-        "humidity_sensor": config.get(const.CONF_HUMIDITY_SENSOR),
-        "humidity_spike_threshold": config.get(const.CONF_HUMIDITY_SPIKE_THRESHOLD),
-        "humidity_absolute_max": config.get(const.CONF_HUMIDITY_ABSOLUTE_MAX),
-        "humidity_detection_window": config.get(const.CONF_HUMIDITY_DETECTION_WINDOW),
-        "humidity_stabilization_delay": config.get(const.CONF_HUMIDITY_STABILIZATION_DELAY),
-        "night_setback_config": config.get(const.CONF_NIGHT_SETBACK),
-        "floor_construction": config.get(const.CONF_FLOOR_CONSTRUCTION),
-        "max_power_w": config.get(const.CONF_MAX_POWER_W),
-        "supply_temperature": hass.data.get(DOMAIN, {}).get("supply_temperature"),
-        "ha_area": config.get(const.CONF_AREA),  # Home Assistant area to assign entity to
-        "loops": config.get(const.CONF_LOOPS),
-        "setpoint_boost": config.get(const.CONF_SETPOINT_BOOST),
-        "setpoint_boost_factor": config.get(const.CONF_SETPOINT_BOOST_FACTOR),
-        "setpoint_debounce": config.get(const.CONF_SETPOINT_DEBOUNCE),
-    }
-
-    # Get valve actuation time from config or heating type default
+    # ── Resolve valve actuation time ──────────────────────────────────────────
     heating_type = config.get(const.CONF_HEATING_TYPE)
     valve_actuation_config = config.get(const.CONF_VALVE_ACTUATION_TIME)
     if valve_actuation_config is not None:
-        valve_actuation_seconds = valve_actuation_config.total_seconds()
+        valve_actuation_seconds = float(valve_actuation_config.total_seconds())
     else:
-        valve_actuation_seconds = const.HEATING_TYPE_VALVE_DEFAULTS.get(heating_type, 0)
+        valve_actuation_seconds = float(const.HEATING_TYPE_VALVE_DEFAULTS.get(heating_type, 0))
 
-    parameters["valve_actuation_time"] = valve_actuation_seconds
+    # ── Build typed config (A08) ───────────────────────────────────────────────
+    domain_data = hass.data.get(DOMAIN, {})
+    thermostat_config = AdaptiveThermostatConfig(
+        # Identity
+        name=name,
+        unique_id=config.get(CONF_UNIQUE_ID),
+        unit=hass.config.units.temperature_unit,
+        zone_id=zone_id,
+        ha_area=config.get(const.CONF_AREA),
+        # Sensors
+        sensor_entity_id=config.get(const.CONF_SENSOR),
+        ext_sensor_entity_id=domain_data.get("outdoor_sensor"),
+        weather_entity_id=domain_data.get("weather_entity"),
+        wind_speed_sensor_entity_id=domain_data.get("wind_speed_sensor"),
+        humidity_sensor=config.get(const.CONF_HUMIDITY_SENSOR),
+        # Heater / cooler
+        heater_entity_id=config.get(const.CONF_HEATER),
+        cooler_entity_id=config.get(const.CONF_COOLER),
+        demand_switch_entity_id=config.get(const.CONF_DEMAND_SWITCH),
+        invert_heater=config.get(const.CONF_INVERT_HEATER, False),
+        ac_mode=bool(cooler) or bool(domain_data.get("main_cooler_switch")),
+        force_off_state=config.get(const.CONF_FORCE_OFF_STATE, True),
+        # Temperature range: entity → domain → default
+        min_temp=config.get(const.CONF_MIN_TEMP) or domain_data.get("min_temp", const.DEFAULT_MIN_TEMP),
+        max_temp=config.get(const.CONF_MAX_TEMP) or domain_data.get("max_temp", const.DEFAULT_MAX_TEMP),
+        target_temp=config.get(const.CONF_TARGET_TEMP) or domain_data.get("target_temp"),
+        hot_tolerance=config.get(const.CONF_HOT_TOLERANCE) or domain_data.get("hot_tolerance", const.DEFAULT_TOLERANCE),
+        cold_tolerance=config.get(const.CONF_COLD_TOLERANCE)
+        or domain_data.get("cold_tolerance", const.DEFAULT_TOLERANCE),
+        # Preset temperatures (domain-level)
+        away_temp=domain_data.get("away_temp"),
+        eco_temp=domain_data.get("eco_temp"),
+        boost_temp=domain_data.get("boost_temp"),
+        comfort_temp=domain_data.get("comfort_temp"),
+        home_temp=domain_data.get("home_temp"),
+        sleep_temp=domain_data.get("sleep_temp"),
+        activity_temp=domain_data.get("activity_temp"),
+        preset_sync_mode=domain_data.get("preset_sync_mode"),
+        # Timing: entity → domain → default
+        min_open_time=config.get(const.CONF_MIN_OPEN_TIME) or domain_data.get("min_open_time") or timedelta(0),
+        min_closed_time=config.get(const.CONF_MIN_CLOSED_TIME) or domain_data.get("min_closed_time"),
+        min_open_time_pid_off=config.get(const.CONF_MIN_OPEN_TIME_PID_OFF),
+        min_closed_time_pid_off=config.get(const.CONF_MIN_CLOSED_TIME_PID_OFF),
+        control_interval=config.get(const.CONF_CONTROL_INTERVAL),
+        sampling_period=config.get(const.CONF_SAMPLING_PERIOD),
+        sensor_stall=config.get(const.CONF_SENSOR_STALL),
+        pwm=config.get(const.CONF_PWM) or domain_data.get("pwm") or cv.time_period(const.DEFAULT_PWM),
+        valve_actuation_time=valve_actuation_seconds,
+        # Output
+        output_safety=config.get(const.CONF_OUTPUT_SAFETY),
+        output_precision=config.get(const.CONF_OUTPUT_PRECISION),
+        output_min=config.get(const.CONF_OUTPUT_MIN),
+        output_max=config.get(const.CONF_OUTPUT_MAX),
+        output_clamp_low=config.get(const.CONF_OUT_CLAMP_LOW),
+        output_clamp_high=config.get(const.CONF_OUT_CLAMP_HIGH),
+        # Mode / display
+        initial_hvac_mode=config.get(const.CONF_INITIAL_HVAC_MODE),
+        boost_pid_off=domain_data.get("boost_pid_off"),
+        # Precision and step: entity → domain → default
+        precision=config.get(const.CONF_PRECISION) or domain_data.get("precision", const.DEFAULT_PRECISION),
+        target_temp_step=config.get(const.CONF_TARGET_TEMP_STEP)
+        or domain_data.get("target_temp_step", const.DEFAULT_TARGET_TEMP_STEP),
+        # Zone physics
+        heating_type=heating_type,
+        area_m2=config.get(const.CONF_AREA_M2),
+        ceiling_height=config.get(const.CONF_CEILING_HEIGHT, const.DEFAULT_CEILING_HEIGHT),
+        window_area_m2=config.get(const.CONF_WINDOW_AREA_M2),
+        window_orientation=config.get(const.CONF_WINDOW_ORIENTATION),
+        window_rating=config.get(const.CONF_WINDOW_RATING)
+        or domain_data.get("window_rating", const.DEFAULT_WINDOW_RATING),
+        floor_construction=config.get(const.CONF_FLOOR_CONSTRUCTION),
+        max_power_w=config.get(const.CONF_MAX_POWER_W),
+        supply_temperature=domain_data.get("supply_temperature"),
+        loops=config.get(const.CONF_LOOPS, const.DEFAULT_LOOPS),
+        # PID / adaptive
+        derivative_filter_alpha=config.get(const.CONF_DERIVATIVE_FILTER),
+        auto_apply_pid=config.get(const.CONF_AUTO_APPLY_PID, True),
+        # Contact sensors
+        contact_sensors=config.get(const.CONF_CONTACT_SENSORS),
+        contact_action=config.get(const.CONF_CONTACT_ACTION, const.CONTACT_ACTION_PAUSE),
+        contact_delay=config.get(const.CONF_CONTACT_DELAY, const.DEFAULT_CONTACT_DELAY),
+        # Humidity detection
+        humidity_spike_threshold=config.get(
+            const.CONF_HUMIDITY_SPIKE_THRESHOLD, const.DEFAULT_HUMIDITY_SPIKE_THRESHOLD
+        ),
+        humidity_absolute_max=config.get(const.CONF_HUMIDITY_ABSOLUTE_MAX, const.DEFAULT_HUMIDITY_ABSOLUTE_MAX),
+        humidity_detection_window=config.get(
+            const.CONF_HUMIDITY_DETECTION_WINDOW, const.DEFAULT_HUMIDITY_DETECTION_WINDOW
+        ),
+        humidity_stabilization_delay=config.get(
+            const.CONF_HUMIDITY_STABILIZATION_DELAY, const.DEFAULT_HUMIDITY_STABILIZATION_DELAY
+        ),
+        humidity_exit_threshold=config.get(const.CONF_HUMIDITY_EXIT_THRESHOLD, const.DEFAULT_HUMIDITY_EXIT_THRESHOLD),
+        humidity_exit_drop=config.get(const.CONF_HUMIDITY_EXIT_DROP, const.DEFAULT_HUMIDITY_EXIT_DROP),
+        # Night setback
+        night_setback_config=config.get(const.CONF_NIGHT_SETBACK),
+        # Setpoint boost
+        setpoint_boost=config.get(const.CONF_SETPOINT_BOOST, True),
+        setpoint_boost_factor=config.get(const.CONF_SETPOINT_BOOST_FACTOR),
+        setpoint_debounce=config.get(const.CONF_SETPOINT_DEBOUNCE, const.DEFAULT_SETPOINT_DEBOUNCE),
+    )
 
-    thermostat = AdaptiveThermostat(**parameters)
+    thermostat = AdaptiveThermostat(config=thermostat_config)
 
     # Register zone with coordinator BEFORE adding entity
     # This ensures zone_data is available when async_added_to_hass runs

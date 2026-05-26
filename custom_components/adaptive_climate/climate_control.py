@@ -106,7 +106,10 @@ class ClimateControlMixin:
                 if self._humidity_detector and self._humidity_detector.should_pause():
                     elapsed = time.monotonic() - self._last_control_time
                     decay_factor = 0.9 ** (elapsed / 60)  # 10% decay per minute
-                    self._pid_controller.decay_integral(decay_factor)
+                    if self._gains_manager is not None:
+                        self._gains_manager.decay_integral(decay_factor, PIDChangeReason.HUMIDITY_DECAY)
+                    else:
+                        self._pid_controller.decay_integral(decay_factor)
 
                 # Turn off heating
                 if self._pwm:
@@ -184,7 +187,12 @@ class ClimateControlMixin:
                                 old_ki = self._pid_controller.ki
                                 if old_ki > 0:
                                     scale_factor = old_ki / new_ki
-                                    self._pid_controller.scale_integral(scale_factor)
+                                    if self._gains_manager is not None:
+                                        self._gains_manager.scale_integral(
+                                            scale_factor, PIDChangeReason.UNDERSHOOT_BOOST
+                                        )
+                                    else:
+                                        self._pid_controller.scale_integral(scale_factor)
                                     _LOGGER.info(
                                         "%s: Scaled integral by %.3f to prevent output spike (Ki: %.5f -> %.5f)",
                                         self.entity_id,
@@ -360,7 +368,11 @@ class ClimateControlMixin:
         # This must happen BEFORE async_set_control_value for PWM calculation
         coordinator = self.hass.data.get(DOMAIN, {}).get("coordinator") if self._zone_id else None
         if coordinator:
-            transport_delay_minutes = coordinator.get_transport_delay_for_zone(self._zone_id)
+            # C03: manifold registry is keyed by entity_id (e.g. "climate.living_room"),
+            # NOT by zone slug.  Using self._zone_id (slug) previously caused a silent
+            # lookup miss so the heater controller never received the transport delay.
+            transport_delay_minutes = coordinator.get_transport_delay_for_zone(self.entity_id)
+            # Heater controller expects seconds; coordinator returns minutes.
             self._heater_controller.set_transport_delay(transport_delay_minutes * 60)
 
         await self._heater_controller.async_set_control_value(
