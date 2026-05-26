@@ -347,3 +347,202 @@ class TestFuzzInvalidInputs:
                 pass  # Expected
 
         self._assert_pid_state_clean(pid)
+
+
+# ---------------------------------------------------------------------------
+# integral setter — NaN/Inf validation (H08 gap)
+# ---------------------------------------------------------------------------
+
+
+class TestIntegralSetter:
+    """integral setter must reject NaN and Inf (they are float but not finite)."""
+
+    def test_nan_raises(self):
+        pid = _make_pid()
+        with pytest.raises(ValueError):
+            pid.integral = float("nan")
+
+    def test_pos_inf_raises(self):
+        pid = _make_pid()
+        with pytest.raises(ValueError):
+            pid.integral = float("inf")
+
+    def test_neg_inf_raises(self):
+        pid = _make_pid()
+        with pytest.raises(ValueError):
+            pid.integral = float("-inf")
+
+    def test_integral_unchanged_on_nan(self):
+        """NaN must not corrupt the stored integral."""
+        pid = _make_pid()
+        pid.integral = 5.0
+        with pytest.raises(ValueError):
+            pid.integral = float("nan")
+        assert pid.integral == pytest.approx(5.0)
+
+    def test_valid_float_accepted(self):
+        pid = _make_pid()
+        pid.integral = 12.5
+        assert pid.integral == pytest.approx(12.5)
+
+    def test_zero_accepted(self):
+        pid = _make_pid()
+        pid.integral = 0.0
+        assert pid.integral == pytest.approx(0.0)
+
+    def test_negative_valid(self):
+        """Negative integral is valid (cooling / overhang)."""
+        pid = _make_pid()
+        pid.integral = -7.3
+        assert pid.integral == pytest.approx(-7.3)
+
+    def test_non_float_raises(self):
+        """Only float type is accepted by the setter."""
+        pid = _make_pid()
+        with pytest.raises(ValueError):
+            pid.integral = 5  # int, not float  # type: ignore[assignment]
+
+
+# ---------------------------------------------------------------------------
+# PIDStateManager.set_gains — NaN/Inf validation
+# ---------------------------------------------------------------------------
+
+
+def _make_gains_manager():
+    """Create a PIDStateManager with mock PID controller."""
+    from custom_components.adaptive_climate.managers.pid_gains_manager import PIDGainsManager
+    from custom_components.adaptive_climate.const import PIDChangeReason, PIDGains
+
+    mock_pid = type("FakePID", (), {"set_pid_param": lambda _self, **_kw: None})()
+    initial_gains = PIDGains(kp=1.0, ki=0.01, kd=5.0, ke=0.0)
+    return PIDGainsManager(mock_pid, initial_gains), PIDChangeReason, PIDGains
+
+
+class TestSetGains:
+    """PIDStateManager.set_gains must reject NaN, Inf and negative values."""
+
+    def test_nan_kp_raises(self):
+        mgr, reason, _ = _make_gains_manager()
+        with pytest.raises(ValueError):
+            mgr.set_gains(reason.PHYSICS_RESET, kp=float("nan"))
+
+    def test_nan_ki_raises(self):
+        mgr, reason, _ = _make_gains_manager()
+        with pytest.raises(ValueError):
+            mgr.set_gains(reason.PHYSICS_RESET, ki=float("nan"))
+
+    def test_nan_kd_raises(self):
+        mgr, reason, _ = _make_gains_manager()
+        with pytest.raises(ValueError):
+            mgr.set_gains(reason.PHYSICS_RESET, kd=float("nan"))
+
+    def test_inf_ke_raises(self):
+        mgr, reason, _ = _make_gains_manager()
+        with pytest.raises(ValueError):
+            mgr.set_gains(reason.PHYSICS_RESET, ke=float("inf"))
+
+    def test_neg_inf_ki_raises(self):
+        mgr, reason, _ = _make_gains_manager()
+        with pytest.raises(ValueError):
+            mgr.set_gains(reason.PHYSICS_RESET, ki=float("-inf"))
+
+    def test_negative_kp_raises(self):
+        mgr, reason, _ = _make_gains_manager()
+        with pytest.raises(ValueError):
+            mgr.set_gains(reason.PHYSICS_RESET, kp=-1.0)
+
+    def test_non_numeric_raises_type_error(self):
+        mgr, reason, _ = _make_gains_manager()
+        with pytest.raises(TypeError):
+            mgr.set_gains(reason.PHYSICS_RESET, kp="bad")  # type: ignore[arg-type]
+
+    def test_gains_unchanged_on_error(self):
+        """Partial-update must not leave gains in an inconsistent state."""
+        mgr, reason, _ = _make_gains_manager()
+        orig = mgr.get_gains()
+        with pytest.raises(ValueError):
+            mgr.set_gains(reason.PHYSICS_RESET, kp=float("nan"), ki=0.05)
+        after = mgr.get_gains()
+        # kp and ki should both be unchanged
+        assert after.kp == orig.kp
+        assert after.ki == orig.ki
+
+    def test_valid_gains_accepted(self):
+        mgr, reason, _ = _make_gains_manager()
+        mgr.set_gains(reason.PHYSICS_RESET, kp=2.0, ki=0.02, kd=8.0)
+        gains = mgr.get_gains()
+        assert gains.kp == pytest.approx(2.0)
+        assert gains.ki == pytest.approx(0.02)
+
+
+# ---------------------------------------------------------------------------
+# Parametrized harness — one test across all entry points × invalid values
+# ---------------------------------------------------------------------------
+
+_NAN = float("nan")
+_INF = float("inf")
+_NEG_INF = float("-inf")
+
+_INVALID_CASES = [
+    pytest.param(_NAN, id="nan"),
+    pytest.param(_INF, id="pos_inf"),
+    pytest.param(_NEG_INF, id="neg_inf"),
+    pytest.param(-1.0, id="negative"),
+    pytest.param(-0.001, id="small_negative"),
+]
+
+
+class TestParametrizedInvalidInputs:
+    """Parametrized: all entry points must reject each class of invalid float."""
+
+    @pytest.mark.parametrize("bad_val", _INVALID_CASES)
+    def test_set_pid_param_kp_rejects(self, bad_val):
+        pid = _make_pid()
+        with pytest.raises((TypeError, ValueError)):
+            pid.set_pid_param(kp=bad_val)
+
+    @pytest.mark.parametrize("bad_val", _INVALID_CASES)
+    def test_set_pid_param_ki_rejects(self, bad_val):
+        pid = _make_pid()
+        with pytest.raises((TypeError, ValueError)):
+            pid.set_pid_param(ki=bad_val)
+
+    @pytest.mark.parametrize("bad_val", _INVALID_CASES)
+    def test_set_feedforward_rejects(self, bad_val):
+        pid = _make_pid()
+        with pytest.raises((TypeError, ValueError)):
+            pid.set_feedforward(bad_val)
+
+    @pytest.mark.parametrize(
+        "bad_val",
+        [
+            pytest.param(_NAN, id="nan"),
+            pytest.param(_INF, id="pos_inf"),
+            pytest.param(_NEG_INF, id="neg_inf"),
+        ],
+    )
+    def test_integral_setter_rejects_non_finite(self, bad_val):
+        pid = _make_pid()
+        with pytest.raises(ValueError):
+            pid.integral = bad_val
+
+    @pytest.mark.parametrize(
+        "bad_val",
+        [
+            pytest.param(_NAN, id="nan"),
+            pytest.param(_INF, id="pos_inf"),
+            pytest.param(_NEG_INF, id="neg_inf"),
+        ],
+    )
+    def test_scale_integral_rejects_non_finite(self, bad_val):
+        pid = _make_pid()
+        pid.integral = 5.0
+        with pytest.raises(ValueError):
+            pid.scale_integral(bad_val)
+
+    @pytest.mark.parametrize("bad_val", [pytest.param(_NAN, id="nan")])
+    def test_decay_integral_rejects_nan(self, bad_val):
+        pid = _make_pid()
+        pid.integral = 5.0
+        with pytest.raises(ValueError):
+            pid.decay_integral(bad_val)

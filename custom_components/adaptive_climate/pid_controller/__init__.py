@@ -198,6 +198,8 @@ class PID:
     def integral(self, i):
         if not isinstance(i, float):
             raise ValueError(f"Integral should be a float, got {type(i).__name__}")
+        if not math.isfinite(i):
+            raise ValueError(f"Integral must be finite, got {i}")
         self._integral = i
 
     @property
