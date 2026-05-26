@@ -97,8 +97,11 @@ class PIDStateManager:
     def _gains_match_last_entry(self, gains: PIDGains, mode: HVACMode) -> bool:
         """Check if gains match the last history entry.
 
-        Used to avoid duplicate RESTORE entries when gains unchanged.
-        Rounds to 2 decimal places to match HA state serialization precision.
+        Used to avoid duplicate RESTORE entries when gains are truly unchanged.
+        Uses tight epsilon (1e-9) so that small-but-real learning adjustments
+        (e.g. ki: 0.010 → 0.011) are always recorded.  JSON serialisation
+        preserves full float precision, so exact equality is safe for the
+        RESTORE dedup use case.
         """
         mode_key = self._mode_key(mode)
         history = self._pid_history.get(mode_key, [])
@@ -106,15 +109,12 @@ class PIDStateManager:
             return False
         last = history[-1]
 
-        # Round to 2 decimals to match HA state serialization
-        def r2(x: float) -> float:
-            return round(x, 2)
-
+        _EPS = 1e-9
         return (
-            r2(gains.kp) == r2(last.get("kp", 0.0))
-            and r2(gains.ki) == r2(last.get("ki", 0.0))
-            and r2(gains.kd) == r2(last.get("kd", 0.0))
-            and r2(gains.ke) == r2(last.get("ke", 0.0))
+            abs(gains.kp - last.get("kp", 0.0)) < _EPS
+            and abs(gains.ki - last.get("ki", 0.0)) < _EPS
+            and abs(gains.kd - last.get("kd", 0.0)) < _EPS
+            and abs(gains.ke - last.get("ke", 0.0)) < _EPS
         )
 
     def set_gains(

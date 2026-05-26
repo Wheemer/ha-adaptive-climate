@@ -1710,3 +1710,65 @@ class TestCoolingGainsRestore:
         # Should remain at initial values since no history entry to restore from
         assert cooling_gains.kp == pytest.approx(initial_cooling_gains.kp)
         assert cooling_gains.ki == pytest.approx(initial_cooling_gains.ki)
+
+
+class TestSmallGainChangesRecorded:
+    """M09: gain changes < 0.005 must appear in history.
+
+    Bug: ``_gains_match_last_entry`` rounds to 2 decimal places before comparing.
+    A change from kp=1.200 to kp=1.204 rounds to the same value and is silently
+    dropped — the gains ARE applied to the PID controller but the history entry is
+    never written, so the audit trail is incomplete.
+
+    Fix: use tight epsilon comparison (≤ 1e-9) instead of 2-decimal rounding.
+    The RESTORE dedup use case works because the restored float equals the stored
+    float exactly (JSON preserves full precision).
+    """
+
+    def test_small_ki_change_recorded_in_history(self, manager):
+        """M09: ki change of 0.001 must appear in history (< 0.005, rounds away with r2)."""
+        # Establish a baseline in history
+        manager.set_gains(PIDChangeReason.PHYSICS_INIT, kp=1.0, ki=0.010, kd=10.0, ke=0.0)
+        initial_len = len(manager.get_history(HVACMode.HEAT))
+
+        # 0.001 change — both values round to 0.01 with 2-decimal rounding
+        manager.set_gains(PIDChangeReason.ADAPTIVE_APPLY, ki=0.011)
+
+        history = manager.get_history(HVACMode.HEAT)
+        assert len(history) == initial_len + 1, (
+            f"M09: ki change 0.010 → 0.011 (delta 0.001) must create a new history entry. "
+            f"Got {len(history)} entries (was {initial_len}). "
+            "2-decimal rounding in _gains_match_last_entry silently drops this change."
+        )
+        assert history[-1]["ki"] == pytest.approx(0.011)
+
+    def test_small_kp_change_recorded_in_history(self, manager):
+        """M09: kp change of 0.004 must appear in history."""
+        manager.set_gains(PIDChangeReason.PHYSICS_INIT, kp=1.200, ki=0.01, kd=10.0, ke=0.0)
+        initial_len = len(manager.get_history(HVACMode.HEAT))
+
+        # 0.004 change — both round to 1.20 with 2-decimal rounding
+        manager.set_gains(PIDChangeReason.ADAPTIVE_APPLY, kp=1.204)
+
+        history = manager.get_history(HVACMode.HEAT)
+        assert len(history) == initial_len + 1, (
+            f"M09: kp change 1.200 → 1.204 (delta 0.004) must create a new history entry. "
+            f"Got {len(history)} entries (was {initial_len}). "
+            "2-decimal rounding in _gains_match_last_entry drops this change silently."
+        )
+        assert history[-1]["kp"] == pytest.approx(1.204)
+
+    def test_restore_dedup_still_works_with_epsilon_comparison(self, manager):
+        """M09 regression: exact duplicates (restore scenario) are still deduplicated."""
+        # Set gains then restore identical values
+        manager.set_gains(PIDChangeReason.PHYSICS_INIT, kp=1.5, ki=0.015, kd=12.0, ke=0.5)
+        initial_len = len(manager.get_history(HVACMode.HEAT))
+
+        # Setting the same values should NOT add a new history entry
+        manager.set_gains(PIDChangeReason.RESTORE, kp=1.5, ki=0.015, kd=12.0, ke=0.5)
+
+        history = manager.get_history(HVACMode.HEAT)
+        assert len(history) == initial_len, (
+            "M09 regression: exact-duplicate gains must still be deduplicated "
+            "(RESTORE after unchanged state should not add an entry)."
+        )
