@@ -17,6 +17,7 @@ from homeassistant.util import dt as dt_util
 if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
     from ..adaptive.learning import AdaptiveLearner
+    from .ke_manager import KeManager
     from .events import (
         CycleEventDispatcher,
         CycleStartedEvent,
@@ -72,6 +73,7 @@ class CycleTrackerManager:
         dispatcher: CycleEventDispatcher | None = None,
         heating_type: str | None = None,
         valve_actuation_time: float = 0.0,
+        ke_manager: KeManager | None = None,
     ) -> None:
         """Initialize the cycle tracker manager.
 
@@ -92,6 +94,7 @@ class CycleTrackerManager:
             dispatcher: Optional CycleEventDispatcher for event-driven operation
             heating_type: Heating system type (for cold_tolerance lookup)
             valve_actuation_time: Valve actuation time in seconds (default: 0.0)
+            ke_manager: KeManager instance for persisting Ke observations (M07).
         """
         from ..const import (
             SETTLING_TIMEOUT_MULTIPLIER,
@@ -201,6 +204,7 @@ class CycleTrackerManager:
             cold_tolerance=cold_tolerance,
             heating_type=heating_type,
             valve_actuation_time=valve_actuation_time,
+            ke_manager=ke_manager,
         )
 
         # Subscribe to events if dispatcher provided

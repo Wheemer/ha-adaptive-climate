@@ -2004,6 +2004,7 @@ class TestCycleTrackerFinalizeSave:
         mock_learning_store.update_zone_data.assert_called_once_with(
             zone_id="test_zone",
             adaptive_data=expected_adaptive_data,
+            ke_data=None,  # M07: ke_data=None when no ke_manager passed
         )
 
     @pytest.mark.asyncio

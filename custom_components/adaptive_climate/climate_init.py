@@ -362,6 +362,7 @@ async def async_setup_managers(thermostat: AdaptiveThermostat) -> None:
                     on_auto_apply_check=thermostat._check_auto_apply_pid,
                     dispatcher=thermostat._cycle_dispatcher,
                     heating_type=thermostat._heating_type,
+                    ke_manager=thermostat._ke_controller,  # M07: persist Ke observations
                 )
                 # Add cycle_tracker to zone_data for state_attributes access
                 zone_data["cycle_tracker"] = thermostat._cycle_tracker

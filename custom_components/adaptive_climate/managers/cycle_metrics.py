@@ -609,10 +609,12 @@ class CycleMetricsRecorder:
             committed_overshoot=committed_overshoot_val,
         )
 
-        # Record metrics with adaptive learner
-        self._adaptive_learner.add_cycle_metrics(metrics)
+        # Record metrics with adaptive learner (H08: pass mode to track cooling separately)
+        # Use captured cycle_mode ("heat"/"cool") not metrics.mode ("heating"/"cooling")
+        hvac_mode = self._cycle_mode or self._get_hvac_mode()
+        self._adaptive_learner.add_cycle_metrics(metrics, mode=hvac_mode)
         self._adaptive_learner.update_convergence_tracking(metrics)
-        self._adaptive_learner.update_convergence_confidence(metrics)
+        self._adaptive_learner.update_convergence_confidence(metrics, mode=hvac_mode)
 
         # Check if we're in validation mode and handle validation
         if self._adaptive_learner.is_in_validation_mode():
@@ -663,6 +665,21 @@ class CycleMetricsRecorder:
             if cycle_start_time is not None:
                 duration_minutes = (dt_util.utcnow() - cycle_start_time).total_seconds() / 60
 
+            # Compute heater duty fraction (on_time / cycle_duration) for heating-rate
+            # session tracking (H09: previously omitted so update_session() was never called).
+            effective_duty: float | None = None
+            if (
+                self._device_on_time is not None
+                and self._device_off_time is not None
+                and cycle_start_time is not None
+                and len(temperature_history) > 0
+            ):
+                cycle_end_time = temperature_history[-1][0]
+                cycle_duration_s = (cycle_end_time - cycle_start_time).total_seconds()
+                heater_on_s = (self._device_off_time - self._device_on_time).total_seconds()
+                if cycle_duration_s > 0:
+                    effective_duty = max(0.0, min(1.0, heater_on_s / cycle_duration_s))
+
             # Create metrics dict from the CycleMetrics object
             metrics_dict = {
                 "overshoot": metrics.overshoot,
@@ -676,6 +693,7 @@ class CycleMetricsRecorder:
                 "end_temp": end_temp,
                 "duration_minutes": duration_minutes,
                 "interrupted": metrics.was_interrupted,
+                "duty": effective_duty,
             }
 
             cycle_ended_event = CycleEndedEvent(

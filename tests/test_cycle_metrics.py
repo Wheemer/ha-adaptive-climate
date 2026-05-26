@@ -479,6 +479,101 @@ class TestStartingDeltaCalculation:
         assert cycle_metrics.starting_delta == -2.0
 
 
+class TestCoolingCycleLearnerMode:
+    """H08: add_cycle_metrics / update_convergence_confidence must receive mode kwarg."""
+
+    def test_cooling_cycle_passes_cool_mode_to_learner(self, mock_hass, mock_adaptive_learner, mock_callbacks):
+        """H08: a COOL cycle must pass mode='cool' to add_cycle_metrics, not default to HEAT."""
+        mock_callbacks["get_hvac_mode"].return_value = "cool"
+
+        recorder = CycleMetricsRecorder(
+            hass=mock_hass,
+            zone_id="test_h08_cooling",
+            adaptive_learner=mock_adaptive_learner,
+            get_target_temp=mock_callbacks["get_target_temp"],
+            get_current_temp=mock_callbacks["get_current_temp"],
+            get_hvac_mode=mock_callbacks["get_hvac_mode"],
+            get_in_grace_period=mock_callbacks["get_in_grace_period"],
+            min_cycle_duration_minutes=5,
+            heating_type=HeatingType.FORCED_AIR,
+        )
+
+        # Capture cycle mode at start (simulates CycleTracker calling set_cycle_mode)
+        recorder.set_cycle_mode("cool")
+
+        start_time = datetime(2025, 1, 15, 10, 0, 0, tzinfo=timezone.utc)
+        # Need >= 5 samples to pass _is_cycle_valid
+        temperature_history = [
+            (datetime(2025, 1, 15, 10, 0, 0, tzinfo=timezone.utc), 22.0),
+            (datetime(2025, 1, 15, 10, 5, 0, tzinfo=timezone.utc), 21.5),
+            (datetime(2025, 1, 15, 10, 10, 0, tzinfo=timezone.utc), 21.0),
+            (datetime(2025, 1, 15, 10, 15, 0, tzinfo=timezone.utc), 20.5),
+            (datetime(2025, 1, 15, 10, 20, 0, tzinfo=timezone.utc), 20.0),
+        ]
+
+        recorder.record_cycle_metrics(
+            cycle_start_time=start_time,
+            cycle_target_temp=20.0,
+            cycle_state_value="cooling",
+            temperature_history=temperature_history,
+            outdoor_temp_history=[],
+        )
+
+        # add_cycle_metrics must be called with mode="cool" (not None / defaulting to HEAT)
+        assert mock_adaptive_learner.add_cycle_metrics.call_count == 1
+        add_call = mock_adaptive_learner.add_cycle_metrics.call_args
+        assert add_call[1].get("mode") == "cool", (
+            f"Expected mode='cool', got mode={add_call[1].get('mode')!r}. "
+            "Cooling cycles were defaulting to HEAT because mode kwarg was omitted."
+        )
+
+        # update_convergence_confidence must also receive mode="cool"
+        assert mock_adaptive_learner.update_convergence_confidence.call_count == 1
+        conf_call = mock_adaptive_learner.update_convergence_confidence.call_args
+        assert conf_call[1].get("mode") == "cool"
+
+    def test_heating_cycle_passes_heat_mode_to_learner(self, mock_hass, mock_adaptive_learner, mock_callbacks):
+        """H08 regression: heating cycles still pass mode='heat' (not None)."""
+        mock_callbacks["get_hvac_mode"].return_value = "heat"
+
+        recorder = CycleMetricsRecorder(
+            hass=mock_hass,
+            zone_id="test_h08_heating",
+            adaptive_learner=mock_adaptive_learner,
+            get_target_temp=mock_callbacks["get_target_temp"],
+            get_current_temp=mock_callbacks["get_current_temp"],
+            get_hvac_mode=mock_callbacks["get_hvac_mode"],
+            get_in_grace_period=mock_callbacks["get_in_grace_period"],
+            min_cycle_duration_minutes=5,
+            heating_type=HeatingType.CONVECTOR,
+        )
+
+        recorder.set_cycle_mode("heat")
+
+        start_time = datetime(2025, 1, 15, 10, 0, 0, tzinfo=timezone.utc)
+        # Need 5+ samples for valid cycle
+        temperature_history = [
+            (datetime(2025, 1, 15, 10, 0, 0, tzinfo=timezone.utc), 18.0),
+            (datetime(2025, 1, 15, 10, 5, 0, tzinfo=timezone.utc), 18.5),
+            (datetime(2025, 1, 15, 10, 10, 0, tzinfo=timezone.utc), 19.0),
+            (datetime(2025, 1, 15, 10, 15, 0, tzinfo=timezone.utc), 19.5),
+            (datetime(2025, 1, 15, 10, 20, 0, tzinfo=timezone.utc), 20.0),
+            (datetime(2025, 1, 15, 10, 25, 0, tzinfo=timezone.utc), 20.0),
+        ]
+
+        recorder.record_cycle_metrics(
+            cycle_start_time=start_time,
+            cycle_target_temp=20.0,
+            cycle_state_value="settling",
+            temperature_history=temperature_history,
+            outdoor_temp_history=[],
+        )
+
+        add_call = mock_adaptive_learner.add_cycle_metrics.call_args
+        assert add_call is not None, "add_cycle_metrics was not called (cycle may have been invalid)"
+        assert add_call[1].get("mode") == "heat"
+
+
 class TestCycleEndedEventOrdering:
     """Test that CYCLE_ENDED event is emitted before learning save is scheduled (M08)."""
 
@@ -507,12 +602,16 @@ class TestCycleEndedEventOrdering:
         dispatcher = CycleEventDispatcher()
         dispatcher.subscribe(
             CycleEventType.CYCLE_ENDED,
-            lambda _event: call_order.append("emit"),
+            lambda _: call_order.append("emit"),
         )
 
         # Set up mock learning store whose update_zone_data records when save fires
+        def _record_save(*args: object, **kwargs: object) -> None:
+            del args, kwargs  # intentionally unused — side_effect just logs to call_order
+            call_order.append("save")
+
         mock_learning_store = MagicMock()
-        mock_learning_store.update_zone_data = MagicMock(side_effect=lambda **_kwargs: call_order.append("save"))
+        mock_learning_store.update_zone_data = MagicMock(side_effect=_record_save)
         mock_learning_store.schedule_zone_save = MagicMock()
 
         # Wire hass.data so _schedule_learning_save finds the store
@@ -552,6 +651,122 @@ class TestCycleEndedEventOrdering:
         assert emit_idx < save_idx, (
             f"Expected emit (idx={emit_idx}) before save (idx={save_idx}), got call order: {call_order}"
         )
+
+
+class TestCycleEndedEventDuty:
+    """H09 regression: CYCLE_ENDED metrics_dict must include 'duty' field.
+
+    Root cause: the metrics_dict built for CycleEndedEvent omitted 'duty', so
+    _handle_cycle_ended_for_heating_rate() always got duty=None and never called
+    heating_rate_learner.update_session().
+    """
+
+    def _make_recorder_with_dispatcher(self, mock_hass, mock_adaptive_learner, mock_callbacks):
+        """Create a CycleMetricsRecorder wired to a real CycleEventDispatcher."""
+        from custom_components.adaptive_climate.managers.events import CycleEventDispatcher
+
+        dispatcher = CycleEventDispatcher()
+        recorder = CycleMetricsRecorder(
+            hass=mock_hass,
+            zone_id="test_duty",
+            adaptive_learner=mock_adaptive_learner,
+            get_target_temp=mock_callbacks["get_target_temp"],
+            get_current_temp=mock_callbacks["get_current_temp"],
+            get_hvac_mode=mock_callbacks["get_hvac_mode"],
+            get_in_grace_period=mock_callbacks["get_in_grace_period"],
+            min_cycle_duration_minutes=5,
+            heating_type=HeatingType.CONVECTOR,
+            dispatcher=dispatcher,
+        )
+        return recorder, dispatcher
+
+    def _make_temperature_history(self, cycle_start: datetime) -> list:
+        from datetime import timedelta
+
+        return [
+            (cycle_start + timedelta(minutes=i * 5), 18.0 + i * 0.4)
+            for i in range(6)  # 25-minute cycle, ends at 20°C
+        ]
+
+    def test_cycle_ended_event_contains_duty_field(self, mock_hass, mock_adaptive_learner, mock_callbacks):
+        """CYCLE_ENDED event metrics must include 'duty' key."""
+        from custom_components.adaptive_climate.managers.events import CycleEventType
+
+        recorder, dispatcher = self._make_recorder_with_dispatcher(mock_hass, mock_adaptive_learner, mock_callbacks)
+
+        # Simulate heater on for 10 of the 25-minute cycle
+        cycle_start = datetime(2025, 1, 15, 10, 0, 0, tzinfo=timezone.utc)
+        from datetime import timedelta
+
+        recorder.set_device_on_time(cycle_start)
+        recorder.set_device_off_time(cycle_start + timedelta(minutes=10))
+
+        emitted_events: list = []
+        dispatcher.subscribe(CycleEventType.CYCLE_ENDED, emitted_events.append)
+
+        recorder.record_cycle_metrics(
+            cycle_start_time=cycle_start,
+            cycle_target_temp=20.0,
+            cycle_state_value="settling",
+            temperature_history=self._make_temperature_history(cycle_start),
+            outdoor_temp_history=[],
+        )
+
+        assert len(emitted_events) == 1, "Expected one CYCLE_ENDED event"
+        event = emitted_events[0]
+        assert "duty" in event.metrics, (
+            f"CYCLE_ENDED metrics must contain 'duty'. Got keys: {list(event.metrics.keys())}"
+        )
+
+    def test_cycle_ended_duty_is_fraction(self, mock_hass, mock_adaptive_learner, mock_callbacks):
+        """CYCLE_ENDED duty must be a float in [0, 1]."""
+        from custom_components.adaptive_climate.managers.events import CycleEventType
+        from datetime import timedelta
+
+        recorder, dispatcher = self._make_recorder_with_dispatcher(mock_hass, mock_adaptive_learner, mock_callbacks)
+
+        cycle_start = datetime(2025, 1, 15, 10, 0, 0, tzinfo=timezone.utc)
+        # Heater on for 10 min of a 25-min cycle → duty ≈ 0.4
+        recorder.set_device_on_time(cycle_start)
+        recorder.set_device_off_time(cycle_start + timedelta(minutes=10))
+
+        captured: list = []
+        dispatcher.subscribe(CycleEventType.CYCLE_ENDED, captured.append)
+
+        recorder.record_cycle_metrics(
+            cycle_start_time=cycle_start,
+            cycle_target_temp=20.0,
+            cycle_state_value="settling",
+            temperature_history=self._make_temperature_history(cycle_start),
+            outdoor_temp_history=[],
+        )
+
+        duty = captured[0].metrics.get("duty")
+        assert duty is not None
+        assert 0.0 <= duty <= 1.0, f"duty must be in [0, 1], got {duty}"
+
+    def test_cycle_ended_duty_none_when_no_device_times(self, mock_hass, mock_adaptive_learner, mock_callbacks):
+        """When device on/off times are not set, duty should be None (not crash)."""
+        from custom_components.adaptive_climate.managers.events import CycleEventType
+
+        recorder, dispatcher = self._make_recorder_with_dispatcher(mock_hass, mock_adaptive_learner, mock_callbacks)
+        # No set_device_on_time / set_device_off_time calls
+
+        cycle_start = datetime(2025, 1, 15, 10, 0, 0, tzinfo=timezone.utc)
+        captured: list = []
+        dispatcher.subscribe(CycleEventType.CYCLE_ENDED, captured.append)
+
+        recorder.record_cycle_metrics(
+            cycle_start_time=cycle_start,
+            cycle_target_temp=20.0,
+            cycle_state_value="settling",
+            temperature_history=self._make_temperature_history(cycle_start),
+            outdoor_temp_history=[],
+        )
+
+        # Event was still emitted, duty is None (acceptable fallback)
+        assert len(captured) == 1
+        assert "duty" in captured[0].metrics
 
 
 class TestKeDataPersistedWithCycleSave:

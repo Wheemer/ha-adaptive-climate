@@ -102,6 +102,16 @@ class KeManager:
         """
         self._ke_learner = ke_learner
 
+    def get_learner_dict(self) -> dict | None:
+        """Return the KeLearner serialized dict, or None if no learner is set.
+
+        Used by CycleMetricsRecorder to include ke_data in the periodic
+        learning save so Ke observations survive restarts (M07).
+        """
+        if self._ke_learner is None:
+            return None
+        return self._ke_learner.to_dict()
+
     # ------------------------------------------------------------------
     # Core logic
     # ------------------------------------------------------------------
