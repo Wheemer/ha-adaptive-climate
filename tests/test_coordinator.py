@@ -63,6 +63,15 @@ mock_managers.events = _events_mod
 sys.modules["managers"] = mock_managers
 sys.modules["managers.auto_mode_switching"] = Mock()
 
+# Evict coordinator (and central_controller) from sys.modules so that the
+# subsequent `import coordinator` performs a FRESH import.  If
+# test_central_controller.py ran first it will have cached a coordinator
+# module whose globals are bound to the MOCK managers.events classes.
+# Removing the cached entries forces re-execution of coordinator.py, which
+# will now pick up the real managers.events module we installed above.
+for _stale_mod in ("coordinator", "central_controller"):
+    sys.modules.pop(_stale_mod, None)
+
 
 # Create mock base class
 class MockDataUpdateCoordinator:
