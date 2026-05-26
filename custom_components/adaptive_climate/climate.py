@@ -179,6 +179,15 @@ class AdaptiveThermostat(
             self._attr_hvac_modes = [HVACMode.HEAT, HVACMode.OFF]
             self._min_out = self._output_clamp_low
             self._max_out = self._output_clamp_high
+        # Adjust limits based on initial_hvac_mode (not just ac_mode).
+        # An AC-capable zone starting in HEAT mode must get heating limits [0, 100],
+        # not the cooling defaults [-100, 0] set by the ac_mode block above.
+        if self._hvac_mode == HVACMode.HEAT:
+            self._min_out = self._output_clamp_low
+            self._max_out = self._output_clamp_high
+        elif self._hvac_mode == HVACMode.COOL:
+            self._min_out = -self._output_clamp_high
+            self._max_out = -self._output_clamp_low
         # Zone properties for physics-based initialization
         self._zone_id = config.zone_id
         self._heating_type = config.heating_type or const.HeatingType.FLOOR_HYDRONIC

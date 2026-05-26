@@ -740,6 +740,77 @@ class TestNightSetback:
 
 
 # ==============================================================================
+# H03 Regression: AC zone initial_hvac_mode output limits
+# ==============================================================================
+
+
+def _make_ac_thermostat(hvac_mode, ac_mode=True):
+    """Helper: instantiate a real AdaptiveThermostat with an active event loop.
+
+    asyncio.Lock() in Python 3.9 binds to the running/current event loop at
+    creation time. Some tests in the suite call asyncio.run() which closes that
+    loop. We set a fresh loop before each construction so the Lock() succeeds
+    regardless of suite ordering.
+    """
+    import asyncio
+    from custom_components.adaptive_climate.climate import AdaptiveThermostat
+    from custom_components.adaptive_climate.thermostat_config import AdaptiveThermostatConfig
+
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        config = AdaptiveThermostatConfig(
+            name="test_ac",
+            unit="°C",
+            sensor_entity_id="sensor.temp",
+            heater_entity_id=["switch.heater"],
+            cooler_entity_id=["switch.cooler"] if ac_mode else None,
+            ac_mode=ac_mode,
+            initial_hvac_mode=hvac_mode,
+        )
+        return AdaptiveThermostat(config)
+    finally:
+        loop.close()
+
+
+class TestACModeInitLimits:
+    """Regression tests for H03: AC zones with initial_hvac_mode=heat must get
+    heating output limits [0, 100], not cooling limits [-100, 0].
+
+    Root cause: _min_out/_max_out were set based on _ac_mode (whether a cooler
+    exists) instead of _hvac_mode (current mode). Fix adds a mode-specific
+    override after the ac_mode block in __init__.
+    """
+
+    def test_ac_zone_initial_heat_mode_gets_positive_limits(self):
+        """AC-capable zone with initial_hvac_mode=heat must have _min_out >= 0 and _max_out > 0."""
+        from homeassistant.components.climate import HVACMode
+
+        thermostat = _make_ac_thermostat(HVACMode.HEAT, ac_mode=True)
+
+        assert thermostat._min_out >= 0, f"AC zone in heat mode must have _min_out >= 0, got {thermostat._min_out}"
+        assert thermostat._max_out > 0, f"AC zone in heat mode must have _max_out > 0, got {thermostat._max_out}"
+
+    def test_ac_zone_initial_cool_mode_gets_negative_limits(self):
+        """AC-capable zone with initial_hvac_mode=cool must have _max_out <= 0 and _min_out < 0."""
+        from homeassistant.components.climate import HVACMode
+
+        thermostat = _make_ac_thermostat(HVACMode.COOL, ac_mode=True)
+
+        assert thermostat._min_out < 0, f"AC zone in cool mode must have _min_out < 0, got {thermostat._min_out}"
+        assert thermostat._max_out <= 0, f"AC zone in cool mode must have _max_out <= 0, got {thermostat._max_out}"
+
+    def test_heat_only_zone_unaffected(self):
+        """Heat-only zone (no ac_mode) retains positive heating limits regardless."""
+        from homeassistant.components.climate import HVACMode
+
+        thermostat = _make_ac_thermostat(HVACMode.HEAT, ac_mode=False)
+
+        assert thermostat._min_out >= 0
+        assert thermostat._max_out > 0
+
+
+# ==============================================================================
 # Module Existence Tests
 # ==============================================================================
 
