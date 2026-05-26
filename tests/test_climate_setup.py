@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 from datetime import timedelta
-from unittest.mock import Mock, AsyncMock, patch
+from unittest.mock import patch
 import voluptuous as vol
 
 from custom_components.adaptive_climate.climate_setup import (
@@ -12,9 +12,7 @@ from custom_components.adaptive_climate.climate_setup import (
     _resolve_pwm,
 )
 from custom_components.adaptive_climate.const import (
-    CONF_VALVE_ACTUATION_TIME,
     CONF_HEATER,
-    CONF_COOLER,
     CONF_PWM,
     HEATING_TYPE_FLOOR_HYDRONIC,
     HEATING_TYPE_RADIATOR,
