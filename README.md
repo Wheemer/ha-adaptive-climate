@@ -289,7 +289,6 @@ Tracks on→off cycles and fires maintenance alerts at 80% and 90% wear. [Learn 
 
 ### Domain Services
 - `adaptive_climate.weekly_report` - Generate performance report
-- `adaptive_climate.cost_report` - Energy cost analysis (daily/weekly/monthly)
 - `adaptive_climate.set_vacation_mode` - Enable frost protection mode
 - `adaptive_climate.run_learning` - Trigger learning analysis (debug only)
 - `adaptive_climate.pid_recommendations` - Preview recommended PID values (debug only)
