@@ -590,15 +590,8 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
             hass.data[DOMAIN]["manifold_registry"] = manifold_registry
             _LOGGER.info("Manifold registry enabled with %d manifolds", len(manifolds))
 
-            # Restore manifold state from storage if available
-            # Note: LearningDataStore is created later in climate_setup.py
-            # We'll check for it and restore state if it exists
-            learning_store = hass.data.get(DOMAIN, {}).get("learning_store")
-            if learning_store:
-                manifold_state = await learning_store.async_load_manifold_state()
-                if manifold_state:
-                    manifold_registry.restore_state(manifold_state)
-                    _LOGGER.info("Restored manifold state for %d manifolds", len(manifold_state))
+            # Note: manifold state is restored in climate_setup.py after
+            # LearningDataStore is created (they run in the correct order there).
         except (ValueError, ImportError) as e:
             _LOGGER.error("Failed to initialize manifold registry: %s", e)
             # Don't fail setup, just disable manifold registry

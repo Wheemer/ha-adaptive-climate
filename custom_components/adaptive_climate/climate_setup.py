@@ -237,6 +237,16 @@ async def async_setup_platform(hass: HomeAssistant, config: ConfigType, async_ad
         await learning_store.async_load()
         hass.data[DOMAIN]["learning_store"] = learning_store
         _LOGGER.info("Created LearningDataStore singleton")
+
+        # M01: Restore manifold state now that the store exists.
+        # The manifold_registry is created in async_setup() (__init__.py) before
+        # climate_setup runs, so the store wasn't available yet during domain setup.
+        manifold_registry = hass.data[DOMAIN].get("manifold_registry")
+        if manifold_registry:
+            manifold_state = await learning_store.async_load_manifold_state()
+            if manifold_state:
+                manifold_registry.restore_state(manifold_state)
+                _LOGGER.info("Restored manifold state for %d manifolds", len(manifold_state))
     else:
         learning_store = hass.data[DOMAIN]["learning_store"]
 
