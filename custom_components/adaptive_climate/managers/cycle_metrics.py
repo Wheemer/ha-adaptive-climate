@@ -14,6 +14,7 @@ if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
     from ..adaptive.learning import AdaptiveLearner
     from .events import CycleEventDispatcher
+    from .ke_manager import KeManager
 
 from homeassistant.util import dt as dt_util
 
@@ -48,6 +49,7 @@ class CycleMetricsRecorder:
         cold_tolerance: float | None = None,
         heating_type: str | None = None,
         valve_actuation_time: float = 0.0,
+        ke_manager: KeManager | None = None,
     ) -> None:
         """Initialize the cycle metrics recorder.
 
@@ -83,6 +85,7 @@ class CycleMetricsRecorder:
         self._cold_tolerance = cold_tolerance
         self._heating_type = heating_type
         self._valve_actuation_time = valve_actuation_time
+        self._ke_manager = ke_manager  # M07: include ke_data in periodic saves
 
         # Metrics tracking state
         self._interruption_history: list[tuple[datetime, str]] = []
@@ -374,11 +377,13 @@ class CycleMetricsRecorder:
             self._logger.debug("No learning store available, skipping save")
             return
 
-        # Update zone data in memory with current adaptive learner state
+        # Update zone data in memory with current adaptive learner and Ke state
         adaptive_data = self._adaptive_learner.to_dict()
+        ke_data = self._ke_manager.get_learner_dict() if self._ke_manager else None
         learning_store.update_zone_data(
             zone_id=self._zone_id,
             adaptive_data=adaptive_data,
+            ke_data=ke_data,
         )
 
         # Schedule debounced save (30s delay)
@@ -645,10 +650,8 @@ class CycleMetricsRecorder:
         if self._on_auto_apply_check is not None and not self._adaptive_learner.is_in_validation_mode():
             self._hass.async_create_background_task(self._on_auto_apply_check(), "adaptive_climate_auto_apply_check")
 
-        # Schedule debounced save of learning data
-        self._schedule_learning_save()
-
-        # Emit CYCLE_ENDED event if dispatcher is configured
+        # Emit CYCLE_ENDED event FIRST so handlers (e.g. heating-rate updaters) can
+        # mutate the learner before the save snapshot is taken (M08).
         if self._dispatcher is not None:
             from .events import CycleEndedEvent
 
@@ -681,6 +684,9 @@ class CycleMetricsRecorder:
                 metrics=metrics_dict,
             )
             self._dispatcher.emit(cycle_ended_event)
+
+        # Schedule debounced save AFTER emit so handler mutations are captured
+        self._schedule_learning_save()
 
         # Store end_temp for next cycle's inter_cycle_drift calculation
         if end_temp is not None:

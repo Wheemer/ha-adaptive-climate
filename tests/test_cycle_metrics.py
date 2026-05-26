@@ -247,7 +247,6 @@ class TestRiseTimeThreshold:
         # Create temperature history reaching target within 0.5°C (but not 0.05°C)
         cycle_start = datetime(2025, 1, 15, 10, 0, 0, tzinfo=timezone.utc)
         target_temp = 20.0
-        start_temp = 18.0
 
         temperature_history = [
             (cycle_start, 18.0),
@@ -478,3 +477,178 @@ class TestStartingDeltaCalculation:
 
         # Verify starting_delta is calculated correctly (target - actual = negative for cooling)
         assert cycle_metrics.starting_delta == -2.0
+
+
+class TestCycleEndedEventOrdering:
+    """Test that CYCLE_ENDED event is emitted before learning save is scheduled (M08)."""
+
+    def test_emit_before_save_scheduling(self, mock_hass, mock_adaptive_learner, mock_callbacks):
+        """CYCLE_ENDED event must be emitted BEFORE _schedule_learning_save is called.
+
+        Handlers that mutate the learner (e.g., heating-rate updaters) subscribe to
+        CYCLE_ENDED and fire synchronously during emit().  If save is scheduled first,
+        the snapshot is taken before those mutations, so learner state is saved stale.
+
+        Fix: emit first, then schedule save.
+        """
+        from datetime import timedelta
+        from unittest.mock import MagicMock
+
+        from custom_components.adaptive_climate.const import DOMAIN
+        from custom_components.adaptive_climate.managers.events import (
+            CycleEventDispatcher,
+            CycleEventType,
+        )
+
+        # Track call order using a shared list mutated by side-effects
+        call_order: list[str] = []
+
+        # Set up dispatcher with a subscriber that records when emit fires
+        dispatcher = CycleEventDispatcher()
+        dispatcher.subscribe(
+            CycleEventType.CYCLE_ENDED,
+            lambda _event: call_order.append("emit"),
+        )
+
+        # Set up mock learning store whose update_zone_data records when save fires
+        mock_learning_store = MagicMock()
+        mock_learning_store.update_zone_data = MagicMock(side_effect=lambda **_kwargs: call_order.append("save"))
+        mock_learning_store.schedule_zone_save = MagicMock()
+
+        # Wire hass.data so _schedule_learning_save finds the store
+        mock_hass.data = {DOMAIN: {"learning_store": mock_learning_store}}
+
+        recorder = CycleMetricsRecorder(
+            hass=mock_hass,
+            zone_id="test_order",
+            adaptive_learner=mock_adaptive_learner,
+            get_target_temp=mock_callbacks["get_target_temp"],
+            get_current_temp=mock_callbacks["get_current_temp"],
+            get_hvac_mode=mock_callbacks["get_hvac_mode"],
+            get_in_grace_period=mock_callbacks["get_in_grace_period"],
+            min_cycle_duration_minutes=5,
+            heating_type=HeatingType.FLOOR_HYDRONIC,
+            dispatcher=dispatcher,
+        )
+
+        # Build a valid temperature history (6 samples, 25 min cycle)
+        cycle_start = datetime(2025, 1, 15, 10, 0, 0, tzinfo=timezone.utc)
+        temperature_history = [(cycle_start + timedelta(minutes=i * 5), 18.0 + i * 0.4) for i in range(6)]
+
+        # Act: record cycle metrics
+        recorder.record_cycle_metrics(
+            cycle_start_time=cycle_start,
+            cycle_target_temp=20.0,
+            cycle_state_value="settling",
+            temperature_history=temperature_history,
+            outdoor_temp_history=[],
+        )
+
+        # Assert ordering: emit must appear before save in the call log
+        assert "emit" in call_order, "CYCLE_ENDED event was never emitted"
+        assert "save" in call_order, "Learning save was never scheduled"
+        emit_idx = call_order.index("emit")
+        save_idx = call_order.index("save")
+        assert emit_idx < save_idx, (
+            f"Expected emit (idx={emit_idx}) before save (idx={save_idx}), got call order: {call_order}"
+        )
+
+
+class TestKeDataPersistedWithCycleSave:
+    """M07: ke_data must be included in update_zone_data when saving after a cycle."""
+
+    def _make_recorder(self, mock_hass, mock_adaptive_learner, mock_callbacks, ke_manager=None):
+        """Build a CycleMetricsRecorder with an optional ke_manager."""
+        return CycleMetricsRecorder(
+            hass=mock_hass,
+            zone_id="test_ke_persist",
+            adaptive_learner=mock_adaptive_learner,
+            get_target_temp=mock_callbacks["get_target_temp"],
+            get_current_temp=mock_callbacks["get_current_temp"],
+            get_hvac_mode=mock_callbacks["get_hvac_mode"],
+            get_in_grace_period=mock_callbacks["get_in_grace_period"],
+            min_cycle_duration_minutes=5,
+            heating_type=HeatingType.RADIATOR,
+            ke_manager=ke_manager,
+        )
+
+    def _run_one_cycle(self, recorder, mock_hass):
+        """Wire a learning store and record a valid 6-sample cycle."""
+        from datetime import timedelta
+        from custom_components.adaptive_climate.const import DOMAIN
+
+        mock_store = MagicMock()
+        mock_store.schedule_zone_save = MagicMock()
+        captured = {}
+        mock_store.update_zone_data = MagicMock(side_effect=lambda **kw: captured.update(kw))
+        mock_hass.data = {DOMAIN: {"learning_store": mock_store}}
+
+        cycle_start = datetime(2025, 1, 15, 10, 0, 0, tzinfo=timezone.utc)
+        temperature_history = [(cycle_start + timedelta(minutes=i * 5), 18.0 + i * 0.4) for i in range(6)]
+        recorder.record_cycle_metrics(
+            cycle_start_time=cycle_start,
+            cycle_target_temp=20.0,
+            cycle_state_value="settling",
+            temperature_history=temperature_history,
+            outdoor_temp_history=[],
+        )
+        return captured, mock_store
+
+    def test_ke_data_included_when_ke_manager_present(self, mock_hass, mock_adaptive_learner, mock_callbacks):
+        """M07: update_zone_data must receive ke_data when ke_manager is set."""
+        ke_manager = MagicMock()
+        ke_manager.get_learner_dict.return_value = {"ke": 0.5, "observations": 3}
+
+        recorder = self._make_recorder(mock_hass, mock_adaptive_learner, mock_callbacks, ke_manager)
+        captured, _ = self._run_one_cycle(recorder, mock_hass)
+
+        assert "ke_data" in captured, "ke_data key missing from update_zone_data call"
+        assert captured["ke_data"] == {"ke": 0.5, "observations": 3}
+        ke_manager.get_learner_dict.assert_called_once()
+
+    def test_ke_data_none_when_no_ke_manager(self, mock_hass, mock_adaptive_learner, mock_callbacks):
+        """M07: ke_data=None when no ke_manager provided (backwards-compat)."""
+        recorder = self._make_recorder(mock_hass, mock_adaptive_learner, mock_callbacks, ke_manager=None)
+        captured, _ = self._run_one_cycle(recorder, mock_hass)
+
+        assert captured.get("ke_data") is None
+
+    def test_ke_data_none_when_learner_dict_returns_none(self, mock_hass, mock_adaptive_learner, mock_callbacks):
+        """M07: ke_data=None when get_learner_dict() returns None (no KeLearner)."""
+        ke_manager = MagicMock()
+        ke_manager.get_learner_dict.return_value = None
+
+        recorder = self._make_recorder(mock_hass, mock_adaptive_learner, mock_callbacks, ke_manager)
+        captured, _ = self._run_one_cycle(recorder, mock_hass)
+
+        assert captured.get("ke_data") is None
+
+
+class TestKeManagerGetLearnerDict:
+    """M07: KeManager.get_learner_dict() must delegate to KeLearner.to_dict()."""
+
+    def test_returns_learner_to_dict_when_present(self):
+        """get_learner_dict() returns KeLearner.to_dict() result."""
+        from custom_components.adaptive_climate.managers.ke_manager import KeManager
+
+        ke_manager = MagicMock(spec=KeManager)
+        ke_manager.get_learner_dict = KeManager.get_learner_dict.__get__(ke_manager)
+
+        mock_learner = MagicMock()
+        mock_learner.to_dict.return_value = {"ke": 0.4, "n": 5}
+        ke_manager._ke_learner = mock_learner
+
+        result = ke_manager.get_learner_dict()
+        assert result == {"ke": 0.4, "n": 5}
+        mock_learner.to_dict.assert_called_once()
+
+    def test_returns_none_when_no_learner(self):
+        """get_learner_dict() returns None when _ke_learner is None."""
+        from custom_components.adaptive_climate.managers.ke_manager import KeManager
+
+        ke_manager = MagicMock(spec=KeManager)
+        ke_manager.get_learner_dict = KeManager.get_learner_dict.__get__(ke_manager)
+        ke_manager._ke_learner = None
+
+        result = ke_manager.get_learner_dict()
+        assert result is None
