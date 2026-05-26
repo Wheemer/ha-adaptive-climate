@@ -153,7 +153,7 @@ async def async_setup_managers(thermostat: AdaptiveThermostat) -> None:
         manifold_transport_delay = 0.0
         if coordinator and thermostat._zone_id:
             manifold_transport_delay = coordinator.get_worst_case_transport_delay_for_zone(
-                thermostat._zone_id,
+                thermostat.entity_id,
                 zone_loops=1,  # Conservative estimate: assume 1 loop active
             )
             if manifold_transport_delay > 0:

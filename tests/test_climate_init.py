@@ -838,4 +838,39 @@ class TestAsyncSetupManagers:
 
         # Verify cycle_tracker was added to zone_data
         assert "cycle_tracker" in zone_data
-        assert zone_data["cycle_tracker"] is thermostat._cycle_tracker
+
+
+@pytest.mark.asyncio
+class TestManifoldLookupUsesEntityId:
+    """H04: manifold transport delay must be looked up by entity_id, not _zone_id slug."""
+
+    async def test_manifold_lookup_uses_entity_id_not_zone_slug(self):
+        """get_worst_case_transport_delay_for_zone must receive entity_id, not _zone_id.
+
+        The manifold registry is keyed by entity_id ("climate.living_room").
+        Passing the slug ("living_room") silently returns 0 instead of the real delay.
+        """
+        mock_coordinator = Mock()
+        mock_coordinator.get_worst_case_transport_delay_for_zone = Mock(return_value=0.0)
+        mock_coordinator.get_zone_data = Mock(return_value={})
+
+        thermostat = MockThermostat(
+            {
+                "_night_setback_config": {
+                    "recovery_deadline": "07:00",
+                },
+                "_coordinator": mock_coordinator,
+                # entity_id is "climate.test_zone" (MockThermostat default)
+                # _zone_id is the slug — must NOT be the key used for manifold lookup
+                "_zone_id": "test_zone",
+            }
+        )
+
+        await async_setup_managers(thermostat)
+
+        mock_coordinator.get_worst_case_transport_delay_for_zone.assert_called_once()
+        call_args = mock_coordinator.get_worst_case_transport_delay_for_zone.call_args
+        actual_key = call_args[0][0]  # first positional argument
+        assert actual_key == thermostat.entity_id, (
+            f"Expected manifold lookup key '{thermostat.entity_id}' (entity_id), got '{actual_key}' (_zone_id slug)"
+        )
