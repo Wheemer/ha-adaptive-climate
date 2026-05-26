@@ -140,7 +140,7 @@ class TestWeeklyDeltaCalculation:
 
             import asyncio
 
-            asyncio.get_event_loop().run_until_complete(sensor.async_update())
+            asyncio.run(sensor.async_update())
 
         # Should calculate delta = 150 - 100 = 50 kWh
         assert sensor._weekly_energy_kwh == 50.0
@@ -164,12 +164,12 @@ class TestWeeklyDeltaCalculation:
 
         import asyncio
 
-        asyncio.get_event_loop().run_until_complete(sensor.async_update())
+        asyncio.run(sensor.async_update())
         assert sensor._weekly_energy_kwh == 20.0
 
         # Second update at 150 kWh
         meter_state.state = "150.0"
-        asyncio.get_event_loop().run_until_complete(sensor.async_update())
+        asyncio.run(sensor.async_update())
         assert sensor._weekly_energy_kwh == 50.0
 
     def test_weekly_delta_with_unit_conversion(self, sensor, mock_hass):
@@ -191,7 +191,7 @@ class TestWeeklyDeltaCalculation:
 
         import asyncio
 
-        asyncio.get_event_loop().run_until_complete(sensor.async_update())
+        asyncio.run(sensor.async_update())
 
         # 0.5 GJ = 138.889 kWh, delta = 138.889 - 100 = 38.889
         expected_kwh = 0.5 * 277.778
@@ -220,7 +220,7 @@ class TestWeeklyDeltaCalculation:
 
         import asyncio
 
-        asyncio.get_event_loop().run_until_complete(sensor.async_update())
+        asyncio.run(sensor.async_update())
 
         # Delta = 50 kWh, price = 0.25 EUR/kWh, cost = 12.50 EUR
         assert sensor._weekly_energy_kwh == 50.0
@@ -263,7 +263,7 @@ class TestPersistenceAcrossRestarts:
             return old_state
 
         with patch.object(sensor, "async_get_last_state", mock_get_last_state):
-            asyncio.get_event_loop().run_until_complete(sensor.async_added_to_hass())
+            asyncio.run(sensor.async_added_to_hass())
 
         assert sensor._week_start_reading == 100.0
 
@@ -283,7 +283,7 @@ class TestPersistenceAcrossRestarts:
             return old_state
 
         with patch.object(sensor, "async_get_last_state", mock_get_last_state):
-            asyncio.get_event_loop().run_until_complete(sensor.async_added_to_hass())
+            asyncio.run(sensor.async_added_to_hass())
 
         assert sensor._week_start_timestamp == datetime(2025, 1, 6, 0, 0, 0)
 
@@ -303,7 +303,7 @@ class TestPersistenceAcrossRestarts:
             return old_state
 
         with patch.object(sensor, "async_get_last_state", mock_get_last_state):
-            asyncio.get_event_loop().run_until_complete(sensor.async_added_to_hass())
+            asyncio.run(sensor.async_added_to_hass())
 
         assert sensor._weekly_energy_kwh == 20.0
 
@@ -327,7 +327,7 @@ class TestPersistenceAcrossRestarts:
             return old_state
 
         with patch.object(sensor, "async_get_last_state", mock_get_last_state):
-            asyncio.get_event_loop().run_until_complete(sensor.async_added_to_hass())
+            asyncio.run(sensor.async_added_to_hass())
 
         # Now update with new reading
         meter_state = Mock()
@@ -337,7 +337,7 @@ class TestPersistenceAcrossRestarts:
             side_effect=lambda entity_id: meter_state if entity_id == "sensor.energy_meter" else None
         )
 
-        asyncio.get_event_loop().run_until_complete(sensor.async_update())
+        asyncio.run(sensor.async_update())
 
         # Should calculate from original week_start (100), not from restart
         assert sensor._weekly_energy_kwh == 50.0
@@ -350,7 +350,7 @@ class TestPersistenceAcrossRestarts:
             return None
 
         with patch.object(sensor, "async_get_last_state", mock_get_last_state):
-            asyncio.get_event_loop().run_until_complete(sensor.async_added_to_hass())
+            asyncio.run(sensor.async_added_to_hass())
 
         assert sensor._week_start_reading is None
         assert sensor._week_start_timestamp is None
@@ -399,7 +399,7 @@ class TestWeekBoundaryReset:
 
             import asyncio
 
-            asyncio.get_event_loop().run_until_complete(sensor.async_update())
+            asyncio.run(sensor.async_update())
 
         # Should have reset week_start to current reading
         assert sensor._week_start_reading == 200.0
@@ -428,7 +428,7 @@ class TestWeekBoundaryReset:
 
             import asyncio
 
-            asyncio.get_event_loop().run_until_complete(sensor.async_update())
+            asyncio.run(sensor.async_update())
 
         # Should NOT reset, should calculate delta
         assert sensor._week_start_reading == 100.0
@@ -456,7 +456,7 @@ class TestWeekBoundaryReset:
 
             import asyncio
 
-            asyncio.get_event_loop().run_until_complete(sensor.async_update())
+            asyncio.run(sensor.async_update())
 
         # Week start should be current reading (175)
         assert sensor._week_start_reading == 175.0
@@ -484,7 +484,7 @@ class TestWeekBoundaryReset:
 
             import asyncio
 
-            asyncio.get_event_loop().run_until_complete(sensor.async_update())
+            asyncio.run(sensor.async_update())
 
         # Should have reset for new week
         assert sensor._week_start_reading == 550.0
@@ -526,7 +526,7 @@ class TestMeterResetHandling:
 
         import asyncio
 
-        asyncio.get_event_loop().run_until_complete(sensor.async_update())
+        asyncio.run(sensor.async_update())
 
         # Should reset week_start to current reading
         assert sensor._week_start_reading == 50.0
@@ -549,14 +549,14 @@ class TestMeterResetHandling:
 
         import asyncio
 
-        asyncio.get_event_loop().run_until_complete(sensor.async_update())
+        asyncio.run(sensor.async_update())
 
         assert sensor._week_start_reading == 0.0
         assert sensor._weekly_energy_kwh == 0.0
 
         # Second: meter continues accumulating
         meter_state.state = "25.0"
-        asyncio.get_event_loop().run_until_complete(sensor.async_update())
+        asyncio.run(sensor.async_update())
 
         # Should now track from new baseline
         assert sensor._weekly_energy_kwh == 25.0
@@ -576,7 +576,7 @@ class TestMeterResetHandling:
 
         import asyncio
 
-        asyncio.get_event_loop().run_until_complete(sensor.async_update())
+        asyncio.run(sensor.async_update())
 
         # Should detect reset and use new reading as baseline
         assert sensor._week_start_reading == 100.0
@@ -656,7 +656,7 @@ class TestEdgeCases:
 
         import asyncio
 
-        asyncio.get_event_loop().run_until_complete(sensor.async_update())
+        asyncio.run(sensor.async_update())
 
         assert sensor._attr_available is False
 
@@ -668,7 +668,7 @@ class TestEdgeCases:
 
         import asyncio
 
-        asyncio.get_event_loop().run_until_complete(sensor.async_update())
+        asyncio.run(sensor.async_update())
 
         assert sensor._attr_available is False
 
@@ -683,7 +683,7 @@ class TestEdgeCases:
 
         import asyncio
 
-        asyncio.get_event_loop().run_until_complete(sensor.async_update())
+        asyncio.run(sensor.async_update())
 
         # Should handle gracefully
         assert sensor._value == 0.0
@@ -698,7 +698,7 @@ class TestEdgeCases:
 
         import asyncio
 
-        asyncio.get_event_loop().run_until_complete(sensor.async_update())
+        asyncio.run(sensor.async_update())
 
         assert sensor._attr_available is False
 
@@ -716,7 +716,7 @@ class TestEdgeCases:
 
         import asyncio
 
-        asyncio.get_event_loop().run_until_complete(sensor.async_update())
+        asyncio.run(sensor.async_update())
 
         # Should initialize week with first reading
         assert sensor._week_start_reading == 100.0

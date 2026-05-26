@@ -346,7 +346,7 @@ def _create_mock_hass():
 
 def _run_async(coro):
     """Run async coroutine synchronously."""
-    return asyncio.get_event_loop().run_until_complete(coro)
+    return asyncio.run(coro)
 
 
 # ==============================================================================

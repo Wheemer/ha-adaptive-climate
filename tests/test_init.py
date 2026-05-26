@@ -568,7 +568,7 @@ class TestAsyncUnload:
         hass.services.has_service.return_value = False
 
         # Run unload
-        result = asyncio.get_event_loop().run_until_complete(async_unload(hass))
+        result = asyncio.run(async_unload(hass))
 
         # Should succeed even if nothing to unload
         assert result is True
@@ -600,7 +600,7 @@ class TestAsyncUnload:
         hass.services.has_service.return_value = False
 
         # Run unload
-        result = asyncio.get_event_loop().run_until_complete(async_unload(hass))
+        result = asyncio.run(async_unload(hass))
 
         # Verify all callbacks were called
         assert result is True
@@ -634,7 +634,7 @@ class TestAsyncUnload:
         hass.services.has_service.return_value = False
 
         # Run unload - should not raise
-        result = asyncio.get_event_loop().run_until_complete(async_unload(hass))
+        result = asyncio.run(async_unload(hass))
 
         # Should still succeed and call both
         assert result is True
@@ -666,7 +666,7 @@ class TestAsyncUnload:
         hass.services.has_service.return_value = False
 
         # Run unload
-        result = asyncio.get_event_loop().run_until_complete(async_unload(hass))
+        result = asyncio.run(async_unload(hass))
 
         # Should succeed and only call non-None callback
         assert result is True
@@ -700,7 +700,7 @@ class TestAsyncUnload:
         hass.services.has_service.return_value = False
 
         # Run unload
-        result = asyncio.get_event_loop().run_until_complete(async_unload(hass))
+        result = asyncio.run(async_unload(hass))
 
         # Domain data should be removed, other domains preserved
         assert result is True
@@ -733,7 +733,7 @@ class TestAsyncUnload:
         hass.services.has_service.return_value = False
 
         # Run unload
-        result = asyncio.get_event_loop().run_until_complete(async_unload(hass))
+        result = asyncio.run(async_unload(hass))
 
         # Coordinator should have central controller cleared
         assert result is True
@@ -828,7 +828,7 @@ class TestReloadWithoutLeftoverState:
         hass.services.has_service.return_value = True
 
         # Run unload
-        result = asyncio.get_event_loop().run_until_complete(async_unload(hass))
+        result = asyncio.run(async_unload(hass))
         assert result is True
 
         # After unload, domain should not exist in hass.data
@@ -883,7 +883,7 @@ class TestReloadWithoutLeftoverState:
         hass.services.has_service.return_value = False
 
         # Run unload
-        result = asyncio.get_event_loop().run_until_complete(async_unload(hass))
+        result = asyncio.run(async_unload(hass))
 
         # All keys should be removed (entire domain entry removed)
         assert result is True
@@ -909,12 +909,12 @@ class TestReloadWithoutLeftoverState:
         hass.services.has_service.return_value = False
 
         # First unload
-        result1 = asyncio.get_event_loop().run_until_complete(async_unload(hass))
+        result1 = asyncio.run(async_unload(hass))
         assert result1 is True
         assert DOMAIN not in hass.data
 
         # Second unload should also succeed (idempotent)
-        result2 = asyncio.get_event_loop().run_until_complete(async_unload(hass))
+        result2 = asyncio.run(async_unload(hass))
         assert result2 is True
 
     @pytest.mark.skipif(not HAS_VOLUPTUOUS, reason="voluptuous not installed")

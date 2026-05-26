@@ -183,7 +183,7 @@ class TestWeeklySensorUnitConversion:
         with patch("custom_components.adaptive_climate.sensors.energy.dt_util") as mock_dt:
             mock_dt.utcnow.return_value = now
             mock_dt.now.return_value = now
-            asyncio.get_event_loop().run_until_complete(sensor.async_update())
+            asyncio.run(sensor.async_update())
 
     def test_btu_meter_delta_calculation(self, sensor, mock_hass):
         """200 000 BTU − 100 000 BTU → 100 000 × BTU_FACTOR kWh delta."""
@@ -260,7 +260,7 @@ class TestCurrencyLocking:
         with patch("custom_components.adaptive_climate.sensors.energy.dt_util") as mock_dt:
             mock_dt.utcnow.return_value = now
             mock_dt.now.return_value = now
-            asyncio.get_event_loop().run_until_complete(sensor.async_update())
+            asyncio.run(sensor.async_update())
 
     def test_currency_locked_after_first_read(self, mock_hass):
         """Currency symbol in cost entity UoM is parsed and locked on first update."""
