@@ -2,6 +2,12 @@
 
 This module defines protocols (structural types) that describe the interfaces
 managers and other components expect from the thermostat entity.
+
+D5 (2026-05-26): Trimmed ThermostatState from ~40 to ~25 properties.
+Removed dead entries: pid_control_p/d/e (PIDState), _is_device_active (HVACState),
+hvac_mode/hvac_action/is_heating/_is_heating/pid_mode/method-form _get_current_temp
+/_get_target_temp (ThermostatState).  Added is_pid_converged_for_ke() to
+KeManagerState so KeManager no longer needs a callback for this check.
 """
 
 from __future__ import annotations
@@ -62,11 +68,11 @@ class PIDState(Protocol):
     """Protocol for managers that need PID-related state.
 
     This is a minimal sub-protocol that provides access to PID gains,
-    control output, and component terms. Managers that only need PID state
-    can accept this lighter protocol instead of the full ThermostatState.
+    control output, and the integral component term. Managers that only need
+    PID state can accept this lighter protocol instead of the full ThermostatState.
 
     Usage:
-        Managers that need to read PID gains or component terms (P, I, D, E)
+        Managers that need to read PID gains (e.g., KeManager, ControlOutputManager)
         can depend on this protocol for better separation of concerns.
     """
 
@@ -96,23 +102,8 @@ class PIDState(Protocol):
         ...
 
     @property
-    def pid_control_p(self) -> float:
-        """Return the proportional component of PID output."""
-        ...
-
-    @property
     def pid_control_i(self) -> float:
         """Return the integral component of PID output."""
-        ...
-
-    @property
-    def pid_control_d(self) -> float:
-        """Return the derivative component of PID output."""
-        ...
-
-    @property
-    def pid_control_e(self) -> float:
-        """Return the outdoor/external component of PID output."""
         ...
 
 
@@ -120,9 +111,9 @@ class PIDState(Protocol):
 class HVACState(Protocol):
     """Protocol for managers that need HVAC mode state.
 
-    This minimal protocol provides access to HVAC mode, heating type, and
-    device active state. It serves as a base protocol for managers that only
-    need operational state without full thermostat access.
+    This minimal protocol provides access to HVAC mode and heating type.
+    It serves as a base protocol for managers that only need operational
+    state without full thermostat access.
 
     Usage:
         Managers that only need HVAC mode information can accept an HVACState
@@ -139,11 +130,6 @@ class HVACState(Protocol):
         """Return the heating system type (floor_hydronic, radiator, etc.)."""
         ...
 
-    @property
-    def _is_device_active(self) -> bool:
-        """Return True if the heating/cooling device is currently active."""
-        ...
-
 
 @runtime_checkable
 class KeManagerState(TemperatureState, PIDState, HVACState, Protocol):
@@ -154,21 +140,30 @@ class KeManagerState(TemperatureState, PIDState, HVACState, Protocol):
     - Temperature readings (current, target, outdoor) and tolerances
     - PID gains (Ke) and control output for steady-state observations
     - HVAC mode to determine when steady-state tracking is valid
+    - PID convergence status to know when to enable Ke learning
 
     By inheriting from the three sub-protocols, this provides all needed
     read-only state without requiring action callbacks.
 
     Usage:
-        KeManager should accept a KeManagerState instance for all read-only
-        state access. Action callbacks (set_ke, async_control_heating, etc.)
+        KeManager accepts only a KeManagerState instance for all read-only
+        state access. Action callbacks (async_control_heating, async_write_ha_state)
         remain as explicit callable parameters.
     """
 
     # All properties inherited from TemperatureState, PIDState, and HVACState
-    # Additional property needed for logging
+
     @property
     def entity_id(self) -> str:
         """Return the entity ID of the thermostat."""
+        ...
+
+    def is_pid_converged_for_ke(self) -> bool:
+        """Check if PID has converged sufficiently to begin Ke learning.
+
+        Returns True when the adaptive learner reports stable performance
+        for the required number of consecutive cycles.
+        """
         ...
 
 
@@ -185,6 +180,7 @@ class ThermostatState(TemperatureState, PIDState, HVACState, Protocol):
         - TemperatureState for temperature-only needs
         - PIDState for PID-only needs
         - HVACState for HVAC mode-only needs
+        - KeManagerState for Ke learning needs
         - ThermostatState when full access is required
 
         This composition approach reduces coupling and makes dependencies explicit.
@@ -215,33 +211,6 @@ class ThermostatState(TemperatureState, PIDState, HVACState, Protocol):
     @property
     def _wind_speed(self) -> float | None:
         """Return the wind speed."""
-        ...
-
-    # Additional HVAC properties not in HVACState
-    @property
-    def hvac_mode(self) -> HVACMode:
-        """Return the current HVAC mode."""
-        ...
-
-    @property
-    def hvac_action(self) -> str | None:
-        """Return the current HVAC action."""
-        ...
-
-    @property
-    def is_heating(self) -> bool:
-        """Return True if currently heating."""
-        ...
-
-    @property
-    def _is_heating(self) -> bool:
-        """Internal heating state."""
-        ...
-
-    # Additional PID properties not in PIDState
-    @property
-    def pid_mode(self) -> str:
-        """Return the PID mode (off, pid, valve)."""
         ...
 
     # Controllers and managers
@@ -349,21 +318,13 @@ class ThermostatState(TemperatureState, PIDState, HVACState, Protocol):
         """Return the humidity detector instance."""
         ...
 
-    # Methods that managers may need to call
+    # Methods that managers need to call
     def _calculate_night_setback_adjustment(self) -> tuple:
         """Calculate night setback adjustment.
 
         Returns:
             Tuple of (effective_target, in_night_period, night_info)
         """
-        ...
-
-    def _get_current_temp(self) -> float | None:
-        """Get the current temperature (method form)."""
-        ...
-
-    def _get_target_temp(self) -> float | None:
-        """Get the target temperature (method form)."""
         ...
 
 

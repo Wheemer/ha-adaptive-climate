@@ -45,7 +45,7 @@ from homeassistant.components.climate import (
 from . import DOMAIN
 from . import const
 from . import pid_controller
-from .const import PIDGains
+from .const import PIDGains, PIDChangeReason
 from .managers import (
     ControlOutputManager,
     HeaterController,
@@ -70,6 +70,7 @@ from .managers.state_attributes import build_state_attributes
 from .climate_init import async_setup_managers
 from .climate_control import ClimateControlMixin
 from .climate_handlers import ClimateHandlersMixin
+from .thermostat_config import AdaptiveThermostatConfig
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -82,35 +83,35 @@ from .climate_setup import PLATFORM_SCHEMA as PLATFORM_SCHEMA
 class AdaptiveThermostat(ClimateControlMixin, ClimateHandlersMixin, ClimateEntity, RestoreEntity):
     """Representation of an Adaptive Climate device."""
 
-    def __init__(self, **kwargs):
+    def __init__(self, config: AdaptiveThermostatConfig):
         """Initialize the thermostat."""
-        self._name = kwargs.get("name")
-        self._unique_id = kwargs.get("unique_id")
-        self._heater_entity_id = kwargs.get("heater_entity_id")
-        self._cooler_entity_id = kwargs.get("cooler_entity_id")
-        self._demand_switch_entity_id = kwargs.get("demand_switch_entity_id")
-        self._heater_polarity_invert = kwargs.get("invert_heater")
-        self._sensor_entity_id = kwargs.get("sensor_entity_id")
-        self._ext_sensor_entity_id = kwargs.get("ext_sensor_entity_id")
-        self._weather_entity_id = kwargs.get("weather_entity_id")
-        self._wind_speed_sensor_entity_id = kwargs.get("wind_speed_sensor_entity_id")
+        self._name = config.name
+        self._unique_id = config.unique_id
+        self._heater_entity_id = config.heater_entity_id
+        self._cooler_entity_id = config.cooler_entity_id
+        self._demand_switch_entity_id = config.demand_switch_entity_id
+        self._heater_polarity_invert = config.invert_heater
+        self._sensor_entity_id = config.sensor_entity_id
+        self._ext_sensor_entity_id = config.ext_sensor_entity_id
+        self._weather_entity_id = config.weather_entity_id
+        self._wind_speed_sensor_entity_id = config.wind_speed_sensor_entity_id
         if self._unique_id == "none":
             self._unique_id = slugify(f"{DOMAIN}_{self._name}_{self._heater_entity_id}")
-        self._ac_mode = kwargs.get("ac_mode", False)
-        self._force_off_state = kwargs.get("force_off_state", True)
-        self._control_interval = kwargs.get("control_interval")
-        self._sampling_period = kwargs.get("sampling_period").seconds
-        self._sensor_stall = kwargs.get("sensor_stall").seconds
-        self._output_safety = kwargs.get("output_safety")
-        self._hvac_mode = kwargs.get("initial_hvac_mode")
-        self._saved_target_temp = kwargs.get("target_temp") or kwargs.get("away_temp")
-        self._temp_precision = kwargs.get("precision")
-        self._target_temperature_step = kwargs.get("target_temp_step")
+        self._ac_mode = config.ac_mode
+        self._force_off_state = config.force_off_state
+        self._control_interval = config.control_interval
+        self._sampling_period = config.sampling_period.seconds
+        self._sensor_stall = config.sensor_stall.seconds
+        self._output_safety = config.output_safety
+        self._hvac_mode = config.initial_hvac_mode
+        self._saved_target_temp = config.target_temp or config.away_temp
+        self._temp_precision = config.precision
+        self._target_temperature_step = config.target_temp_step
         self._last_heat_cycle_time = None  # None means use device's last_changed time
-        self._min_open_time_pid_on = kwargs.get("min_open_time")
-        self._min_closed_time_pid_on = kwargs.get("min_closed_time")
-        self._min_open_time_pid_off = kwargs.get("min_open_time_pid_off")
-        self._min_closed_time_pid_off = kwargs.get("min_closed_time_pid_off")
+        self._min_open_time_pid_on = config.min_open_time
+        self._min_closed_time_pid_on = config.min_closed_time
+        self._min_open_time_pid_off = config.min_open_time_pid_off
+        self._min_closed_time_pid_off = config.min_closed_time_pid_off
         if self._min_closed_time_pid_on is None:
             self._min_closed_time_pid_on = self._min_open_time_pid_on
         if self._min_open_time_pid_off is None:
@@ -126,23 +127,23 @@ class AdaptiveThermostat(ClimateControlMixin, ClimateHandlersMixin, ClimateEntit
         self._ext_temp = None
         self._wind_speed = None
         self._temp_lock = asyncio.Lock()
-        self._min_temp = kwargs.get("min_temp")
-        self._max_temp = kwargs.get("max_temp")
-        self._target_temp = kwargs.get("target_temp")
-        self._unit = kwargs.get("unit")
+        self._min_temp = config.min_temp
+        self._max_temp = config.max_temp
+        self._target_temp = config.target_temp
+        self._unit = config.unit
         self._support_flags = ClimateEntityFeature.TARGET_TEMPERATURE
         self._support_flags |= ClimateEntityFeature.TURN_OFF
         self._support_flags |= ClimateEntityFeature.TURN_ON
         self._enable_turn_on_off_backwards_compatibility = False  # Remove after deprecation period
         self._attr_preset_mode = "none"
-        self._away_temp = kwargs.get("away_temp")
-        self._eco_temp = kwargs.get("eco_temp")
-        self._boost_temp = kwargs.get("boost_temp")
-        self._comfort_temp = kwargs.get("comfort_temp")
-        self._home_temp = kwargs.get("home_temp")
-        self._sleep_temp = kwargs.get("sleep_temp")
-        self._activity_temp = kwargs.get("activity_temp")
-        self._preset_sync_mode = kwargs.get("preset_sync_mode")
+        self._away_temp = config.away_temp
+        self._eco_temp = config.eco_temp
+        self._boost_temp = config.boost_temp
+        self._comfort_temp = config.comfort_temp
+        self._home_temp = config.home_temp
+        self._sleep_temp = config.sleep_temp
+        self._activity_temp = config.activity_temp
+        self._preset_sync_mode = config.preset_sync_mode
         if True in [
             temp is not None
             for temp in [
@@ -157,15 +158,12 @@ class AdaptiveThermostat(ClimateControlMixin, ClimateHandlersMixin, ClimateEntit
         ]:
             self._support_flags |= ClimateEntityFeature.PRESET_MODE
 
-        self._output_precision = kwargs.get("output_precision")
-        self._output_min = kwargs.get("output_min")
-        self._output_max = kwargs.get("output_max")
-        self._output_clamp_low = kwargs.get("output_clamp_low")
-        if self._output_clamp_low is None:
-            self._output_clamp_low = const.DEFAULT_OUT_CLAMP_LOW
-        self._output_clamp_high = kwargs.get("output_clamp_high")
-        if self._output_clamp_high is None:
-            self._output_clamp_high = const.DEFAULT_OUT_CLAMP_HIGH
+        self._output_precision = config.output_precision
+        self._output_min = config.output_min
+        self._output_max = config.output_max
+        # Clamp defaults are already resolved in AdaptiveThermostatConfig
+        self._output_clamp_low = config.output_clamp_low
+        self._output_clamp_high = config.output_clamp_high
         self._difference = self._output_max - self._output_min
         if self._ac_mode:
             self._attr_hvac_modes = [HVACMode.COOL, HVACMode.HEAT, HVACMode.OFF]
@@ -176,41 +174,41 @@ class AdaptiveThermostat(ClimateControlMixin, ClimateHandlersMixin, ClimateEntit
             self._min_out = self._output_clamp_low
             self._max_out = self._output_clamp_high
         # Zone properties for physics-based initialization
-        self._zone_id = kwargs.get("zone_id")
-        self._heating_type = kwargs.get("heating_type", const.HeatingType.FLOOR_HYDRONIC)
-        self._area_m2 = kwargs.get("area_m2")
-        self._max_power_w = kwargs.get("max_power_w")
-        self._supply_temperature = kwargs.get("supply_temperature")
-        self._ceiling_height = kwargs.get("ceiling_height", 2.5)
-        self._window_area_m2 = kwargs.get("window_area_m2")
-        self._window_rating = kwargs.get("window_rating", "hr++")
-        self._window_orientation = kwargs.get("window_orientation")
-        self._floor_construction = kwargs.get("floor_construction")
-        self._ha_area = kwargs.get("ha_area")  # Home Assistant area to assign entity to
-        self._loops = kwargs.get("loops", const.DEFAULT_LOOPS)
+        self._zone_id = config.zone_id
+        self._heating_type = config.heating_type or const.HeatingType.FLOOR_HYDRONIC
+        self._area_m2 = config.area_m2
+        self._max_power_w = config.max_power_w
+        self._supply_temperature = config.supply_temperature
+        self._ceiling_height = config.ceiling_height
+        self._window_area_m2 = config.window_area_m2
+        self._window_rating = config.window_rating
+        self._window_orientation = config.window_orientation
+        self._floor_construction = config.floor_construction
+        self._ha_area = config.ha_area  # Home Assistant area to assign entity to
+        self._loops = config.loops
 
         # Setpoint boost configuration
-        self._setpoint_boost = kwargs.get("setpoint_boost", True)
-        self._setpoint_boost_factor = kwargs.get("setpoint_boost_factor")
-        self._setpoint_debounce = kwargs.get("setpoint_debounce", const.DEFAULT_SETPOINT_DEBOUNCE)
+        self._setpoint_boost = config.setpoint_boost
+        self._setpoint_boost_factor = config.setpoint_boost_factor
+        self._setpoint_debounce = config.setpoint_debounce
 
         # Derivative filter alpha - get from config or use heating-type-specific default
-        self._derivative_filter_alpha = kwargs.get("derivative_filter_alpha")
+        self._derivative_filter_alpha = config.derivative_filter_alpha
         if self._derivative_filter_alpha is None:
             # Use heating-type-specific default from HEATING_TYPE_CHARACTERISTICS
             heating_chars = const.HEATING_TYPE_CHARACTERISTICS.get(self._heating_type, {})
             self._derivative_filter_alpha = heating_chars.get("derivative_filter_alpha", 0.15)
 
         # Auto-apply PID mode (automatic application of adaptive PID recommendations)
-        self._auto_apply_pid = kwargs.get("auto_apply_pid", True)
+        self._auto_apply_pid = config.auto_apply_pid
 
         # Night setback
         self._night_setback = None
         self._night_setback_config = None
         self._night_setback_was_active = None  # Track previous state for transition detection
         self._learning_grace_until = None  # Pause learning until this time after transitions
-        night_setback_config = kwargs.get("night_setback_config")
-        _LOGGER.debug("%s: night_setback_config from kwargs: %s", self._name, night_setback_config)
+        night_setback_config = config.night_setback_config
+        _LOGGER.debug("%s: night_setback_config from config: %s", self._name, night_setback_config)
         if night_setback_config:
             start = night_setback_config.get(const.CONF_NIGHT_SETBACK_START)
             end = night_setback_config.get(const.CONF_NIGHT_SETBACK_END)
@@ -241,23 +239,19 @@ class AdaptiveThermostat(ClimateControlMixin, ClimateHandlersMixin, ClimateEntit
 
         # Contact sensors (window/door open detection)
         self._contact_sensor_handler = None
-        contact_sensors = kwargs.get("contact_sensors")
-        if contact_sensors:
-            contact_action = kwargs.get("contact_action", "pause")
-            contact_delay = kwargs.get("contact_delay", 300)  # Default 5 minutes
-            # Convert delay to seconds if it's a timedelta-like value
-            if hasattr(contact_delay, "total_seconds"):
-                contact_delay = int(contact_delay.total_seconds())
+        if config.contact_sensors:
+            contact_action = config.contact_action
+            contact_delay = config.contact_delay  # Already int (seconds) from schema
             action_enum = ContactAction.PAUSE if contact_action == "pause" else ContactAction.FROST_PROTECTION
             self._contact_sensor_handler = ContactSensorHandler(
-                contact_sensors=contact_sensors,
+                contact_sensors=config.contact_sensors,
                 contact_delay_seconds=contact_delay,
                 action=action_enum,
             )
             _LOGGER.info(
                 "%s: Contact sensors configured: %s (action=%s, delay=%ds)",
                 self._name,
-                contact_sensors,
+                config.contact_sensors,
                 contact_action,
                 contact_delay,
             )
@@ -265,32 +259,23 @@ class AdaptiveThermostat(ClimateControlMixin, ClimateHandlersMixin, ClimateEntit
         # Humidity detector (shower/bathroom humidity spike detection)
         self._humidity_detector = None
         self._humidity_sensor_entity_id = None
-        humidity_sensor = kwargs.get("humidity_sensor")
-        if humidity_sensor:
-            spike_threshold = kwargs.get("humidity_spike_threshold", const.DEFAULT_HUMIDITY_SPIKE_THRESHOLD)
-            absolute_max = kwargs.get("humidity_absolute_max", const.DEFAULT_HUMIDITY_ABSOLUTE_MAX)
-            detection_window = kwargs.get("humidity_detection_window", const.DEFAULT_HUMIDITY_DETECTION_WINDOW)
-            stabilization_delay = kwargs.get("humidity_stabilization_delay", const.DEFAULT_HUMIDITY_STABILIZATION_DELAY)
-            max_pause_duration = kwargs.get("humidity_max_pause_duration", const.DEFAULT_HUMIDITY_MAX_PAUSE)
-            exit_threshold = kwargs.get("humidity_exit_threshold", const.DEFAULT_HUMIDITY_EXIT_THRESHOLD)
-            exit_drop = kwargs.get("humidity_exit_drop", const.DEFAULT_HUMIDITY_EXIT_DROP)
-
-            self._humidity_sensor_entity_id = humidity_sensor
+        if config.humidity_sensor:
+            self._humidity_sensor_entity_id = config.humidity_sensor
             self._humidity_detector = HumidityDetector(
-                spike_threshold=spike_threshold,
-                absolute_max=absolute_max,
-                detection_window=detection_window,
-                stabilization_delay=stabilization_delay,
-                max_pause_duration=max_pause_duration,
-                exit_humidity_threshold=exit_threshold,
-                exit_humidity_drop=exit_drop,
+                spike_threshold=config.humidity_spike_threshold,
+                absolute_max=config.humidity_absolute_max,
+                detection_window=config.humidity_detection_window,
+                stabilization_delay=config.humidity_stabilization_delay,
+                max_pause_duration=config.humidity_max_pause_duration,
+                exit_humidity_threshold=config.humidity_exit_threshold,
+                exit_humidity_drop=config.humidity_exit_drop,
             )
             _LOGGER.info(
                 "%s: Humidity detection configured: sensor=%s (spike_threshold=%.1f%%, absolute_max=%.1f%%)",
                 self._name,
-                humidity_sensor,
-                spike_threshold,
-                absolute_max,
+                config.humidity_sensor,
+                config.humidity_spike_threshold,
+                config.humidity_absolute_max,
             )
 
         # Status manager - aggregates all pause mechanisms
@@ -347,8 +332,9 @@ class AdaptiveThermostat(ClimateControlMixin, ClimateHandlersMixin, ClimateEntit
         self._heater_control_failed = False
         self._last_heater_error: str | None = None
 
-        # Transport delay from manifold (set when heating starts)
-        self._transport_delay: float | None = None
+        # Transport delay from manifold in minutes (set when heating starts).
+        # C02: field name carries the unit to prevent seconds/minutes confusion.
+        self._transport_delay_minutes: float | None = None
 
         # Calculate PID values from physics (adaptive learning will refine them)
         # Get energy rating from controller domain config
@@ -407,13 +393,13 @@ class AdaptiveThermostat(ClimateControlMixin, ClimateHandlersMixin, ClimateEntit
         self._preheat_cycle_unsub = None  # H7 fix - store unsub handle
         self._heating_rate_cycle_unsub = None  # Heating rate session lifecycle unsub handle
 
-        self._pwm = kwargs.get("pwm").seconds
-        self._valve_actuation_time = kwargs.get("valve_actuation_time", 0)
+        self._pwm = config.pwm.seconds
+        self._valve_actuation_time = config.valve_actuation_time
         self._p = self._i = self._d = self._e = self._dt = 0
         self._control_output = self._output_min
         self._force_on = False
         self._force_off = False
-        self._boost_pid_off = kwargs.get("boost_pid_off")
+        self._boost_pid_off = config.boost_pid_off
 
         # Get tolerances from HEATING_TYPE_CHARACTERISTICS based on heating_type
         # User-configured values are overridden by heating type defaults for consistency
@@ -1126,7 +1112,10 @@ class AdaptiveThermostat(ClimateControlMixin, ClimateHandlersMixin, ClimateEntit
                         self.entity_id,
                         self._pid_controller.integral,
                     )
-                    self._pid_controller.integral = 0.0
+                    if self._gains_manager is not None:
+                        self._gains_manager.set_integral(0.0, PIDChangeReason.MODE_SWITCH)
+                    else:
+                        self._pid_controller.integral = 0.0
                     self._i = 0.0
 
             if hvac_mode == HVACMode.HEAT:
@@ -1248,8 +1237,12 @@ class AdaptiveThermostat(ClimateControlMixin, ClimateHandlersMixin, ClimateEntit
         """
         async with self._temp_lock:
             if self._pid_controller is not None:  # pyright: ignore[reportUnnecessaryComparison]
-                self._pid_controller.integral = value
-                self._i = value
+                if self._gains_manager is not None:
+                    self._gains_manager.set_integral(value, PIDChangeReason.SERVICE_CALL)
+                    self._i = self._pid_controller.integral  # sync to clamped value
+                else:
+                    self._pid_controller.integral = value
+                    self._i = value
         self.async_write_ha_state()
 
     async def async_reset_pid_to_physics(self, **kwargs):
@@ -1536,8 +1529,6 @@ class AdaptiveThermostat(ClimateControlMixin, ClimateHandlersMixin, ClimateEntit
         Args:
             adaptive_learner: The AdaptiveLearner instance for this zone.
         """
-        from .const import PIDChangeReason
-
         # Check physics-based rate underperformance
         result = adaptive_learner.check_physics_rate_underperformance(
             tau=getattr(self, "_thermal_time_constant", None),
@@ -1592,7 +1583,10 @@ class AdaptiveThermostat(ClimateControlMixin, ClimateHandlersMixin, ClimateEntit
         # Scale integral to prevent output spike
         if old_ki > 0:
             scale_factor = old_ki / new_ki
-            self._pid_controller.scale_integral(scale_factor)
+            if self._gains_manager is not None:
+                self._gains_manager.scale_integral(scale_factor, PIDChangeReason.UNDERSHOOT_BOOST)
+            else:
+                self._pid_controller.scale_integral(scale_factor)
 
         # Update Ki via PIDGainsManager
         self._gains_manager.set_gains(
@@ -1725,12 +1719,6 @@ class AdaptiveThermostat(ClimateControlMixin, ClimateHandlersMixin, ClimateEntit
         """Set the force off flag."""
         self._force_off = value
 
-    # Setter callbacks for KeManager (kept for backward compatibility, unused)
-    def _set_ke(self, value: float) -> None:
-        """Set Ke value - legacy callback, now handled by gains_manager."""
-        # No-op: KeManager now uses gains_manager directly
-        pass
-
     # Setter callbacks for ControlOutputManager
     def _set_control_output(self, value: float) -> None:
         """Set the control output value."""
@@ -1764,9 +1752,10 @@ class AdaptiveThermostat(ClimateControlMixin, ClimateHandlersMixin, ClimateEntit
         """Set the current temperature time."""
         self._cur_temp_time = value
 
-    def _is_pid_converged_for_ke(self) -> bool:
+    def is_pid_converged_for_ke(self) -> bool:
         """Check if PID has converged sufficiently for Ke learning.
 
+        Satisfies the KeManagerState.is_pid_converged_for_ke() Protocol method.
         Returns True if the adaptive learner reports PID convergence
         (stable performance for required number of consecutive cycles).
         """
@@ -1893,8 +1882,9 @@ class AdaptiveThermostat(ClimateControlMixin, ClimateHandlersMixin, ClimateEntit
     def _effective_min_on_seconds(self) -> int:
         """Minimum open time including manifold transport delay."""
         base = self._min_open_time.seconds
-        if self._transport_delay and self._transport_delay > 0:
-            base += int(self._transport_delay * 60)
+        if self._transport_delay_minutes and self._transport_delay_minutes > 0:
+            # C02: _transport_delay_minutes is in minutes; convert to seconds here.
+            base += int(self._transport_delay_minutes * 60)
         return base
 
     def _query_and_mark_manifold(self, action: str = "heating") -> None:
@@ -1905,15 +1895,15 @@ class AdaptiveThermostat(ClimateControlMixin, ClimateHandlersMixin, ClimateEntit
         """
         coordinator = self._coordinator
         if coordinator and self._zone_id:
-            delay = coordinator.get_transport_delay_for_zone(self.entity_id)
-            if delay is not None and delay > 0:
-                self._transport_delay = delay
-                # Pass to PID controller for dead time compensation
-                self._pid_controller.set_transport_delay(delay)
-                # Pass to cycle tracker if available
+            # C02: coordinator returns minutes; store with explicit unit in field name.
+            delay_minutes = coordinator.get_transport_delay_for_zone(self.entity_id)
+            if delay_minutes is not None and delay_minutes > 0:
+                self._transport_delay_minutes = delay_minutes
+                # PID controller and cycle tracker both expect minutes.
+                self._pid_controller.set_transport_delay(delay_minutes)
                 if self._cycle_tracker:
-                    self._cycle_tracker.set_transport_delay(delay)
-                _LOGGER.debug("%s: Set transport delay %.1f minutes for %s start", self.entity_id, delay, action)
+                    self._cycle_tracker.set_transport_delay(delay_minutes)
+                _LOGGER.debug("%s: Set transport delay %.1f min for %s start", self.entity_id, delay_minutes, action)
 
         manifold_registry = self.hass.data.get(DOMAIN, {}).get("manifold_registry")
         if manifold_registry:
@@ -1928,9 +1918,9 @@ class AdaptiveThermostat(ClimateControlMixin, ClimateHandlersMixin, ClimateEntit
     @callback
     def _on_heating_ended_event(self, event: HeatingEndedEvent) -> None:
         """Handle HEATING_ENDED event - reset transport delay."""
-        if self._transport_delay is not None:
+        if self._transport_delay_minutes is not None:
             self._pid_controller.reset_dead_time()
-            self._transport_delay = None
+            self._transport_delay_minutes = None
             _LOGGER.debug("%s: Reset transport delay on heating stop", self.entity_id)
 
     async def _async_heater_turn_off(self, force=False, _effective_mode: HVACMode | None = None):
@@ -1945,9 +1935,9 @@ class AdaptiveThermostat(ClimateControlMixin, ClimateHandlersMixin, ClimateEntit
                 heater/cooler entity is targeted (C01 fix).
         """
         # Reset transport delay when heating stops
-        if self._transport_delay is not None:
+        if self._transport_delay_minutes is not None:
             self._pid_controller.reset_dead_time()
-            self._transport_delay = None
+            self._transport_delay_minutes = None
             _LOGGER.debug("%s: Reset transport delay on heating stop", self.entity_id)
 
         # Update open/closed times in case PID mode changed
