@@ -522,7 +522,7 @@ class TestAsyncEvaluate:
         assert result == HVACMode.HEAT
 
     @pytest.mark.asyncio
-    async def test_winter_blocks_cool(self, mock_hass, mock_coordinator, default_config):
+    async def test_winter_blocks_cool(self, mock_hass, mock_coordinator):
         """Test winter season blocks switching to COOL even when forecast is warm."""
         mock_coordinator.get_active_zone_setpoints.return_value = [16.0]
         mock_coordinator.weather_entity = "weather.home"
@@ -534,10 +534,8 @@ class TestAsyncEvaluate:
         # setpoint=16, forecast=19 > 16+2=18 → would suggest COOL, blocked by winter lock.
         # Override winter_below to ensure 5°C median counts as winter.
         # Use a forecast that yields median > setpoint+threshold.
-        _config = {
-            **default_config,
-            # Lower setpoint via zones so forecast > setpoint + threshold
-        }
+        # That's impossible with winter_below=12: if median > summer_above=18 it's summer.
+        # So we set winter_below=30 to make median=5 still "winter" despite being above setpoint.
         mock_coordinator.get_active_zone_setpoints.return_value = [10.0]
         # Forecast median 5°C is winter, 5°C < 10 - 2 = 8 → HEAT suggestion.
         # Need median > setpoint + threshold to suggest COOL while still being winter.
@@ -589,7 +587,7 @@ class TestAsyncEvaluate:
         assert result == HVACMode.COOL
 
     @pytest.mark.asyncio
-    async def test_summer_blocks_heat(self, mock_hass, mock_coordinator, default_config):
+    async def test_summer_blocks_heat(self, mock_hass, mock_coordinator):
         """Test summer season blocks switching to HEAT even when forecast is cold."""
         # Use a config where everything above 0°C is "summer" so a cold forecast
         # still triggers season=summer, but forecast < setpoint - threshold → HEAT suggestion.
@@ -847,8 +845,6 @@ class TestGetStateAttributes:
 
     def test_mark_switched_does_not_recompute_iso_on_attribute_reads(self, mock_hass, mock_coordinator, default_config):
         """ISO strings pre-computed in mark_switched, not in get_state_attributes (H07)."""
-        import datetime
-
         manager = AutoModeSwitchingManager(mock_hass, default_config, mock_coordinator)
         mock_coordinator.get_active_zone_setpoints.return_value = [20.0]
 
@@ -930,26 +926,34 @@ class TestForecastHoursAlias:
         validated dict when the user didn't explicitly set it.  The manager's ``or``
         chain then reaches ``forecast_hours`` correctly.
 
-        This test inspects the schema key objects directly (voluptuous is never mocked),
-        so it is immune to the ``homeassistant.helpers.config_validation`` test-isolation
-        issue that other approaches face.
+        This test inspects the schema key objects directly using duck-typing (not
+        ``isinstance(key, vol.Optional)``), so it is immune to the
+        ``homeassistant.helpers.config_validation`` AND voluptuous sys.modules mocking
+        that test_sensor.py applies at module load time.
         """
-        import voluptuous as vol
         from custom_components.adaptive_climate import AUTO_MODE_SWITCHING_SCHEMA
         from custom_components.adaptive_climate.const import CONF_FORECAST_DAYS
 
         forecast_days_key = None
         for key in AUTO_MODE_SWITCHING_SCHEMA.schema:
-            if isinstance(key, vol.Optional) and key.schema == CONF_FORECAST_DAYS:
+            # Duck-type: real vol.Optional instances carry a .schema attribute
+            # Do NOT use isinstance(key, vol.Optional) — vol.Optional is mocked by
+            # test_sensor.py and isinstance() rejects non-type second arguments.
+            if getattr(key, "schema", None) == CONF_FORECAST_DAYS:
                 forecast_days_key = key
                 break
 
         assert forecast_days_key is not None, (
             f"Could not find '{CONF_FORECAST_DAYS}' key in AUTO_MODE_SWITCHING_SCHEMA — did the schema change?"
         )
-        assert forecast_days_key.default is vol.UNDEFINED, (
+        # Real voluptuous UNDEFINED is a singleton sentinel (class name varies by version:
+        # "_Undefined" or "Undefined").  Comparing against vol.UNDEFINED would fail after
+        # test_sensor.py mocks voluptuous, so we check the type name instead — works
+        # regardless of sys.modules state.
+        default_type_name = type(forecast_days_key.default).__name__
+        assert "undefined" in default_type_name.lower(), (
             f"M04: '{CONF_FORECAST_DAYS}' must have no default in AUTO_MODE_SWITCHING_SCHEMA, "
-            f"got default={forecast_days_key.default}. "
+            f"got default={forecast_days_key.default!r} (type={default_type_name!r}). "
             "This default shadows the 'forecast_hours' backward-compat alias."
         )
 
