@@ -1,6 +1,594 @@
 # CHANGELOG
 
 
+## v0.65.0 (2026-05-26)
+
+### Bug Fixes
+
+- Quick-win critical fixes (C01/M09/C02/C04/C06/H11/H12/C05)
+  ([`997980d`](https://github.com/afewyards/ha-adaptive-climate/commit/997980d03ccb45faf40b5413eece3a6d84563d06))
+
+- C01/M09: night_setback_calculator reads coordinator.weather_entity (public property) instead of
+  non-existent _weather_entity; delete brittle fallback list (weather.home / knmi_home /
+  forecast_home) - C02: fix ValidationManager.check_auto_apply_limits ISO string vs datetime
+  comparison; wire PIDGainsManager into AdaptiveLearner so seasonal-limit gate uses real pid_history
+  instead of empty list - C04: restore _heating_cycle_count/_cooling_cycle_count from cycle history
+  length in restore_from_dict so learning_status survives restart - C06: unify format_version as int
+  (CURRENT_VERSION=10) in learner_serialization; add int() coercion for defensive compat - H11:
+  SolarGainLearner._get_season is hemisphere-aware; SolarGainManager accepts
+  southern_hemisphere=False; Season mapping flipped for AU/NZ/etc. - H12: _get_cloud_adjustment
+  skips back-extrapolation when actual cloud factor > 2x learned (returns 0.0); caps adjustment at
+  3.0x - C05: f-string :.4f crash when old_values missing kp/ki/kd — default to 0.0 and wrap
+  notification block in try/except
+
+- Remaining test failures and wave 0 cleanup
+  ([`9b48e9e`](https://github.com/afewyards/ha-adaptive-climate/commit/9b48e9e907e73979bd485f945c72d76be7bb8370))
+
+- test_cross_feature_interactions: fix naive datetime comparison - disturbance_detector: extract
+  magic numbers to named constants - const: add EVENT_HEATER_CONTROL_FAILED constant -
+  pwm_controller: clamp time_on to ensure min_closed_time
+
+- Seven critical bug fixes from Theme C review
+  ([`2a43a9e`](https://github.com/afewyards/ha-adaptive-climate/commit/2a43a9e8a7b7d2c8d3fddfff5da47b5c050376ef))
+
+- C01+M09: use coordinator.weather_entity property in NightSetbackCalculator; remove brittle
+  hardcoded fallback entity list - C02: fix ISO str vs datetime TypeError in ValidationManager
+  seasonal limit gate; wire real pid_history from PIDGainsManager at both call sites in
+  AdaptiveLearner - C04: restore _heating/_cooling_cycle_count from history length on restart so
+  convergence counters survive HA reboot - C05: guard f-string format crash when old_values dict is
+  missing kp/ki/kd keys in climate.py auto-apply notification - C06: unify format_version as int
+  (CURRENT_VERSION constant) throughout learner_serialization; add int() coercion on read to
+  tolerate legacy strings - H11: add southern_hemisphere flag to SolarGainLearner/_Manager so
+  AU/NZ/ZA users get correct season mapping - H12: cap cloud-coverage back-extrapolation at 3× and
+  skip unreliable OVERCAST→CLEAR extrapolation (return 0.0 sentinel)
+
+- Wave 4 test compatibility fixes
+  ([`ad8d23e`](https://github.com/afewyards/ha-adaptive-climate/commit/ad8d23ecfa54b887bec020b53e4e1a4920847f32))
+
+- StrEnum → str, Enum for Python 3.9 compatibility (learning_health_monitor.py) - Update
+  format_version assertions from 10 to 11 (learner_serialization tests) - Fix dt_util patch path
+  after learning.py split (test_rate_limiting.py) - Add timezone.utc to datetime.now() calls
+  (test_rate_limiting.py) - Fix managers.events mock setup (test_coordinator.py,
+  test_central_controller.py)
+
+- **concurrency**: Lock-protect mode switches and multizone race conditions
+  ([`030b2aa`](https://github.com/afewyards/ha-adaptive-climate/commit/030b2aae5e0c12c8d101bfff8665f1facd477257))
+
+- C01: set _hvac_mode under _temp_lock BEFORE first I/O await in async_set_hvac_mode so control-loop
+  ticks see the committed mode - Add _effective_mode param to _async_heater_turn_off so the old
+  device (heater vs cooler) is stopped correctly during mode transitions - M15: move
+  ModeChangedEvent emission to finally so it survives exceptions - L17: add async_set_integral()
+  acquires _temp_lock; event handler uses it - H11: fix set_hvac_mode type annotation (tuple →
+  union) - C07: _cancel_*_startup_locked pre-clears state fields before lock release eliminating the
+  re-entry window for concurrent update() calls; rename methods to reflect actual lock behaviour -
+  H08: _delayed_*_turnoff finally blocks hold _startup_lock when resetting task field to prevent
+  double-schedule race - H14: add _closed flag; tasks skip lock reacquisition after async_cleanup -
+  C04: add _rerun_pending so demand changes mid-flight update are not dropped - H01: wrap
+  async_create_task in try/except; reset _update_pending on failure - C05: _apply_house_mode sets
+  mode_sync._sync_in_progress to suppress O(N) redundant ModeSync fan-out during auto-mode switching
+  - H02: update_outdoor_temp_lagged seeds EMA on first call; skips dt=0 to preserve history after HA
+  replay events - H03: replace linear Euler alpha with exponential 1-exp(-dt/tau) which is stable
+  for any sampling interval (Euler overflows for dt > tau)
+
+- **cycle**: Correct cycle metrics calculations for accurate learning
+  ([`9ee06bd`](https://github.com/afewyards/ha-adaptive-climate/commit/9ee06bd3820fb116c705253c71c2371faffe90e2))
+
+C02: add per-entity null/unavailable guard inside is_active() loop so one missing manifold entity no
+  longer aborts the entire check.
+
+C04: filter temperature history to settling window before calculating undershoot so cold morning
+  recovery cycles no longer report false undershoot and trigger spurious Ki boosts via
+  UndershootDetector.
+
+C05: replace fabricated median-timestamp heater_active_periods with real device on/off event
+  timestamps tracked by HEATING_STARTED/HEATING_ENDED.
+
+M02: capture HVAC mode at cycle start (set_cycle_mode) so a thermostat flip after SETTLING_STARTED
+  is not reflected in the metrics row.
+
+M03: clear _prev_cycle_end_temp on abort paths (is_abort=True) to prevent the next cycle computing
+  inter_cycle_drift against a stale value.
+
+H07: raise temperature_history deque maxlen 2000→5000 and capture _cycle_start_temp from the
+  CycleStartedEvent so deque truncation on long cycles with sub-30s sampling cannot corrupt
+  starting_delta or inter_cycle_drift.
+
+H08: convert _outdoor_temp_history from unbounded list to deque(maxlen=500).
+
+H09: add heating-type table as third step in settling timeout fallback chain (explicit → tau-derived
+  → heating-type → generic 120 min) so fast systems do not wait an excessive 120 min for settling.
+
+- **events**: Copy listener list during emit to prevent mutation error (M13)
+  ([`3bd6e89`](https://github.com/afewyards/ha-adaptive-climate/commit/3bd6e894b03ff41403eec6fc102c28fdafc437e1))
+
+- **H01**: Respect zero PWM instead of falling through to default
+  ([`e8c334e`](https://github.com/afewyards/ha-adaptive-climate/commit/e8c334e840bc656bdce5f5c78d4075e7cea55c3f))
+
+Add _resolve_pwm() helper with explicit None checks so that timedelta(0) (valve mode) is preserved
+  instead of being treated as falsy and replaced with the 15-min default.
+
+- **H03**: Apply mode-appropriate PID limits for initial_hvac_mode
+  ([`dfed807`](https://github.com/afewyards/ha-adaptive-climate/commit/dfed8077e85d60edc43fca35a890086ee99c462c))
+
+AC-capable zones with initial_hvac_mode: heat were getting cooling output limits [-100, 0] instead
+  of heating limits [0, 100] because _min_out/_max_out were set based on _ac_mode alone, ignoring
+  the current _hvac_mode. Add a mode-specific override after the ac_mode block in __init__ to apply
+  the correct limits.
+
+Includes regression tests in TestACModeInitLimits.
+
+- **H04**: Use entity_id for manifold lookup in preheat scheduling
+  ([`41a5a4d`](https://github.com/afewyards/ha-adaptive-climate/commit/41a5a4d05ce53acf672cc74423720a9e4e599de3))
+
+Manifold registry is keyed by entity_id ("climate.living_room"), not the zone slug ("living_room").
+  Passing _zone_id silently returned 0 transport delay for all zones instead of the real value.
+
+- **H05**: Update zone demand before querying transport delay
+  ([`1e8d9e5`](https://github.com/afewyards/ha-adaptive-climate/commit/1e8d9e5adac2df0a19e89e66c5f6198f582559c9))
+
+set_control_value() queried the coordinator for transport delay before calling update_zone_demand(),
+  so the first heating cycle on a cold manifold always received delay=0 (zone not yet marked as
+  active).
+
+Move update_zone_demand() into set_control_value() before the delay query, and remove the
+  now-redundant call from _async_control_heating.
+
+Adds TestSetControlValueDemandOrder regression tests.
+
+- **H06**: Pass heat-output sensor config in sensor discovery payload
+  ([`18af8b1`](https://github.com/afewyards/ha-adaptive-climate/commit/18af8b1ee81fab89310d3b254c2ad4cf00126976))
+
+The sensor discovery payload in climate_setup.py omitted supply_temp_sensor, return_temp_sensor,
+  flow_rate_sensor and fallback_flow_rate, so HeatOutputSensor always received None for all sensor
+  references.
+
+Read these values from domain_data (hass.data[DOMAIN]) and include them in the discovery payload
+  alongside the existing zone/heater/cooler keys.
+
+Adds TestSensorDiscoveryPayload regression tests.
+
+- **H07**: Use PIDGainsManager.get_history() for rollback
+  ([`b33bc35`](https://github.com/afewyards/ha-adaptive-climate/commit/b33bc35d15f33ca8060d085188e69e95f21be422))
+
+Replace the broken adaptive_learner.get_previous_pid() call (method doesn't exist) with
+  self._gains_manager.get_history(_hvac_mode)[-2]. Add set_integral(0, ROLLBACK) before applying
+  gains. Change return type from bool to dict (the restored snapshot) and raise HomeAssistantError
+  instead of returning False when history is too short. Update tests to match new contract and use
+  Exception (= HomeAssistantError in test env) in pytest.raises to avoid mock-ordering fragility.
+
+- **H09**: Add duty field to CYCLE_ENDED metrics_dict
+  ([`74acf71`](https://github.com/afewyards/ha-adaptive-climate/commit/74acf7108f599211f2f67c2a13cf377bf6ce05e0))
+
+metrics_dict built for the CycleEndedEvent omitted 'duty', so _handle_cycle_ended_for_heating_rate()
+  always received duty=None and never called heating_rate_learner.update_session().
+
+Compute effective_duty = heater_on_seconds / cycle_duration_seconds from the existing
+  _device_on_time / _device_off_time timestamps and include it as 'duty' in metrics_dict. Clamps to
+  [0, 1]; stays None when device on/off times are unavailable.
+
+Adds TestCycleEndedEventDuty regression tests.
+
+- **H10**: Pass cooling_type and apply compressor protection defaults
+  ([`cc5883d`](https://github.com/afewyards/ha-adaptive-climate/commit/cc5883d07b6ea000e62c70db72f4c0c876d9e0cd))
+
+- **init**: Use getattr for optional _cooling_type attribute
+  ([`e27617b`](https://github.com/afewyards/ha-adaptive-climate/commit/e27617b3a12bed8ffbfed0fd91d7c02c68a25353))
+
+The HeaterController initialization referenced thermostat._cooling_type which doesn't exist on
+  AdaptiveThermostat. Use getattr with None default since cooling_type is optional in
+  HeaterController.
+
+- **L01**: Remove documentation for non-existent cost_report service
+  ([`0ba9399`](https://github.com/afewyards/ha-adaptive-climate/commit/0ba93992c1720cece8eef9138afe22cf2c689891))
+
+- **L02**: Use production import instead of copied validator in tests
+  ([`42ac2eb`](https://github.com/afewyards/ha-adaptive-climate/commit/42ac2ebb61561ac014be3d15f95c8300a2a9b3cc))
+
+- Import validate_pwm_compatibility from climate_setup.py - Add mock for split_entity_id to avoid HA
+  dependency - Update assertions from ValueError to vol.Invalid (matches production)
+
+- **learning**: Make auto-apply counter per-mode (C03)
+  ([`18a45de`](https://github.com/afewyards/ha-adaptive-climate/commit/18a45de23cf6576601ca823ce69e3676f992558e))
+
+`increment_auto_apply_count()` now accepts a `mode` parameter and routes to the correct HEAT/COOL
+  counter via ConfidenceTracker. `async_auto_apply_adaptive_pid()` receives the current HVAC mode
+  from climate.py and passes it through, so cooling applies no longer consume the heating budget and
+  vice versa.
+
+- **M01**: Restore manifold state after learning store creation
+  ([`7172046`](https://github.com/afewyards/ha-adaptive-climate/commit/7172046ba95850b0c28b5fc13efc1444733f8df9))
+
+Move manifold state restore from __init__.py (where LearningDataStore doesn't exist yet) to
+  climate_setup.py, inside the block that creates the LearningDataStore singleton. This ensures
+  restore_state() is called with actual persisted data on every normal startup.
+
+- **M02,M03**: Discover number platform and instantiate SystemHealthSensor
+  ([`6b2af27`](https://github.com/afewyards/ha-adaptive-climate/commit/6b2af2782dfd3a834cd0f14d1b95ed91b4189dc6))
+
+M02: climate_setup.py only triggered sensor platform discovery, never number. LearningWindowNumber
+  therefore never appeared in HA. Added one-shot discovery.async_load_platform('number') inside the
+  learning-store creation block (first zone only, guarded by number_platform_loaded flag).
+
+M03: sensor.py defined SystemHealthSensor in sensors/health.py and exported it from
+  sensors/__init__.py but never imported or added it to the system sensors list. Added import and
+  SystemHealthSensor(hass) creation alongside TotalPowerSensor in the system_sensors_created guard
+  block.
+
+Adds TestNumberPlatformDiscovery and TestSystemSensorSetup regression tests.
+
+- **M04**: Make schema inspection test immune to voluptuous sys.modules mock
+  ([`6339ba2`](https://github.com/afewyards/ha-adaptive-climate/commit/6339ba25a8f73a93061903eaaaf292f8d6ea367f))
+
+test_sensor.py replaces sys.modules["voluptuous"] at import time, making vol.Optional a Mock (not a
+  type) and breaking isinstance() checks, and vol.UNDEFINED a Mock (not the sentinel). Fixed by: -
+  Duck-typing the key lookup via getattr(key, "schema", None) - Checking the default type name
+  ("undefined" in name) instead of `is vol.UNDEFINED`
+
+Also remove three unused variables surfaced by pyright: _config, two default_config fixture params,
+  and import datetime.
+
+- **M04**: Remove forecast_days schema default that shadowed forecast_hours alias
+  ([`0f400c4`](https://github.com/afewyards/ha-adaptive-climate/commit/0f400c4cad8fcad25a560a86cb3f8db531b70828))
+
+vol.Optional(CONF_FORECAST_DAYS, default=DEFAULT_FORECAST_DAYS) injected forecast_days=3 into the
+  validated config even when the user only set forecast_hours. The manager's
+  `config.get(CONF_FORECAST_DAYS) or config.get("forecast_hours")` then returned 3 (truthy),
+  silently ignoring the alias. Fix: remove the default= from the schema; the fallback is still
+  provided by the manager's `or DEFAULT_FORECAST_DAYS` tail.
+
+- **M05**: Honor contact_action=none — no pause, no frost-protection
+  ([`c261b91`](https://github.com/afewyards/ha-adaptive-climate/commit/c261b915e4fa8f8b06a03a9e913acf0735bf00b1))
+
+ContactAction lacked a NONE member so climate.py's binary ternary mapped "none" to FROST_PROTECTION.
+  PauseDetector.is_learning_paused() also checked is_any_contact_open() without considering the
+  action, so learning was incorrectly paused for observe-only sensors.
+
+Fixes: - Add ContactAction.NONE to the enum - climate.py: map "none" → ContactAction.NONE (not
+  FROST_PROTECTION) - pause_detector.is_learning_paused(): skip open-check when action is NONE
+
+- **M06**: Reset _last_control_time after humidity-pause decay
+  ([`88b9de0`](https://github.com/afewyards/ha-adaptive-climate/commit/88b9de0f2bdbb5c3aee9c80d1f4e29610c5df6d6))
+
+The decay branch returned early without updating _last_control_time, so successive paused calls
+  computed elapsed = (call N time - last normal-control time) instead of (call N time - call N-1
+  time). This caused compounding stale elapsed: a 60-s interval decoded as 120 s on the second call,
+  applying 0.81 decay instead of the intended 0.90.
+
+Fix: capture current_time before computing elapsed and write it back to _last_control_time after the
+  decay is applied.
+
+- **M08**: Emit CYCLE_ENDED before scheduling learning save
+  ([`f9697ed`](https://github.com/afewyards/ha-adaptive-climate/commit/f9697ed6b4e30b5a402e54bbf00899ae1a5a819c))
+
+- **M09**: Use epsilon comparison in _gains_match_last_entry instead of 2-decimal rounding
+  ([`759fc60`](https://github.com/afewyards/ha-adaptive-climate/commit/759fc6048f3ee66299a98ec97e9386f839d5f4af))
+
+Rounding to 2 decimal places before comparing caused gain changes smaller than 0.005 (e.g. ki: 0.010
+  → 0.011) to be treated as unchanged. The gains were applied to the PID controller but no history
+  entry was recorded, breaking the audit trail for small learning adjustments.
+
+Fix: compare with abs(delta) < 1e-9 so any real change is always recorded. JSON serialises floats at
+  full precision so exact equality is safe for the RESTORE dedup use case.
+
+- **M10**: Restore cooling gains from history when initial_cooling_gains is None
+  ([`0fdb82a`](https://github.com/afewyards/ha-adaptive-climate/commit/0fdb82a29c11aa966720ad4f3453e83c4f47d779))
+
+restore_from_state guarded cooling restore behind `if self._cooling_gains is not None`, but zones
+  that never entered COOL mode start with _cooling_gains=None (lazy-init). The cooling history was
+  loaded into _pid_history["cooling"] but never applied, so get_gains(COOL) fell back to heating
+  gains after restart.
+
+Fix: restore from cooling history unconditionally when entries exist; use _cooling_gains as the
+  key-fallback when set, heating gains otherwise.
+
+- **M10**: Serialize cooling PID history with mode-keyed dict
+  ([`2047fcd`](https://github.com/afewyards/ha-adaptive-climate/commit/2047fcd07f0676e9068c92ce6037940dec397a88))
+
+state_attributes.py previously called get_history() without a mode arg, defaulting to heating, and
+  serialized the result as a flat list. On restore_from_state() that flat list was treated as
+  heating-only, silently discarding all cooling PID tuning across every restart.
+
+Fix: serialize pid_history as {"heating": [...], "cooling": [...]} so both mode histories survive
+  the HA state round-trip. Adds a _format_history_entry() helper to avoid inline duplication and
+  adds test_cooling_history_survives_state_roundtrip as a regression guard.
+
+- **M11**: Move milestone check from state attributes to control cycle
+  ([`445b71c`](https://github.com/afewyards/ha-adaptive-climate/commit/445b71c534188fa63cfd98e9576a7fdeefc3cf47))
+
+State attributes are read on every state write, UI poll, recorder tick and template evaluation.
+  Spawning a background task on each read flooded the event-loop with duplicate milestone checks.
+
+Now milestone check runs once per control cycle in _async_control_heating.
+
+- **migration**: Implement v4→v10 learner migration chain, never wipe data
+  ([`cbb9a08`](https://github.com/afewyards/ha-adaptive-climate/commit/cbb9a086a552d7ca5c68e8d0357c984ebbc213dc))
+
+- Add per-version migrators (_migrate_v4_to_v5 through _migrate_v9_to_v10) in
+  learner_serialization.py; chain via _migrate() dispatch - Replace destructive fallback (wiped all
+  history on unknown version) with lossless migration that preserves cycle_history + confidence -
+  Add _migrate_store() for persistence.py store v1→v5 upgrade - Restore COOL gains in
+  PIDGainsManager.restore_from_state (C04) - Add PIDController.clamp_integral() and call it after
+  state restore (C05) - Persist _cycle_active/_has_demand in HeaterController to prevent spurious
+  CYCLE_STARTED after mid-cycle HA restart (H05) - Decouple auto-learning setback from night-setback
+  (H11/D9): now returns in_night_period=False with info["auto_learning_window"]=True - Add v4–v9
+  fixture files and migration round-trip tests
+
+- **multizone**: A03 split async_evaluate, H06 mark_switched, H07 ISO cache, H10 remove_zone
+  ([`808cdf5`](https://github.com/afewyards/ha-adaptive-climate/commit/808cdf5892e6f19b22ea8d988edd6597ae96eb78))
+
+- A03: split AutoModeSwitchingManager.async_evaluate into pure helpers _should_switch(),
+  _compute_target_mode(), and mark_switched() so each function has a single responsibility - H06:
+  _last_switch only bumped via mark_switched() after coordinator confirms ≥1 zone received the
+  command; no-op evaluations (all OFF, service errors) no longer consume the rate-limit interval -
+  H07: pre-compute ISO strings in mark_switched(); get_state_attributes returns cached strings
+  instead of recomputing on every read - H10: ThermalGroupManager.remove_zone() removes zone from
+  its group on unregister_zone; cleans up empty groups to prevent stale refs - Add tests for A03
+  helpers, H06 mark_switched semantics, H07 ISO caching, and H11 auto-learning setback override
+  decoupling
+
+- **persistence**: Audit and fix cross-restart state consistency (A04)
+  ([`9a35934`](https://github.com/afewyards/ha-adaptive-climate/commit/9a3593411cf23ee0bb9f9e31198225557effc7f8))
+
+Bump serialization to v11, persist ValidationManager._last_seasonal_shift (7-day auto-apply block
+  survives restart), add audit matrix doc-comment, add round-trip tests and v10 fixture.
+
+- **sensors**: Services & energy sensor correctness fixes
+  ([`efe7a24`](https://github.com/afewyards/ha-adaptive-climate/commit/efe7a242454c78c112c4f63916fa3131526e3580))
+
+- C01: tag weekly snapshot with start_date ISO week, not end_date - C02: init confidence_raw=None
+  per zone to prevent cross-zone leak - H04: replace %-d strftime with .day to fix Windows/musl
+  portability - H05: always register run_learning/pid_recommendations (remove debug gate) - H07:
+  skip PID recommendation when kp/ki/kd missing from state attrs - C06/M04: map currency symbols to
+  ISO 4217; lock currency after first read - C07: use dt_util.now() (local) for week boundary to fix
+  UTC-offset resets - H10: compare against last_meter_reading for meter reset detection - M05: add
+  BTU/THERM/MMBTU to UNIT_CONVERSIONS; raise on unknown unit
+
+- **tests**: Resolve coordinator test isolation with sys.modules cleanup
+  ([`bd83d83`](https://github.com/afewyards/ha-adaptive-climate/commit/bd83d83d4b318ca6de6b0b29d9d7466e891ca159))
+
+Evict cached coordinator and central_controller modules from sys.modules before importing
+  coordinator in test_coordinator.py. When test_central_controller.py runs first it caches
+  coordinator with mock managers.events classes bound in its globals; subsequent tests that expect
+  real ZoneRegisteredEvent/ZoneUnregisteredEvent isinstance checks fail. Removing stale entries
+  forces a fresh import that picks up the real managers.events module.
+
+- **tests**: Resolve sensors_energy test isolation issues
+  ([`eea752c`](https://github.com/afewyards/ha-adaptive-climate/commit/eea752c4492ee5240dfc9c4fadb9a62c5433196c))
+
+Replace asyncio.get_event_loop().run_until_complete() with asyncio.run() in test_sensors_energy.py,
+  test_energy.py, test_init.py, and test_climate.py.
+
+Root cause: test_integration_control_loop.py uses asyncio.run() which closes and removes the global
+  event loop after each call. Subsequent tests using asyncio.get_event_loop().run_until_complete()
+  then fail with RuntimeError: 'There is no current event loop'. asyncio.run() is self-contained and
+  does not depend on global event loop state.
+
+- **tests**: Update PWM logging test to match current behavior
+  ([`438af9b`](https://github.com/afewyards/ha-adaptive-climate/commit/438af9bfd76d7f6e7d79a88149ff7e782b2944d3))
+
+The log message format in learning_coordinator.py changed from "PWM mode active" / "filtered out" /
+  "expected behavior" to "PWM mode (period=Xs): filtered N oscillation rule(s)." - update the
+  assertion to match the actual output.
+
+- **time**: Replace wall-clock time with monotonic/UTC throughout
+  ([`ca6a523`](https://github.com/afewyards/ha-adaptive-climate/commit/ca6a523b72b3203563b6decf7910b0188a3b948b))
+
+C01: pid_controller uses time.monotonic() instead of time.time() for dt
+
+C06: notification_manager uses time.monotonic() for cooldown tracking
+
+C09: undershoot_detector.last_adjustment_time changed to wall-clock datetime
+
+C10: learner_serialization serializes last_adjustment_time as ISO string
+
+M25: ke_manager.restore_state() always resets monotonic timestamps to None
+
+M10: wrap fromisoformat() calls in try/except in preheat, serialization, and learning modules; also
+  restore undershoot cooldown datetime from persisted state tests: update conftest mock to return
+  timezone-aware UTC datetimes; fix test helpers to use datetime.now(timezone.utc) for cooldown time
+  manipulation
+
+- **undershoot**: C07-c08-h14-h15-h16-m15-m16 correctness batch
+  ([`18f724e`](https://github.com/afewyards/ha-adaptive-climate/commit/18f724eb73503920dbf713985abef0dc79abf832))
+
+C07: docs-only — update CLAUDE.md Ki cap from 2.0x to 3.0x (code was correct)
+
+C08: clamp cumulative_ki_multiplier to [1.0, MAX] in apply_adjustment and apply_rate_adjustment;
+  clamp restored value in learning.py restore path H14: gate should_adjust_ki when effective
+  multiplier ≤ 1.001 (no-op near cap)
+
+H15: exponential decay on _time_below_target and _thermal_debt on every call using
+  UNDERSHOOT_TBT_DECAY_TAU constants (D10 decision); add tau dict to const.py H16: replace hardcoded
+  "undershoot_ki_boost" string with PIDChangeReason.UNDERSHOOT_BOOST.value
+
+M15: reset consecutive_failures only on clean success (rise_time set AND undershoot below threshold)
+  M16: replace hardcoded 10.0 thermal-debt cap with 2×SEVERE×threshold per type
+
+- **validation**: Nan/inf/negative guards across PID, gains, sensors, multizone
+  ([`8608c9d`](https://github.com/afewyards/ha-adaptive-climate/commit/8608c9dc054cccda7f708206cb6f696d0bcd3927))
+
+- H08: set_pid_param rejects NaN/Inf/negative gains; raises TypeError for non-numeric, ValueError
+  for invalid float (set_feedforward same pattern) - H09: PIDGainsManager.set_gains validates all
+  gains before any state mutation - H10: decay_integral clamps factor [0,1] and raises on NaN;
+  scale_integral raises on non-finite or non-positive factor - M22: PIDTuningManager.async_set_pid
+  validates at service boundary for clear user-facing errors (cascades to H09 for double coverage) -
+  H14: state_restorer guards set_hvac_mode against "unavailable"/"unknown" on restore; falls back to
+  HVACMode.OFF with warning log - H13: recovery_deadline parse wrapped in try/except; malformed
+  values fall back to 07:00 with error log instead of crashing - A08: new
+  tests/test_pid_nan_safety.py covers all entry points with NaN, Inf, negative, non-numeric inputs
+  and 100-iteration fuzz harness - fix test_pid_controller.py: patch monotonic (not time) after
+  linter fix; negative feedforward now expects ValueError per H08 rule
+
+### Features
+
+- **contact**: Add clamp action for contact sensors
+  ([`67368b5`](https://github.com/afewyards/ha-adaptive-climate/commit/67368b5e79f085adbf3c1a2374b1d41b7158b067))
+
+Adds a new contact_action option "clamp" that offsets the setpoint by 2°C when a contact sensor
+  opens (after delay), instead of pausing heating: - Heat mode: lowers setpoint by 2°C - Cool mode:
+  raises setpoint by 2°C
+
+Unlike "pause", heating/cooling continues with the adjusted setpoint. Like "frost_protection",
+  learning is paused during the adjustment.
+
+- **coordinator**: Add zone lifecycle events via CycleEventDispatcher (A02)
+  ([`9f7b17b`](https://github.com/afewyards/ha-adaptive-climate/commit/9f7b17bbf2e616f80133a80f21133d3227c48fde))
+
+- **heat-pipeline**: Wire HeatPipeline with exponential rise/decay model
+  ([`219adf8`](https://github.com/afewyards/ha-adaptive-climate/commit/219adf87f84546a964c19e3143aaf09ba008e5bc))
+
+Replace linear committed-heat model with exponential physics matching each heating type's thermal
+  inertia (tau: floor 45min, radiator 15min, convector 7min, forced_air 2min).
+
+- HeatPipeline: Q(t)=Q_max*(1-exp(-t/tau)) rise, Q_close*exp(-t/tau) decay - HeaterController:
+  valve_opened/closed wired in async_turn_on/off; committed heat snapshot stored at each turn-off;
+  heating_type param selects tau - PWMController: accepts HeatPipeline; calculate_adjusted_on_time
+  subtracts committed heat (exponential path) instead of blindly adding transport_delay (fixes M05
+  asymmetry); legacy linear path preserved when no pipeline - HeatingEndedEvent: carries
+  committed_heat_seconds for downstream split - CycleTrackerManager: threads committed_heat_seconds
+  to metrics recorder - CycleMetricsRecorder: set_committed_heat_at_end + overshoot split via
+  calculate_overshoot_components (controllable vs committed) - climate_init: passes heating_type to
+  HeaterController for correct tau - Tests: rewritten for exponential model; integration test
+  updated for new eager-pipeline-creation behaviour (always created for PWM systems)
+
+- **learning**: Add LearningHealthMonitor for aggregate health score (A06)
+  ([`6763b72`](https://github.com/afewyards/ha-adaptive-climate/commit/6763b724694dfdc06cf9b1afcacd004416a88c51))
+
+### Refactoring
+
+- Apply low-severity code review fixes across all subsystems
+  ([`23ed3ae`](https://github.com/afewyards/ha-adaptive-climate/commit/23ed3aecd8d24f76e0264cae6abd813535bd4418))
+
+- Replace inline/try-except imports with module-level imports (dt_util, etc.) - Add CALLBACK_TYPE
+  annotations and debounce to actuator wear sensor - Add named constants replacing magic numbers
+  (night setback offsets, oscillation penalty) - Add _pluralize helper; use %s-style logging in
+  service handlers - Restore auto_mode_switching_enabled attribute; fix unknown heating-type
+  fallback - Add bool guards to integral/temp restore; background task for milestone check - Add
+  failure suppression to NotificationManager; division-by-zero guard in services - Tighten
+  asyncio.Task[None] generics; fix floor_physics dict lookup with .get() - Use explicit re-export
+  (as X) pattern for sensor.py public symbols - Add HeatingRateLearner.from_dict heating_type param;
+  hoist dt_util import
+
+- **climate**: Extract cycle handlers, PID services, state setters per D6
+  ([`73f856e`](https://github.com/afewyards/ha-adaptive-climate/commit/73f856ed786b1b90c75b0deaad79f479f586c6b8))
+
+- **config**: C02/c03/a08 transport delay units + typed config
+  ([`80bc9f0`](https://github.com/afewyards/ha-adaptive-climate/commit/80bc9f0c11fc6a8488f51b2bef9ac51b45f6d183))
+
+C03: fix manifold lookup using entity_id instead of zone slug
+
+- climate_control.py: use self.entity_id (not self._zone_id) when querying
+  coordinator.get_transport_delay_for_zone(); slug lookup silently returned 0 so heater controller
+  never got a transport delay
+
+C02: make transport delay units explicit in field names - rename climate.py _transport_delay →
+  _transport_delay_minutes - add unit comment to _effective_min_on_seconds and
+  _query_and_mark_manifold; callers already correct (PID/cycle-tracker expect minutes,
+  heater-controller gets *60 seconds)
+
+A08: replace untyped parameters dict with AdaptiveThermostatConfig - new thermostat_config.py
+  dataclass covers all 70+ config fields with strict Python types and sensible defaults -
+  climate_setup.py builds AdaptiveThermostatConfig instead of a plain dict; also fixes missing
+  humidity_exit_* and sleep_temp fields - climate.py __init__ accepts config:
+  AdaptiveThermostatConfig and accesses fields via config.xxx instead of kwargs.get()
+
+- **heater**: Extract timers, service caller, cycle bookkeeper per D6
+  ([`3314678`](https://github.com/afewyards/ha-adaptive-climate/commit/3314678e057dd2dbfbb454223b3005195282660c))
+
+- **learning**: Clean up re-exports and rename private helpers to public API
+  ([`8fc6c17`](https://github.com/afewyards/ha-adaptive-climate/commit/8fc6c17a6af2f5832282582f77990ebb2dc0de6e))
+
+- **learning**: Extract LearningCoordinator, state, adjustments per D6
+  ([`ee985f8`](https://github.com/afewyards/ha-adaptive-climate/commit/ee985f81d04a82050a9ce7645da32872e08b1358))
+
+- **pause**: Extract PauseDetector to unify 3 implementations (M11)
+  ([`c217184`](https://github.com/afewyards/ha-adaptive-climate/commit/c217184e8a0c0092eeb2e15345d0962082297552))
+
+- **pid**: D4 PIDGainsManager → PIDStateManager with integral management
+  ([`c8ee579`](https://github.com/afewyards/ha-adaptive-climate/commit/c8ee579f5a8867ee6f89dd1d4753590979c441c7))
+
+- Rename PIDGainsManager to PIDStateManager (backward-compat alias kept) - Add
+  boost_integral/decay_integral/scale_integral/set_integral methods, all clamping to [out_min-E-F,
+  out_max-E-F] after mutation - Add SETPOINT_BOOST, HUMIDITY_DECAY, MODE_SWITCH to PIDChangeReason -
+  Migrate all 8 external integral mutation sites through the manager - Fix M31: setpoint boost cap
+  now respects output headroom - Fix H10: decay_integral/scale_integral in PIDController clamp after
+  mutation - Fix C05: restored integral clamped via set_integral(RESTORE) - Fix C03: boost/decay in
+  SetpointBoostManager clamp via manager - Pass gains_manager to SetpointBoostManager in
+  climate_init - Update tests: mock_pid gains _out_max/_external/_feedforward attrs, assert
+  set_integral calls instead of direct pid_controller.integral checks, add M31 headroom cap tests
+
+- **protocol**: D5 Protocol discipline pass — trim + KeManager migration
+  ([`acf4d3e`](https://github.com/afewyards/ha-adaptive-climate/commit/acf4d3e5f6c328448bca74af5852b032374dd694))
+
+- protocols.py: remove 7 dead ThermostatState properties (hvac_mode, hvac_action, is_heating,
+  _is_heating, pid_mode, _get_current_temp, _get_target_temp), 3 dead PIDState properties
+  (pid_control_p/d/e), and _is_device_active from HVACState; add is_pid_converged_for_ke() to
+  KeManagerState so KeManager no longer needs a callback for it - ke_manager.py: remove all
+  backward-compat callback parameters and dual-mode (state-vs-callbacks) logic; constructor now
+  accepts only KeManagerState + two action callables; state accessed exclusively via Protocol -
+  climate.py: rename _is_pid_converged_for_ke → is_pid_converged_for_ke (public, satisfies
+  Protocol); remove dead _set_ke no-op - test_ke_manager.py: rewrite all fixtures to protocol-based
+  pattern; remove TestKeManagerBackwardCompatibility; add from __future__ import annotations for
+  Python 3.9 compat
+
+28/28 tests pass; pyright clean on changed files.
+
+### Testing
+
+- Add NaN/Inf safety tests and sensor coverage (A08, A04)
+  ([`c1334ce`](https://github.com/afewyards/ha-adaptive-climate/commit/c1334ce7e3e6951dd70c2a82f83fed97c501bb31))
+
+- Fix auto-apply callback wiring in integration tests
+  ([`aa1421f`](https://github.com/afewyards/ha-adaptive-climate/commit/aa1421fc204a4188ca9e46dded703b6da05a5421))
+
+Mock hass.async_create_background_task alongside async_create_task so coroutines scheduled by
+  cycle_metrics.py are tracked and awaited in tests. Also wire increment_auto_apply_count
+  side_effect on the mock learner so _auto_apply_count is mutated as the real implementation does.
+
+- Fix offset-naive vs offset-aware datetime comparisons
+  ([`4803afa`](https://github.com/afewyards/ha-adaptive-climate/commit/4803afa0b0b640f69ee3024e75c48eb6590e7c7e))
+
+Replace datetime.utcnow() with dt_util.utcnow() in test_auto_learning_setback.py so
+  _last_auto_setback is always timezone-aware, matching dt_util.utcnow() in production.
+
+Replace datetime.now()/timedelta in test_notification_manager.py with time.monotonic() - 7200,
+  matching the float type stored by the production cooldown tracking code.
+
+- **cycle-metrics**: Fix naive datetime mismatch in TestRiseTimeThreshold and
+  TestStartingDeltaCalculation
+  ([`107c870`](https://github.com/afewyards/ha-adaptive-climate/commit/107c870579a4f7dff61d927d8fb59581a96ff030))
+
+Add tzinfo=timezone.utc to cycle_start and start_time datetimes so they are compatible with the
+  timezone-aware dt_util.utcnow() used in _is_cycle_valid().
+
+- **M02**: Remove duplicate test class and unused imports
+  ([`504b569`](https://github.com/afewyards/ha-adaptive-climate/commit/504b5697c4c72a23116fe2af98f099f2a25a8c10))
+
+Removes the duplicate TestNumberPlatformDiscovery class that was added before the canonical version
+  (already present from M02/M03 commit) and cleans up unused module-level imports (Mock, AsyncMock,
+  CONF_VALVE_ACTUATION_TIME, CONF_COOLER).
+
+- **M10**: Add cooling PID history roundtrip test
+  ([`0f85490`](https://github.com/afewyards/ha-adaptive-climate/commit/0f854908911e22337d6daedd8764e9d2d8fc9150))
+
+Verifies that restore_from_state correctly handles the mode-keyed {"heating": [...], "cooling":
+  [...]} format now written by build_state_attributes(), so cooling gains survive a full restart
+  cycle.
+
+- **serialization**: Fix format_version assertion to expect int 10 not string 'v10'
+  ([`f42d361`](https://github.com/afewyards/ha-adaptive-climate/commit/f42d361f0f5e27a5ae810c735167162409562ad2))
+
+- **thermal-groups**: Add TestRemoveZone tests for H10 remove_zone fix
+  ([`4ba8316`](https://github.com/afewyards/ha-adaptive-climate/commit/4ba831633350b8552645d156250e6295e7e0b2ff))
+
+- **undershoot**: Fix tests for H15 exponential decay
+  ([`b603873`](https://github.com/afewyards/ha-adaptive-climate/commit/b603873ebcfa4014142d2df0d4698b79088e7b1b))
+
+Update test expectations to account for H15 decay tau: - test_holds_state_within_tolerance_band:
+  expect decay even within tolerance - test_heating_type_specific_thresholds: set state directly to
+  test thresholds - test_catch22_severe_undershoot: increase error to 2.0°C to overcome decay
+
+
 ## v0.64.7 (2026-05-25)
 
 ### Bug Fixes
