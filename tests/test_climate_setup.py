@@ -133,3 +133,116 @@ class TestResolvePwm:
         """When both entity and domain configs are None, returns 15-min default."""
         result = _resolve_pwm(None, None)
         assert result == timedelta(minutes=15)
+
+
+class TestSensorDiscoveryPayload:
+    """H06: discovery payload must include heat-output sensor configuration."""
+
+    @pytest.mark.asyncio
+    async def test_discovery_payload_includes_heat_output_sensor_keys(self):
+        """H06: When heat-output sensors are configured in hass.data, the sensor
+        discovery payload from climate_setup must include supply_temp_sensor,
+        return_temp_sensor, flow_rate_sensor and fallback_flow_rate so that
+        HeatOutputSensor receives non-None references.
+        """
+        from unittest.mock import MagicMock, patch
+        from custom_components.adaptive_climate.climate_setup import async_setup_platform
+        from custom_components.adaptive_climate.const import DOMAIN
+
+        mock_coordinator = MagicMock()
+        mock_coordinator.register_zone = MagicMock()
+
+        mock_store = MagicMock()
+        mock_store.get_zone_data = MagicMock(return_value=None)
+
+        hass = MagicMock()
+        hass.data = {
+            DOMAIN: {
+                "learning_store": mock_store,
+                "coordinator": mock_coordinator,
+                "supply_temp_sensor": "sensor.supply_temp",
+                "return_temp_sensor": "sensor.return_temp",
+                "flow_rate_sensor": "sensor.flow_rate",
+                "fallback_flow_rate": 1.5,
+            }
+        }
+        hass.config.units.temperature_unit = "°C"
+
+        config = {
+            "name": "Test Zone",
+            "heater": ["switch.test_heater"],
+        }
+
+        with (
+            patch("custom_components.adaptive_climate.climate.AdaptiveThermostat"),
+            patch("custom_components.adaptive_climate.thermostat_config.AdaptiveThermostatConfig"),
+            patch("custom_components.adaptive_climate.climate_setup.AdaptiveLearner"),
+            patch("custom_components.adaptive_climate.climate_setup.discovery") as mock_discovery,
+            patch("custom_components.adaptive_climate.climate_setup.entity_platform") as mock_ep,
+        ):
+            mock_ep.current_platform.get.return_value = MagicMock()
+            await async_setup_platform(hass, config, MagicMock())
+
+        # discovery.async_load_platform must have been called (via hass.async_create_task)
+        assert mock_discovery.async_load_platform.called, (
+            "discovery.async_load_platform was never called — was coordinator missing?"
+        )
+        # Extract the discovery info dict (4th positional arg)
+        call_args = mock_discovery.async_load_platform.call_args
+        payload = call_args[0][3]
+
+        assert payload.get("supply_temp_sensor") == "sensor.supply_temp", (
+            f"Expected supply_temp_sensor='sensor.supply_temp', got {payload.get('supply_temp_sensor')!r}. "
+            "H06: climate_setup discovery payload omits heat-output sensor keys."
+        )
+        assert payload.get("return_temp_sensor") == "sensor.return_temp"
+        assert payload.get("flow_rate_sensor") == "sensor.flow_rate"
+        assert payload.get("fallback_flow_rate") == 1.5
+
+    @pytest.mark.asyncio
+    async def test_discovery_payload_uses_default_flow_rate_when_not_configured(self):
+        """H06 regression: fallback_flow_rate defaults to DEFAULT_FALLBACK_FLOW_RATE
+        when not set in domain config (supply/return sensor keys are None).
+        """
+        from unittest.mock import MagicMock, patch
+        from custom_components.adaptive_climate.climate_setup import async_setup_platform
+        from custom_components.adaptive_climate.const import DOMAIN, DEFAULT_FALLBACK_FLOW_RATE
+
+        mock_coordinator = MagicMock()
+        mock_coordinator.register_zone = MagicMock()
+
+        mock_store = MagicMock()
+        mock_store.get_zone_data = MagicMock(return_value=None)
+
+        hass = MagicMock()
+        hass.data = {
+            DOMAIN: {
+                "learning_store": mock_store,
+                "coordinator": mock_coordinator,
+                # No heat-output sensor keys in domain data
+            }
+        }
+        hass.config.units.temperature_unit = "°C"
+
+        config = {
+            "name": "Test Zone B",
+            "heater": ["switch.test_heater"],
+        }
+
+        with (
+            patch("custom_components.adaptive_climate.climate.AdaptiveThermostat"),
+            patch("custom_components.adaptive_climate.thermostat_config.AdaptiveThermostatConfig"),
+            patch("custom_components.adaptive_climate.climate_setup.AdaptiveLearner"),
+            patch("custom_components.adaptive_climate.climate_setup.discovery") as mock_discovery,
+            patch("custom_components.adaptive_climate.climate_setup.entity_platform") as mock_ep,
+        ):
+            mock_ep.current_platform.get.return_value = MagicMock()
+            await async_setup_platform(hass, config, MagicMock())
+
+        call_args = mock_discovery.async_load_platform.call_args
+        payload = call_args[0][3]
+
+        assert payload.get("supply_temp_sensor") is None
+        assert payload.get("return_temp_sensor") is None
+        assert payload.get("flow_rate_sensor") is None
+        assert payload.get("fallback_flow_rate") == DEFAULT_FALLBACK_FLOW_RATE

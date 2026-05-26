@@ -437,6 +437,11 @@ async def async_setup_platform(hass: HomeAssistant, config: ConfigType, async_ad
                     "climate_entity_id": f"climate.{zone_id}",
                     "heater_rated_cycles": config.get(const.CONF_HEATER_RATED_CYCLES),
                     "cooler_rated_cycles": config.get(const.CONF_COOLER_RATED_CYCLES),
+                    # H06: pass heat-output sensor config so HeatOutputSensor gets non-None refs
+                    "supply_temp_sensor": domain_data.get("supply_temp_sensor"),
+                    "return_temp_sensor": domain_data.get("return_temp_sensor"),
+                    "flow_rate_sensor": domain_data.get("flow_rate_sensor"),
+                    "fallback_flow_rate": domain_data.get("fallback_flow_rate", const.DEFAULT_FALLBACK_FLOW_RATE),
                 },
                 config,
             )
