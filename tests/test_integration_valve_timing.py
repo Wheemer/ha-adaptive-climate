@@ -55,8 +55,9 @@ class MockThermostat:
         self._attr_preset_mode = None
         self._saved_target_temp = None
 
-        # Heating type and physics
+        # Heating/cooling type and physics
         self._heating_type = HEATING_TYPE_CONVECTOR
+        self._cooling_type = None
         self._area_m2 = 20.0
         self._ceiling_height = 2.5
         self._window_area_m2 = 4.0

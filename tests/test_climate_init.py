@@ -130,6 +130,9 @@ class MockThermostat:
         self._on_heating_started_event = Mock()
         self._on_heating_ended_event = Mock()
 
+        # Cooling type (for compressor protection)
+        self._cooling_type = None
+
         # Apply overrides
         if config_overrides:
             for key, value in config_overrides.items():
@@ -838,6 +841,37 @@ class TestAsyncSetupManagers:
 
         # Verify cycle_tracker was added to zone_data
         assert "cycle_tracker" in zone_data
+
+    async def test_cooling_type_passed_to_heater_controller(self):
+        """Test that cooling_type is forwarded from thermostat to HeaterController."""
+        thermostat = MockThermostat(
+            {
+                "_cooling_type": "forced_air",
+            }
+        )
+
+        await async_setup_managers(thermostat)
+
+        assert thermostat._heater_controller is not None
+        assert thermostat._heater_controller._cooling_type == "forced_air"
+
+    async def test_forced_air_cooling_type_applies_compressor_protection(self):
+        """Test that forced_air cooling type derives 180s min_open_time when none configured.
+
+        COOLING_TYPE_CHARACTERISTICS["forced_air"]["min_cycle"] == 180 (compressor protection).
+        When thermostat._min_open_time is 0, HeaterController must derive it from the table.
+        """
+        thermostat = MockThermostat(
+            {
+                "_cooling_type": "forced_air",
+                "_min_open_time": timedelta(seconds=0),
+            }
+        )
+
+        await async_setup_managers(thermostat)
+
+        assert thermostat._heater_controller is not None
+        assert thermostat._heater_controller._min_open_time == 180
 
 
 @pytest.mark.asyncio

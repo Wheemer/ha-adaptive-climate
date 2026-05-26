@@ -63,7 +63,7 @@ except ImportError:
         return (parts[0], parts[1]) if len(parts) == 2 else (entity_id, "")
 
 
-from ..const import MIN_OUTPUT_THRESHOLD
+from ..const import COOLING_TYPE_CHARACTERISTICS, MIN_OUTPUT_THRESHOLD
 from .events import CycleEventDispatcher
 from .heater_cycle_bookkeeper import HeaterCycleBookkeeper
 from .heater_service_caller import HeaterServiceCaller
@@ -109,6 +109,15 @@ class HeaterController:
         heating_type: str | None = None,
     ):
         """Initialise the HeaterController."""
+        # Derive min_open_time from cooling characteristics when none is explicitly configured.
+        # Compressor-based cooling systems (forced_air, mini_split) require a minimum
+        # on-time to protect the compressor from rapid short-cycling.
+        if min_open_time == 0 and cooling_type is not None:
+            cooling_chars = COOLING_TYPE_CHARACTERISTICS.get(cooling_type, {})
+            derived = cooling_chars.get("min_cycle", 0)
+            if derived > 0:
+                min_open_time = float(derived)
+
         self._hass = hass
         self._thermostat = thermostat
         self._heater_entity_id = heater_entity_id

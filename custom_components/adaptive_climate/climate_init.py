@@ -97,6 +97,7 @@ async def async_setup_managers(thermostat: AdaptiveThermostat) -> None:
         ),
         valve_actuation_time=thermostat._valve_actuation_time,
         heating_type=thermostat._heating_type,
+        cooling_type=thermostat._cooling_type,
     )
 
     # Initialize PreheatLearner if preheat is enabled
