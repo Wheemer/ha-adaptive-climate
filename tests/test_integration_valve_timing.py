@@ -260,18 +260,27 @@ async def test_heat_pipeline_created_with_valve_time():
 
 
 @pytest.mark.asyncio
-async def test_heat_pipeline_not_created_when_valve_time_zero():
-    """Test that HeatPipeline is None when valve_actuation_time is 0."""
+async def test_heat_pipeline_created_for_pwm_systems():
+    """HeatPipeline is always created for PWM systems (no-op when transport_delay=0).
+
+    The pipeline is created eagerly so that set_transport_delay() can update it
+    dynamically when the coordinator learns the manifold delay, without needing
+    lazy creation logic.  With transport_delay=0 the pipeline returns 0 for
+    committed_heat_remaining() — it is effectively a no-op.
+    """
     # Arrange
     thermostat = MockThermostat(valve_actuation_time=0.0)
 
     # Act
     await async_setup_managers(thermostat)
 
-    # Assert
+    # Assert: pipeline exists for any PWM system
     assert thermostat._heater_controller is not None
     heat_pipeline = thermostat._heater_controller._heat_pipeline
-    assert heat_pipeline is None
+    assert heat_pipeline is not None  # always created for PWM mode
+    # With transport_delay=0 it is a no-op
+    assert heat_pipeline.transport_delay == 0.0
+    assert heat_pipeline.committed_heat_remaining(now=1000.0) == 0.0
 
 
 @pytest.mark.asyncio

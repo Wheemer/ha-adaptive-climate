@@ -459,10 +459,13 @@ class CycleTrackerManager:
         """Handle HEATING_ENDED event for duty cycle tracking.
 
         Args:
-            event: HeatingEndedEvent with hvac_mode, timestamp
+            event: HeatingEndedEvent with hvac_mode, timestamp, committed_heat_seconds
         """
         # Track device off time for duty cycle calculation
         self._metrics_recorder.set_device_off_time(event.timestamp)
+        # Thread committed heat snapshot into metrics recorder for overshoot split
+        if event.committed_heat_seconds > 0:
+            self._metrics_recorder.set_committed_heat_at_end(event.committed_heat_seconds)
 
     def _on_contact_pause(self, event: ContactPauseEvent) -> None:
         """Handle CONTACT_PAUSE event.

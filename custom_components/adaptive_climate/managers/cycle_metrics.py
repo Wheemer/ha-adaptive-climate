@@ -93,11 +93,29 @@ class CycleMetricsRecorder:
         self._integral_at_setpoint_cross: float | None = None
         self._prev_cycle_end_temp: float | None = None
         self._transport_delay_minutes: float | None = None
+        # Committed heat (seconds) at valve close — for controllable vs committed overshoot split
+        self._committed_heat_at_end: float = 0.0
         # Mode captured at cycle start (M02: avoid re-read at finalization)
         self._cycle_mode: str | None = None
 
         # Logging
         self._logger = logging.getLogger(f"{__name__}.{zone_id}")
+
+    def set_committed_heat_at_end(self, committed_seconds: float) -> None:
+        """Store the committed heat snapshot taken at valve close.
+
+        Called by CycleTrackerManager when it receives a HEATING_ENDED event
+        carrying a non-zero ``committed_heat_seconds`` value (populated by
+        HeaterController when HeatPipeline is active).
+
+        Args:
+            committed_seconds: Seconds of in-flight heat at valve close.
+        """
+        self._committed_heat_at_end = committed_seconds
+        self._logger.debug(
+            "Committed heat at cycle end: %.1f s",
+            committed_seconds,
+        )
 
     def reset_cycle_metrics(self) -> None:
         """Reset all metrics tracking state for a new cycle.
@@ -112,6 +130,7 @@ class CycleMetricsRecorder:
         self._integral_at_tolerance_entry = None
         self._integral_at_setpoint_cross = None
         self._transport_delay_minutes = None
+        self._committed_heat_at_end = 0.0
 
     def set_cycle_mode(self, hvac_mode: str) -> None:
         """Capture the HVAC mode at cycle start for use at finalization (M02).
@@ -528,6 +547,39 @@ class CycleMetricsRecorder:
         elif cycle_state_value == "cooling":
             mode = "cooling"
 
+        # Split overshoot into controllable vs committed portions when we have pipeline data.
+        # Committed overshoot = temperature rise unavoidably caused by in-flight heat.
+        # Controllable overshoot = what the PID could have prevented by turning off earlier.
+        controllable_overshoot: float | None = None
+        committed_overshoot_val: float | None = None
+        if overshoot and overshoot > 0 and self._committed_heat_at_end > 0 and rise_time and rise_time > 0:
+            from ..adaptive.cycle_analysis import calculate_overshoot_components
+
+            # Estimate heating rate from observed rise (°C/s)
+            if temperature_history:
+                peak_temp = max((t for _, t in temperature_history), default=target_temp)
+            else:
+                peak_temp = target_temp
+            temp_rise = peak_temp - start_temp
+            heating_rate = temp_rise / (rise_time * 60.0)  # rise_time is in minutes
+
+            if heating_rate > 0:
+                controllable_overshoot, committed_overshoot_val = calculate_overshoot_components(
+                    peak_temp=peak_temp,
+                    setpoint=target_temp,
+                    committed_heat_seconds=self._committed_heat_at_end,
+                    heating_rate=heating_rate,
+                )
+                self._logger.debug(
+                    "Overshoot split: total=%.2f°C, controllable=%.2f°C, committed=%.2f°C "
+                    "(committed_heat=%.0fs, heating_rate=%.4f°C/s)",
+                    overshoot,
+                    controllable_overshoot,
+                    committed_overshoot_val,
+                    self._committed_heat_at_end,
+                    heating_rate,
+                )
+
         # Create CycleMetrics object with interruption history
         metrics = CycleMetrics(
             overshoot=overshoot,
@@ -548,6 +600,8 @@ class CycleMetricsRecorder:
             dead_time=dead_time,
             mode=mode,
             starting_delta=starting_delta,
+            controllable_overshoot=controllable_overshoot,
+            committed_overshoot=committed_overshoot_val,
         )
 
         # Record metrics with adaptive learner

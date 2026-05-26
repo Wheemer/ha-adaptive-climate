@@ -18,6 +18,8 @@ except ImportError:
     HAS_HOMEASSISTANT = False
     HVACMode = Any
 
+from .heat_pipeline import HeatPipeline
+
 if TYPE_CHECKING:
     from ..climate import AdaptiveThermostat
 
@@ -40,6 +42,7 @@ class PWMController:
         min_open_time: float,
         min_closed_time: float,
         valve_actuation_time: float = 0.0,
+        heat_pipeline: HeatPipeline | None = None,
     ):
         """Initialize the PWMController.
 
@@ -50,6 +53,9 @@ class PWMController:
             min_open_time: Minimum open time in seconds
             min_closed_time: Minimum closed time in seconds
             valve_actuation_time: Valve actuation time in seconds (default: 0.0)
+            heat_pipeline: Optional HeatPipeline for exponential committed-heat tracking.
+                When provided, ``calculate_adjusted_on_time`` subtracts in-flight heat
+                from the required on-time instead of blindly adding transport_delay.
         """
         self._thermostat = thermostat
         self._pwm = pwm_duration
@@ -58,6 +64,7 @@ class PWMController:
         self._min_closed_time = min_closed_time
         self._valve_actuation_time = valve_actuation_time
         self._transport_delay: float = 0.0
+        self._heat_pipeline: HeatPipeline | None = heat_pipeline
 
         # Duty accumulator for sub-threshold outputs
         self._duty_accumulator_seconds: float = 0.0
@@ -145,6 +152,14 @@ class PWMController:
         duty = control_output / difference
         return self._pwm * duty
 
+    def set_heat_pipeline(self, pipeline: HeatPipeline) -> None:
+        """Inject or replace the heat pipeline (used when pipeline is created lazily).
+
+        Args:
+            pipeline: HeatPipeline instance to use for committed-heat tracking.
+        """
+        self._heat_pipeline = pipeline
+
     def calculate_adjusted_on_time(
         self,
         control_output: float,
@@ -152,33 +167,43 @@ class PWMController:
     ) -> float:
         """Calculate valve-on duration accounting for actuation and transport delays.
 
-        For valves with actuation time and manifold transport delay, heat doesn't
-        arrive until pipes fill and valve opens. The total on-time is:
-        - transport_delay: time for hot water to reach zone (0 if warm)
-        - actuator_time: time for valve to fully open
-        - heat_duration: actual heat delivery time (≥ min_open_time)
+        **Exponential model (when HeatPipeline is available):**
+        Subtracts already-committed in-flight heat from the desired heat quantum.
+        This eliminates the M05 asymmetry bug (transport_delay was added on open but
+        not symmetrically removed on close) and adapts each burst to actual pipe state:
+
+            needed = max(0, heat_duration - committed_heat_remaining)
+            on_time = valve_actuation_time + max(needed, min_open_time)
+
+        If ``needed == 0`` the valve stays closed — committed heat is already enough.
+
+        **Legacy linear model (no HeatPipeline):**
+        Preserves previous behaviour for backward compatibility:
+
+            on_time = transport_delay + valve_actuation_time + max(heat_duration, min_open_time)
 
         Args:
             control_output: Current PID control output
             difference: Output range (max - min)
 
         Returns:
-            Adjusted on-time in seconds
+            Adjusted on-time in seconds.  Zero means "don't open valve this cycle".
         """
         heat_duration = self._calculate_heat_duration(control_output, difference)
         if heat_duration == 0:
             return 0.0
 
-        # Total on-time = transport delay + valve open time + max(heat_duration, min_open_time)
-        # This ensures heat arrives and valve is fully open before heat delivery begins
-        return (
-            self._transport_delay
-            + self._valve_actuation_time
-            + max(
-                heat_duration,
-                self._min_open_time,
-            )
-        )
+        if self._heat_pipeline is not None:
+            # Exponential model: subtract in-flight heat so we don't over-deliver
+            committed = self._heat_pipeline.committed_heat_remaining(time.monotonic())
+            needed = max(0.0, heat_duration - committed)
+            if needed == 0.0:
+                return 0.0
+            return self._valve_actuation_time + max(needed, self._min_open_time)
+
+        # Legacy linear model: add full transport_delay + valve_actuation_time
+        # (kept for backward compatibility with systems that have no pipeline)
+        return self._transport_delay + self._valve_actuation_time + max(heat_duration, self._min_open_time)
 
     def get_close_command_offset(self) -> float:
         """Get offset in seconds to send close command early.

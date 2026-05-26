@@ -78,6 +78,7 @@ class HeatingEndedEvent:
 
     hvac_mode: str
     timestamp: datetime
+    committed_heat_seconds: float = 0.0  # In-flight heat at valve close (exponential model)
 
     @property
     def event_type(self) -> CycleEventType:

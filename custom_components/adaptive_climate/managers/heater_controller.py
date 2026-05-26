@@ -104,6 +104,7 @@ class HeaterController:
         get_was_clamped: Callable[[], bool] | None = None,
         reset_clamp_state: Callable[[], None] | None = None,
         valve_actuation_time: float = 0.0,
+        heating_type: str | None = None,
     ):
         """Initialize the HeaterController.
 
@@ -123,6 +124,7 @@ class HeaterController:
             get_was_clamped: Callback to get PID was_clamped state
             reset_clamp_state: Callback to reset PID clamp state
             valve_actuation_time: Time for valve to fully open in seconds (default 0 = immediate)
+            heating_type: Heating system type string (e.g. "floor_hydronic") for tau selection
         """
         self._hass = hass
         self._thermostat = thermostat
@@ -139,7 +141,11 @@ class HeaterController:
         self._get_was_clamped = get_was_clamped
         self._reset_clamp_state = reset_clamp_state
         self._valve_actuation_time = valve_actuation_time
+        self._heating_type = heating_type
         self._transport_delay: float = 0.0  # Updated dynamically via set_transport_delay
+
+        # Committed heat snapshot taken at each valve-close (for overshoot split)
+        self._last_committed_heat_snapshot: float = 0.0
 
         # State tracking (owned by thermostat, but accessed here)
         self._heater_control_failed = False
@@ -161,6 +167,20 @@ class HeaterController:
         self._cycle_active: bool = False  # Heater has turned on in current demand period
         self._has_demand: bool = False  # control_output > 0
 
+        # Heat pipeline for committed heat tracking.
+        # Created for all PWM systems — transport_delay starts at 0 and is updated
+        # dynamically via set_transport_delay() when the coordinator learns the manifold delay.
+        # Tau is chosen per heating type to match the system's thermal inertia.
+        self._heat_pipeline: HeatPipeline | None = (
+            HeatPipeline(
+                transport_delay=0.0,  # Updated dynamically via set_transport_delay
+                valve_time=valve_actuation_time,
+                tau=HeatPipeline.tau_for_heating_type(heating_type),
+            )
+            if pwm
+            else None
+        )
+
         # PWM controller for duty accumulation and PWM switching
         self._pwm_controller = (
             PWMController(
@@ -170,19 +190,9 @@ class HeaterController:
                 min_open_time=min_open_time,
                 min_closed_time=min_closed_time,
                 valve_actuation_time=valve_actuation_time,
+                heat_pipeline=self._heat_pipeline,
             )
             if pwm
-            else None
-        )
-
-        # Heat pipeline for committed heat tracking (created if valve_time > 0 or transport_delay > 0)
-        # Transport delay will be set dynamically when heating starts via coordinator
-        self._heat_pipeline = (
-            HeatPipeline(
-                transport_delay=0.0,  # Will be updated dynamically via set_transport_delay
-                valve_time=valve_actuation_time,
-            )
-            if valve_actuation_time > 0
             else None
         )
 
@@ -309,18 +319,29 @@ class HeaterController:
             )
         self._valve_open_timer = None
 
+    @property
+    def committed_heat_at_last_turnoff(self) -> float:
+        """Seconds of committed heat captured at the last valve-close command.
+
+        Snapshotted by ``async_turn_off`` before calling ``pipeline.valve_closed()``.
+        Used by CycleMetricsRecorder to split overshoot into controllable vs committed.
+        """
+        return self._last_committed_heat_snapshot
+
     @callback
-    def _emit_heating_ended_delayed(self, hvac_mode: HVACMode) -> None:
+    def _emit_heating_ended_delayed(self, hvac_mode: HVACMode, committed_heat_seconds: float = 0.0) -> None:
         """Emit HeatingEndedEvent after half valve actuation delay.
 
         Args:
             hvac_mode: Current HVAC mode
+            committed_heat_seconds: In-flight heat snapshot from the pipeline at valve close
         """
         if self._dispatcher:
             self._dispatcher.emit(
                 HeatingEndedEvent(
                     hvac_mode=hvac_mode,
                     timestamp=dt_util.utcnow(),
+                    committed_heat_seconds=committed_heat_seconds,
                 )
             )
         self._valve_close_timer = None
@@ -347,12 +368,17 @@ class HeaterController:
     def set_transport_delay(self, delay_seconds: float) -> None:
         """Set the manifold transport delay.
 
+        Propagates to both PWMController (legacy path) and HeatPipeline
+        (exponential model) so both stay in sync.
+
         Args:
             delay_seconds: Transport delay in seconds (0 if manifold warm)
         """
         self._transport_delay = delay_seconds
         if self._pwm_controller:
             self._pwm_controller.set_transport_delay(delay_seconds)
+        if self._heat_pipeline is not None:
+            self._heat_pipeline.transport_delay = delay_seconds
 
     @property
     def heater_control_failed(self) -> bool:
@@ -776,6 +802,10 @@ class HeaterController:
                 service = SERVICE_TURN_ON
             await self._async_call_heater_service(entity, HA_DOMAIN, service, data)
 
+        # Pipeline: record valve-open timestamp so committed heat starts rising
+        if self._heat_pipeline is not None:
+            self._heat_pipeline.valve_opened(time.monotonic())
+
     async def async_turn_off(
         self,
         hvac_mode: HVACMode,
@@ -826,15 +856,23 @@ class HeaterController:
                 self._valve_open_timer()
                 self._valve_open_timer = None
 
+            # Pipeline: snapshot committed heat then mark valve as closing.
+            # Must happen before emitting HEATING_ENDED so the event carries the value.
+            if self._heat_pipeline is not None:
+                _now = time.monotonic()
+                self._last_committed_heat_snapshot = self._heat_pipeline.committed_heat_remaining(_now)
+                self._heat_pipeline.valve_closed(_now)
+
             # Emit HEATING_ENDED event (delayed by half valve_actuation_time if > 0)
             if self._dispatcher:
                 if self._pwm and self._valve_actuation_time > 0:
                     # Schedule delayed demand removal for PWM mode with valve actuation time
                     half_valve_time = self._valve_actuation_time / 2.0
+                    _committed = self._last_committed_heat_snapshot
                     self._valve_close_timer = async_call_later(
                         self._hass,
                         half_valve_time,
-                        lambda _: self._emit_heating_ended_delayed(hvac_mode),
+                        lambda _, c=_committed: self._emit_heating_ended_delayed(hvac_mode, committed_heat_seconds=c),
                     )
                 else:
                     # Immediate signal for valve mode or when valve_actuation_time=0
@@ -842,6 +880,7 @@ class HeaterController:
                         HeatingEndedEvent(
                             hvac_mode=hvac_mode,
                             timestamp=dt_util.utcnow(),
+                            committed_heat_seconds=self._last_committed_heat_snapshot,
                         )
                     )
 
