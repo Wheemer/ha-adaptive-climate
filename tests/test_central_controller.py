@@ -69,8 +69,16 @@ if "homeassistant.components" not in sys.modules:
     sys.modules["homeassistant.components"] = Mock()
 # DO NOT set sys.modules['homeassistant.components.climate'] - use the one from conftest.py
 
-# Mock managers.auto_mode_switching
-sys.modules["managers"] = Mock()
+# Mock managers package and submodules
+mock_managers = Mock()
+mock_events = Mock()
+mock_events.CycleEventDispatcher = Mock
+mock_events.CycleEventType = Mock()
+mock_events.ZoneRegisteredEvent = Mock
+mock_events.ZoneUnregisteredEvent = Mock
+mock_managers.events = mock_events
+sys.modules["managers"] = mock_managers
+sys.modules["managers.events"] = mock_events
 sys.modules["managers.auto_mode_switching"] = Mock()
 
 # Import coordinator module

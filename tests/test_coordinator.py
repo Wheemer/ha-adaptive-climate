@@ -57,7 +57,10 @@ sys.modules["managers.events"] = _events_mod  # must be set BEFORE exec_module (
 _events_spec.loader.exec_module(_events_mod)  # type: ignore[union-attr]
 
 # Mock managers package (has HA-dependent __init__.py) and auto_mode_switching
-sys.modules["managers"] = Mock()
+# Keep the real events module accessible via the mock
+mock_managers = Mock()
+mock_managers.events = _events_mod
+sys.modules["managers"] = mock_managers
 sys.modules["managers.auto_mode_switching"] = Mock()
 
 

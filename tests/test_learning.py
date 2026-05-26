@@ -4390,7 +4390,7 @@ class TestUndershootDetectorSerialization:
         detector_state = result["undershoot_detector"]
         assert detector_state["consecutive_failures"] == 3
         assert detector_state["cumulative_ki_multiplier"] == 1.5
-        assert result["format_version"] == 10
+        assert result["format_version"] == 11
 
     def test_serialize_undershoot_detector_empty_state(self):
         """Test to_dict serializes empty unified detector state (v10 format)."""
@@ -4403,7 +4403,7 @@ class TestUndershootDetectorSerialization:
         detector_state = result["undershoot_detector"]
         assert detector_state["consecutive_failures"] == 0
         assert detector_state["cumulative_ki_multiplier"] == 1.0
-        assert result["format_version"] == 10
+        assert result["format_version"] == 11
 
     def test_serialization_round_trip_with_undershoot_detector(self):
         """Test full serialization and restoration round-trip with unified detector state (v10)."""

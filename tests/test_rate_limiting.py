@@ -1,7 +1,7 @@
 """Tests for hybrid rate limiting (time AND cycles)."""
 
 import pytest
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 from custom_components.adaptive_climate.adaptive.learning import AdaptiveLearner
 from custom_components.adaptive_climate.adaptive.cycle_analysis import CycleMetrics
@@ -32,9 +32,9 @@ class TestHybridRateLimiting:
 
     def test_rate_limiting_hybrid_both_gates(self, learner, problem_cycle):
         """Verify both time AND cycle gates must be satisfied."""
-        fake_now = datetime.now()
+        fake_now = datetime.now(timezone.utc)
 
-        with patch("custom_components.adaptive_climate.adaptive.learning.dt_util") as mock_dt_util:
+        with patch("custom_components.adaptive_climate.adaptive.learning_adjustments.dt_util") as mock_dt_util:
             mock_dt_util.utcnow.return_value = fake_now
 
             # Add 6 cycles to meet minimum for learning
@@ -112,8 +112,8 @@ class TestHybridRateLimiting:
             learner.add_cycle_metrics(problem_cycle)
 
         # Simulate 8 hours passing (new hybrid gate)
-        fake_now = datetime.now()
-        with patch("custom_components.adaptive_climate.adaptive.learning.dt_util") as mock_dt_util:
+        fake_now = datetime.now(timezone.utc)
+        with patch("custom_components.adaptive_climate.adaptive.learning_adjustments.dt_util") as mock_dt_util:
             mock_dt_util.utcnow.return_value = fake_now
             learner._last_adjustment_time = fake_now - timedelta(hours=8)
 
@@ -134,8 +134,8 @@ class TestHybridRateLimiting:
             learner.add_cycle_metrics(problem_cycle)
 
         # Simulate only 8 hours passing (would fail with 24h gate)
-        fake_now = datetime.now()
-        with patch("custom_components.adaptive_climate.adaptive.learning.dt_util") as mock_dt_util:
+        fake_now = datetime.now(timezone.utc)
+        with patch("custom_components.adaptive_climate.adaptive.learning_adjustments.dt_util") as mock_dt_util:
             mock_dt_util.utcnow.return_value = fake_now
             learner._last_adjustment_time = fake_now - timedelta(hours=8)
 
@@ -201,8 +201,8 @@ class TestHybridRateLimiting:
             learner.add_cycle_metrics(problem_cycle)
 
         # Simulate only 4 hours passing (less than 8h minimum)
-        fake_now = datetime.now()
-        with patch("custom_components.adaptive_climate.adaptive.learning.dt_util") as mock_dt_util:
+        fake_now = datetime.now(timezone.utc)
+        with patch("custom_components.adaptive_climate.adaptive.learning_adjustments.dt_util") as mock_dt_util:
             mock_dt_util.utcnow.return_value = fake_now
             learner._last_adjustment_time = fake_now - timedelta(hours=4)
 
@@ -230,8 +230,8 @@ class TestHybridRateLimiting:
         learner.add_cycle_metrics(problem_cycle)
 
         # Simulate 8 hours passing (satisfies time gate)
-        fake_now = datetime.now()
-        with patch("custom_components.adaptive_climate.adaptive.learning.dt_util") as mock_dt_util:
+        fake_now = datetime.now(timezone.utc)
+        with patch("custom_components.adaptive_climate.adaptive.learning_adjustments.dt_util") as mock_dt_util:
             mock_dt_util.utcnow.return_value = fake_now
             learner._last_adjustment_time = fake_now - timedelta(hours=8)
 
@@ -276,8 +276,8 @@ class TestHybridRateLimiting:
             learner.add_cycle_metrics(problem_cycle)
 
         # Simulate 12 hours passing
-        fake_now = datetime.now()
-        with patch("custom_components.adaptive_climate.adaptive.learning.dt_util") as mock_dt_util:
+        fake_now = datetime.now(timezone.utc)
+        with patch("custom_components.adaptive_climate.adaptive.learning_adjustments.dt_util") as mock_dt_util:
             mock_dt_util.utcnow.return_value = fake_now
             learner._last_adjustment_time = fake_now - timedelta(hours=12)
 

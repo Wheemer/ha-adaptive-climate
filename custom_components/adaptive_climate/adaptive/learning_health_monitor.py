@@ -39,7 +39,6 @@ Final score clamped to [0, 100].  Status mapping:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from enum import StrEnum
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -52,6 +51,7 @@ from ..const import (
     MAX_CUMULATIVE_DRIFT_PCT,
     MAX_UNDERSHOOT_KI_MULTIPLIER,
     HeatingType,
+    StrEnum,
 )
 
 # ---------------------------------------------------------------------------

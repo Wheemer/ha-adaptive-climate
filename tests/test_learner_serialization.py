@@ -31,7 +31,7 @@ class TestV9FormatSerialization:
         data = learner.to_dict()
 
         # Should be v10 format
-        assert data["format_version"] == 10
+        assert data["format_version"] == 11
 
         # Should include contribution_tracker at top level
         assert "contribution_tracker" in data
@@ -102,7 +102,7 @@ class TestV9FormatSerialization:
         restored = restore_learner_from_dict(v10_data)
 
         # Should detect v10 format
-        assert restored["format_version"] == 10
+        assert restored["format_version"] == 11
 
         # Should have contribution_tracker_state
         assert "contribution_tracker_state" in restored
@@ -312,7 +312,7 @@ class TestV9ToV10Migration:
 
         # Serialize
         data = learner.to_dict()
-        assert data["format_version"] == 10
+        assert data["format_version"] == 11
         assert "heating_rate_learner" in data
 
         # Restore
