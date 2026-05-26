@@ -13,6 +13,59 @@ Migration policy:
 - On migration, a single WARN is logged with old and new version numbers.
 - If stored version > CURRENT_VERSION, data is returned unchanged with a WARN
   (forward-compatibility: the user downgraded the component).
+
+-------------------------------------------------------------------------------
+Cross-restart state matrix (A04 audit)
+-------------------------------------------------------------------------------
+All state holders in adaptive/ and managers/ — what is persisted vs transient.
+
+AdaptiveLearner (learning.py):
+  Field                         | Unit         | Persisted | Notes
+  ------------------------------|--------------|-----------|----------------------
+  _heating_cycle_history        | CycleMetrics | YES v5+   | heating.cycle_history
+  _cooling_cycle_history        | CycleMetrics | YES v5+   | cooling.cycle_history
+  _last_adjustment_time         | datetime UTC | YES       | ISO-8601 string
+  _consecutive_converged_cycles | int          | YES       |
+  _pid_converged_for_ke         | bool         | YES       |
+  _cycles_since_last_adjustment | int          | NO        | Reset 0; safe (time gate persists)
+  _rule_state_tracker           | RuleState    | NO        | Transient; fresh is correct
+
+ConfidenceTracker (confidence.py):
+  _heating_convergence_confidence | float | YES v5+ | heating.convergence_confidence
+  _cooling_convergence_confidence | float | YES v5+ | cooling.convergence_confidence
+  _heating_auto_apply_count       | int   | YES v5+ | heating.auto_apply_count
+  _cooling_auto_apply_count       | int   | YES v5+ | cooling.auto_apply_count
+  _heating_cycle_count            | int   | NO      | Derived from len(history) on restore
+  _cooling_cycle_count            | int   | NO      | Derived from len(history) on restore
+
+UndershootDetector (undershoot_detector.py):
+  cumulative_ki_multiplier | float    | YES v6+ | clamped [1.0, MAX] on restore
+  last_adjustment_time     | datetime | YES v8+ | ISO-8601; monotonic float → None in v10 migr
+  _time_below_target       | float s  | YES v6+ |
+  _thermal_debt            | float °C·h | YES v6+ |
+  _consecutive_failures    | int      | YES v8+ |
+  _heating_rate_learner    | object   | NO      | Wired externally after restore
+
+ValidationManager (validation.py):
+  _validation_mode              | bool         | NO  | Transient; restart aborts pending validation
+  _validation_baseline_overshoot| float|None   | NO  | Transient (same)
+  _validation_cycles            | list         | NO  | Transient (same)
+  _last_seasonal_check          | datetime|None| NO  | Rate-limit only; missing = check runs once
+  _last_seasonal_shift          | datetime|None| YES v11+ | FIXED: 7-day auto-apply block must survive restart
+  _outdoor_temp_history         | list[float]  | NO  | Transient; repopulated from sensor readings
+  _physics_baseline_kp/ki/kd    | float|None   | NO  | Re-set by physics init on every startup
+
+KeManager (ke_manager.py):
+  _steady_state_start       | float monotonic | NO | Intentional: meaningless across restart
+  _last_ke_observation_time | float monotonic | NO | Intentional: meaningless across restart
+  (ke_learner observations are persisted separately via LearningDataStore)
+
+PreheatLearner (preheat.py):
+  _observations            | dict[bin→list[HeatingObservation]] | YES | via to_dict()/from_dict()
+  heating_type             | str   | YES | serialized in to_dict()
+  max_hours                | float | YES | serialized in to_dict()
+  _add_observation_counter | int   | NO  | Optimization counter; reset 0 is correct
+-------------------------------------------------------------------------------
 """
 
 from __future__ import annotations
@@ -27,7 +80,7 @@ from .heating_rate_learner import HeatingRateLearner
 _LOGGER = logging.getLogger(__name__)
 
 # Current serialization format version
-CURRENT_VERSION = 10
+CURRENT_VERSION = 11
 
 
 def serialize_cycle(cycle: CycleMetrics) -> dict[str, Any]:
@@ -66,8 +119,9 @@ def learner_to_dict(
     undershoot_detector: Any | None = None,
     contribution_tracker: Any | None = None,
     heating_rate_learner: HeatingRateLearner | None = None,
+    last_seasonal_shift: datetime | None = None,
 ) -> dict[str, Any]:
-    """Serialize AdaptiveLearner state to a dictionary in v10 format.
+    """Serialize AdaptiveLearner state to a dictionary in v11 format.
 
     Args:
         heating_cycle_history: List of heating cycle metrics
@@ -82,9 +136,10 @@ def learner_to_dict(
         undershoot_detector: UndershootDetector instance for state serialization
         contribution_tracker: ConfidenceContributionTracker instance for state serialization
         heating_rate_learner: HeatingRateLearner instance for state serialization
+        last_seasonal_shift: Timestamp of last detected seasonal shift for auto-apply cooldown
 
     Returns:
-        Dictionary containing v10 structure with heating_rate_learner state
+        Dictionary containing v11 structure with last_seasonal_shift
 
     Note:
         pid_history is no longer managed by AdaptiveLearner - it's now owned by PIDGainsManager.
@@ -122,6 +177,8 @@ def learner_to_dict(
         heating_rate_learner_state = heating_rate_learner.to_dict()
 
     return {
+        # V11 seasonal shift timestamp for auto-apply cooldown
+        "last_seasonal_shift": (last_seasonal_shift.isoformat() if last_seasonal_shift is not None else None),
         # V10 heating rate learner state
         "heating_rate_learner": heating_rate_learner_state,
         # V9 contribution tracker state
@@ -250,6 +307,19 @@ def _migrate_v9_to_v10(data: dict[str, Any]) -> dict[str, Any]:
     return data
 
 
+def _migrate_v10_to_v11(data: dict[str, Any]) -> dict[str, Any]:
+    """Add last_seasonal_shift=null.
+
+    The seasonal-shift auto-apply block (SEASONAL_SHIFT_BLOCK_DAYS=7) was not
+    previously persisted.  On upgrade the cooldown resets to None (unblocked),
+    which is the safe default — any in-progress block expires at restart instead
+    of persisting.  Future restarts will correctly preserve the value.
+    """
+    data.setdefault("last_seasonal_shift", None)
+    data["format_version"] = 11
+    return data
+
+
 def _migrate(data: dict[str, Any]) -> dict[str, Any]:
     """Chain migrate data from stored version up to CURRENT_VERSION.
 
@@ -284,6 +354,7 @@ def _migrate(data: dict[str, Any]) -> dict[str, Any]:
         (7, _migrate_v7_to_v8),
         (8, _migrate_v8_to_v9),
         (9, _migrate_v9_to_v10),
+        (10, _migrate_v10_to_v11),
     ]
 
     for from_version, migrator in _steps:
@@ -308,6 +379,7 @@ def default_learner_state() -> dict[str, Any]:
         "cooling_convergence_confidence": 0.0,
         "pid_history": [],
         "last_adjustment_time": None,
+        "last_seasonal_shift": None,
         "consecutive_converged_cycles": 0,
         "pid_converged_for_ke": False,
         "undershoot_detector_state": {
@@ -328,10 +400,10 @@ def default_learner_state() -> dict[str, Any]:
 
 
 def restore_learner_from_dict(data: dict[str, Any]) -> dict[str, Any]:
-    """Restore AdaptiveLearner state from v10 format dictionary.
+    """Restore AdaptiveLearner state from v11 format dictionary.
 
     Args:
-        data: Dictionary containing v10 format data
+        data: Dictionary containing v11 (or earlier, auto-migrated) format data
 
     Returns:
         Dictionary with restored state containing:
@@ -343,12 +415,13 @@ def restore_learner_from_dict(data: dict[str, Any]) -> dict[str, Any]:
         - cooling_convergence_confidence: Convergence confidence for cooling mode
         - pid_history: List of PID snapshots (always empty, managed by PIDGainsManager)
         - last_adjustment_time: Timestamp of last PID adjustment (datetime or None)
+        - last_seasonal_shift: Timestamp of last seasonal shift (datetime or None)
         - consecutive_converged_cycles: Number of consecutive converged cycles
         - pid_converged_for_ke: Whether PID has converged for Ke learning
         - undershoot_detector_state: Dict with unified detector state
         - contribution_tracker_state: Dict with contribution tracker state
         - heating_rate_learner_state: Dict with heating rate learner state
-        - format_version: 'v10' to indicate v10 format
+        - format_version: CURRENT_VERSION to indicate migrated format
     """
     stored_version = data.get("format_version", 0)
     try:
@@ -410,12 +483,26 @@ def restore_learner_from_dict(data: dict[str, Any]) -> dict[str, Any]:
     else:
         last_adjustment_time = None
 
+    # Restore seasonal shift timestamp (v11) — governs auto-apply cooldown
+    last_seasonal_shift_raw = data.get("last_seasonal_shift")
+    if last_seasonal_shift_raw is not None and isinstance(last_seasonal_shift_raw, str):
+        try:
+            last_seasonal_shift: datetime | None = datetime.fromisoformat(last_seasonal_shift_raw)
+        except (ValueError, TypeError):
+            _LOGGER.warning(
+                "Could not parse last_seasonal_shift: %s — using None (auto-apply block reset)",
+                last_seasonal_shift_raw,
+            )
+            last_seasonal_shift = None
+    else:
+        last_seasonal_shift = None
+
     # Restore convergence tracking fields
     consecutive_converged_cycles = data.get("consecutive_converged_cycles", 0)
     pid_converged_for_ke = data.get("pid_converged_for_ke", False)
 
     _LOGGER.info(
-        "AdaptiveLearner state restored (v10): heating=%d cycles, cooling=%d cycles",
+        "AdaptiveLearner state restored (v11): heating=%d cycles, cooling=%d cycles",
         len(heating_cycle_history),
         len(cooling_cycle_history),
     )
@@ -429,6 +516,7 @@ def restore_learner_from_dict(data: dict[str, Any]) -> dict[str, Any]:
         "cooling_convergence_confidence": cooling_convergence_confidence,
         "pid_history": pid_history,
         "last_adjustment_time": last_adjustment_time,
+        "last_seasonal_shift": last_seasonal_shift,
         "consecutive_converged_cycles": consecutive_converged_cycles,
         "pid_converged_for_ke": pid_converged_for_ke,
         "undershoot_detector_state": undershoot_detector_state,

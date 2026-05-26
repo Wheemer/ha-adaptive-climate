@@ -467,6 +467,9 @@ def apply_restored_state(learner: AdaptiveLearner, data: dict[str, Any]) -> None
     else:
         learner._heating_rate_learner = HeatingRateLearner(learner._heating_type)
 
+    # Seasonal shift timestamp (v11) — restore auto-apply cooldown across restarts
+    learner._validation._last_seasonal_shift = restored.get("last_seasonal_shift")
+
     # Historic scan (if enabled at construction)
     if learner._chronic_approach_historic_scan:
         from .learning_adjustments import perform_historic_scan

@@ -334,12 +334,12 @@ class TestV9ToV10Migration:
 class TestBackwardCompatibility:
     """Test backward compatibility with existing serialization."""
 
-    def test_current_version_is_10(self):
-        """Test that CURRENT_VERSION constant is set to 10."""
-        assert CURRENT_VERSION == 10
+    def test_current_version_is_11(self):
+        """Test that CURRENT_VERSION constant is set to 11."""
+        assert CURRENT_VERSION == 11
 
-    def test_v9_includes_all_v8_fields(self):
-        """Test that v9 format includes all v8 fields for compatibility."""
+    def test_v11_includes_all_prior_fields(self):
+        """Test that v11 format includes all prior-version fields."""
         learner = AdaptiveLearner(heating_type=HeatingType.CONVECTOR)
 
         cycle = CycleMetrics(
@@ -353,7 +353,7 @@ class TestBackwardCompatibility:
 
         data = learner.to_dict()
 
-        # Check v8 fields are present
+        # Check v8+ fields are present
         assert "format_version" in data
         assert "heating" in data
         assert "cooling" in data
@@ -361,9 +361,11 @@ class TestBackwardCompatibility:
         assert "last_adjustment_time" in data
         assert "consecutive_converged_cycles" in data
         assert "pid_converged_for_ke" in data
+        # Check v11 field
+        assert "last_seasonal_shift" in data
 
     def test_mode_keyed_structure_preserved(self):
-        """Test that mode-keyed structure (v5+) is preserved in v9."""
+        """Test that mode-keyed structure (v5+) is preserved in v11."""
         learner = AdaptiveLearner(heating_type=HeatingType.FORCED_AIR)
 
         data = learner.to_dict()
@@ -377,6 +379,103 @@ class TestBackwardCompatibility:
         assert "cycle_history" in data["cooling"]
         assert "auto_apply_count" in data["cooling"]
         assert "convergence_confidence" in data["cooling"]
+
+
+class TestLastSeasonalShiftPersistence:
+    """Test that last_seasonal_shift survives serialization round-trips."""
+
+    def test_seasonal_shift_none_by_default(self):
+        """Fresh learner serializes last_seasonal_shift as None."""
+        learner = AdaptiveLearner(heating_type=HeatingType.RADIATOR)
+        data = learner.to_dict()
+        assert data["last_seasonal_shift"] is None
+
+    def test_seasonal_shift_serialized_as_iso8601(self):
+        """When set, last_seasonal_shift is serialized as ISO-8601 string."""
+        from datetime import timezone
+
+        learner = AdaptiveLearner(heating_type=HeatingType.RADIATOR)
+        ts = __import__("datetime").datetime(2025, 3, 15, 10, 30, 0, tzinfo=timezone.utc)
+        learner._validation._last_seasonal_shift = ts
+
+        data = learner.to_dict()
+
+        assert isinstance(data["last_seasonal_shift"], str)
+        assert data["last_seasonal_shift"] == ts.isoformat()
+
+    def test_seasonal_shift_round_trip(self):
+        """last_seasonal_shift survives serialize → deserialize → restore."""
+        from datetime import timezone
+
+        learner1 = AdaptiveLearner(heating_type=HeatingType.FLOOR_HYDRONIC)
+        ts = __import__("datetime").datetime(2025, 3, 15, 10, 30, 0, tzinfo=timezone.utc)
+        learner1._validation._last_seasonal_shift = ts
+
+        data = learner1.to_dict()
+        assert data["format_version"] == 11
+
+        learner2 = AdaptiveLearner(heating_type=HeatingType.FLOOR_HYDRONIC)
+        learner2.restore_from_dict(data)
+
+        restored_shift = learner2._validation._last_seasonal_shift
+        assert restored_shift is not None
+        assert restored_shift == ts
+
+    def test_seasonal_shift_null_round_trip(self):
+        """None last_seasonal_shift round-trips to None (no shift recorded)."""
+        learner1 = AdaptiveLearner(heating_type=HeatingType.RADIATOR)
+        # Ensure it's None
+        learner1._validation._last_seasonal_shift = None
+
+        data = learner1.to_dict()
+
+        learner2 = AdaptiveLearner(heating_type=HeatingType.RADIATOR)
+        learner2.restore_from_dict(data)
+
+        assert learner2._validation._last_seasonal_shift is None
+
+    def test_seasonal_shift_auto_apply_block_survives_restart(self):
+        """After restore, check_auto_apply_limits still enforces the block."""
+        import datetime
+        from homeassistant.util import dt as dt_util
+
+        learner1 = AdaptiveLearner(heating_type=HeatingType.RADIATOR)
+        # Simulate a shift 1 day ago (block lasts 7 days)
+        one_day_ago = dt_util.utcnow() - datetime.timedelta(days=1)
+        learner1._validation._last_seasonal_shift = one_day_ago
+
+        data = learner1.to_dict()
+
+        learner2 = AdaptiveLearner(heating_type=HeatingType.RADIATOR)
+        learner2.restore_from_dict(data)
+
+        # The block should still be active: check_auto_apply_limits returns an error string
+        result = learner2.check_auto_apply_limits(1.5, 0.01, 10.0)
+        assert result is not None
+        assert "Seasonal shift block" in result
+
+    def test_v10_migration_adds_null_seasonal_shift(self):
+        """Migrating from v10 → v11 adds last_seasonal_shift=null."""
+        v10_data = {
+            "format_version": 10,
+            "heating": {"cycle_history": [], "auto_apply_count": 0, "convergence_confidence": 0.0},
+            "cooling": {"cycle_history": [], "auto_apply_count": 0, "convergence_confidence": 0.0},
+            "undershoot_detector": {},
+            "contribution_tracker": {
+                "maintenance_contribution": 0.0,
+                "heating_rate_contribution": 0.0,
+                "recovery_cycle_count": 0,
+            },
+            "heating_rate_learner": {},
+            "last_adjustment_time": None,
+            "consecutive_converged_cycles": 0,
+            "pid_converged_for_ke": False,
+        }
+
+        result = restore_learner_from_dict(v10_data)
+
+        assert result["format_version"] == 11
+        assert result["last_seasonal_shift"] is None
 
 
 class TestVersionMigrations:
@@ -428,6 +527,14 @@ class TestVersionMigrations:
         assert result["contribution_tracker_state"]["maintenance_contribution"] == pytest.approx(18.5)
         assert result["contribution_tracker_state"]["recovery_cycle_count"] == 4
 
+    def test_v10_cycle_history_preserved(self):
+        data = self._load_fixture("learner_v10.json")
+        result = restore_learner_from_dict(data)
+        assert len(result["heating_cycle_history"]) == 1
+        assert result["contribution_tracker_state"]["maintenance_contribution"] == pytest.approx(22.0)
+        # v10 → v11 migration adds null last_seasonal_shift
+        assert result["last_seasonal_shift"] is None
+
     def test_all_versions_produce_current_format(self):
         """After migration, format_version == CURRENT_VERSION for all fixtures."""
         for fname in [
@@ -437,6 +544,7 @@ class TestVersionMigrations:
             "learner_v7.json",
             "learner_v8.json",
             "learner_v9.json",
+            "learner_v10.json",
         ]:
             data = self._load_fixture(fname)
             result = restore_learner_from_dict(data)
