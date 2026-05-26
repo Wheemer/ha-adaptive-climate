@@ -28,6 +28,8 @@ class CycleEventType(Enum):
     CONTACT_PAUSE = "contact_pause"
     CONTACT_RESUME = "contact_resume"
     TEMPERATURE_UPDATE = "temperature_update"
+    ZONE_REGISTERED = "zone_registered"
+    ZONE_UNREGISTERED = "zone_unregistered"
 
 
 @dataclass
@@ -174,11 +176,37 @@ class TemperatureUpdateEvent:
         return CycleEventType.TEMPERATURE_UPDATE
 
 
+@dataclass
+class ZoneRegisteredEvent:
+    """Event emitted when a zone is registered with the coordinator."""
+
+    zone_id: str
+    entity_id: str
+
+    @property
+    def event_type(self) -> CycleEventType:
+        """Return the event type."""
+        return CycleEventType.ZONE_REGISTERED
+
+
+@dataclass
+class ZoneUnregisteredEvent:
+    """Event emitted when a zone is unregistered from the coordinator."""
+
+    zone_id: str
+
+    @property
+    def event_type(self) -> CycleEventType:
+        """Return the event type."""
+        return CycleEventType.ZONE_UNREGISTERED
+
+
 # Type alias for any cycle event
 CycleEvent = (
     "CycleStartedEvent | CycleEndedEvent | HeatingStartedEvent | HeatingEndedEvent"
     " | SettlingStartedEvent | SetpointChangedEvent | ModeChangedEvent"
     " | ContactPauseEvent | ContactResumeEvent | TemperatureUpdateEvent"
+    " | ZoneRegisteredEvent | ZoneUnregisteredEvent"
 )
 
 

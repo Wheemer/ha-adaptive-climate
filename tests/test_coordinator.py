@@ -45,7 +45,18 @@ if "homeassistant.components" not in sys.modules:
 # DO NOT replace homeassistant.components.climate - it's already set up in conftest.py
 # with the correct MockHVACMode that uses global singleton values
 
-# Mock managers.auto_mode_switching
+# managers/events.py has no HA dependencies — load it directly via importlib so
+# the real CycleEventDispatcher, ZoneRegisteredEvent, etc. are available even
+# after we mock the managers package (which has HA-dependent __init__.py).
+import importlib.util as _importlib_util
+
+_events_path = Path(__file__).parent.parent / "custom_components" / "adaptive_climate" / "managers" / "events.py"
+_events_spec = _importlib_util.spec_from_file_location("managers.events", str(_events_path))
+_events_mod = _importlib_util.module_from_spec(_events_spec)  # type: ignore[arg-type]
+sys.modules["managers.events"] = _events_mod  # must be set BEFORE exec_module (dataclass needs it)
+_events_spec.loader.exec_module(_events_mod)  # type: ignore[union-attr]
+
+# Mock managers package (has HA-dependent __init__.py) and auto_mode_switching
 sys.modules["managers"] = Mock()
 sys.modules["managers.auto_mode_switching"] = Mock()
 
@@ -1076,6 +1087,156 @@ async def test_apply_house_mode_returns_zero_when_all_off(hass):
 
     count = await coord._apply_house_mode("heat")
     assert count == 0
+
+
+# =============================================================================
+# A02: Zone lifecycle pub/sub via CycleEventDispatcher
+# =============================================================================
+
+
+def test_zone_registered_event_emitted(coord):
+    """ZoneRegisteredEvent is emitted when register_zone is called (A02)."""
+    from managers.events import CycleEventType, ZoneRegisteredEvent
+
+    received = []
+    coord.zone_dispatcher.subscribe(CycleEventType.ZONE_REGISTERED, received.append)
+
+    coord.register_zone("zone1", {"climate_entity_id": "climate.zone1"})
+
+    assert len(received) == 1
+    assert isinstance(received[0], ZoneRegisteredEvent)
+    assert received[0].zone_id == "zone1"
+    assert received[0].entity_id == "climate.zone1"
+
+
+def test_zone_registered_event_uses_zone_id_when_no_entity(coord):
+    """ZoneRegisteredEvent falls back to zone_id when no climate_entity_id (A02)."""
+    from managers.events import CycleEventType, ZoneRegisteredEvent
+
+    received = []
+    coord.zone_dispatcher.subscribe(CycleEventType.ZONE_REGISTERED, received.append)
+
+    coord.register_zone("zone1", {"name": "Zone 1"})  # no climate_entity_id
+
+    assert len(received) == 1
+    assert received[0].entity_id == "zone1"
+
+
+def test_zone_unregistered_event_emitted(coord):
+    """ZoneUnregisteredEvent is emitted when unregister_zone is called (A02)."""
+    from managers.events import CycleEventType, ZoneUnregisteredEvent
+
+    received = []
+    coord.zone_dispatcher.subscribe(CycleEventType.ZONE_UNREGISTERED, received.append)
+
+    coord.register_zone("zone1", {"name": "Zone 1"})
+    coord.unregister_zone("zone1")
+
+    assert len(received) == 1
+    assert isinstance(received[0], ZoneUnregisteredEvent)
+    assert received[0].zone_id == "zone1"
+
+
+def test_zone_unregistered_event_not_emitted_for_unknown_zone(coord):
+    """ZoneUnregisteredEvent is NOT emitted for zones that were never registered (A02)."""
+    from managers.events import CycleEventType
+
+    received = []
+    coord.zone_dispatcher.subscribe(CycleEventType.ZONE_UNREGISTERED, received.append)
+
+    coord.unregister_zone("nonexistent_zone")
+
+    assert len(received) == 0
+
+
+def test_mode_sync_receives_zone_registered_event(coord):
+    """ModeSync._on_zone_registered is called when a zone registers (A02)."""
+    mode_sync = coordinator.ModeSync(coord.hass, coord)
+
+    # Register a zone — should trigger ModeSync._on_zone_registered (logged, no error)
+    coord.register_zone("zone1", {"name": "Zone 1"})
+    # Verify ModeSync is still in a clean state (no error raised)
+    assert "zone1" not in mode_sync._zone_modes
+
+
+def test_mode_sync_receives_zone_unregistered_event(coord):
+    """ModeSync.unregister_zone is called via event when zone is unregistered (A02)."""
+    mode_sync = coordinator.ModeSync(coord.hass, coord)
+    # Manually seed ModeSync zone tracking as if zone was synced
+    mode_sync._zone_modes["zone1"] = "heat"
+    mode_sync._sync_disabled_zones.add("zone1")
+
+    coord.register_zone("zone1", {"name": "Zone 1"})
+    coord.unregister_zone("zone1")
+
+    # ModeSync should have cleaned up both dicts via event subscription
+    assert "zone1" not in mode_sync._zone_modes
+    assert "zone1" not in mode_sync._sync_disabled_zones
+
+
+def test_thermal_group_manager_receives_zone_unregistered_event(coord):
+    """ThermalGroupManager.remove_zone is called via event when zone is unregistered (A02)."""
+    from unittest.mock import MagicMock
+
+    mock_tgm = MagicMock()
+    coord.set_thermal_group_manager(mock_tgm)
+
+    coord.register_zone("zone1", {"name": "Zone 1"})
+    coord.unregister_zone("zone1")
+
+    mock_tgm.remove_zone.assert_called_once_with("zone1")
+
+
+def test_thermal_group_manager_receives_zone_registered_event(coord):
+    """ThermalGroupManager subscription for ZONE_REGISTERED fires without error (A02)."""
+    from unittest.mock import MagicMock
+
+    mock_tgm = MagicMock()
+    coord.set_thermal_group_manager(mock_tgm)
+
+    # Should not raise; debug log is emitted but no method on TGM is called
+    coord.register_zone("zone1", {"name": "Zone 1"})
+
+
+def test_central_controller_receives_zone_unregistered_event(coord):
+    """CentralController.update is scheduled via event when zone is unregistered (A02)."""
+    from unittest.mock import MagicMock
+
+    mock_controller = MagicMock()
+    coord.set_central_controller(mock_controller)
+
+    coord.register_zone("zone1", {"name": "Zone 1"})
+    coord.unregister_zone("zone1")
+
+    # hass.async_create_task should have been called with controller.update()
+    coord.hass.async_create_task.assert_called()
+
+
+def test_all_subscribers_receive_zone_unregistered(coord):
+    """All three subscribers (ModeSync, CentralController, ThermalGroupManager) receive the event (A02)."""
+    from unittest.mock import MagicMock
+
+    # Set up ModeSync subscription
+    mode_sync = coordinator.ModeSync(coord.hass, coord)
+    mode_sync._zone_modes["zone1"] = "heat"
+
+    # Set up CentralController subscription
+    mock_controller = MagicMock()
+    coord.set_central_controller(mock_controller)
+
+    # Set up ThermalGroupManager subscription
+    mock_tgm = MagicMock()
+    coord.set_thermal_group_manager(mock_tgm)
+
+    coord.register_zone("zone1", {"name": "Zone 1"})
+    coord.unregister_zone("zone1")
+
+    # ModeSync cleaned up
+    assert "zone1" not in mode_sync._zone_modes
+    # ThermalGroupManager notified
+    mock_tgm.remove_zone.assert_called_once_with("zone1")
+    # CentralController update scheduled
+    coord.hass.async_create_task.assert_called()
 
 
 if __name__ == "__main__":

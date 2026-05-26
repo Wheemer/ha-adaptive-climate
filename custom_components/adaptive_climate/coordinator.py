@@ -20,10 +20,12 @@ try:
     from .const import DOMAIN
     from .adaptive.sun_position import SunPositionCalculator, ORIENTATION_AZIMUTH
     from .managers.auto_mode_switching import AutoModeSwitchingManager
+    from .managers.events import CycleEventDispatcher, CycleEventType, ZoneRegisteredEvent, ZoneUnregisteredEvent
 except ImportError:
     from const import DOMAIN  # type: ignore[no-redef]
     from adaptive.sun_position import SunPositionCalculator, ORIENTATION_AZIMUTH  # type: ignore[no-redef]
     from managers.auto_mode_switching import AutoModeSwitchingManager  # type: ignore[no-redef]
+    from managers.events import CycleEventDispatcher, CycleEventType, ZoneRegisteredEvent, ZoneUnregisteredEvent  # type: ignore[no-redef]
 
 if TYPE_CHECKING:
     from datetime import datetime
@@ -55,6 +57,9 @@ class AdaptiveThermostatCoordinator(DataUpdateCoordinator):
         self._rerun_pending: bool = False  # C04: re-run guard for demand changes during in-flight update
         self._config = config or {}
         self._outdoor_temp_unsub: CALLBACK_TYPE | None = None
+
+        # Zone lifecycle pub/sub dispatcher (A02)
+        self._zone_dispatcher = CycleEventDispatcher()
 
         # Shared outdoor temperature EMA filter
         self._outdoor_temp_lagged: float | None = None
@@ -89,9 +94,23 @@ class AdaptiveThermostatCoordinator(DataUpdateCoordinator):
         _LOGGER.debug("Running startup auto mode evaluation")
         await self._async_evaluate_auto_mode()
 
+    @property
+    def zone_dispatcher(self) -> CycleEventDispatcher:
+        """Return the zone lifecycle event dispatcher (A02)."""
+        return self._zone_dispatcher
+
     def set_central_controller(self, controller: CentralController) -> None:
         """Set the central controller reference for push-based updates."""
         self._central_controller = controller
+        # Subscribe CentralController to zone lifecycle events (A02)
+        self._zone_dispatcher.subscribe(
+            CycleEventType.ZONE_REGISTERED,
+            lambda e: _LOGGER.debug("CentralController: zone registered: %s", e.zone_id),
+        )
+        self._zone_dispatcher.subscribe(
+            CycleEventType.ZONE_UNREGISTERED,
+            lambda _e: self.hass.async_create_task(controller.update()),
+        )
 
     def set_thermal_group_manager(self, manager: Any) -> None:
         """Set the thermal group manager reference.
@@ -100,6 +119,15 @@ class AdaptiveThermostatCoordinator(DataUpdateCoordinator):
             manager: ThermalGroupManager instance or None
         """
         self._thermal_group_manager = manager
+        # Subscribe ThermalGroupManager to zone lifecycle events (A02)
+        self._zone_dispatcher.subscribe(
+            CycleEventType.ZONE_REGISTERED,
+            lambda e: _LOGGER.debug("ThermalGroupManager: zone registered: %s", e.zone_id),
+        )
+        self._zone_dispatcher.subscribe(
+            CycleEventType.ZONE_UNREGISTERED,
+            lambda e: manager.remove_zone(e.zone_id),
+        )
 
     @property
     def thermal_group_manager(self) -> Any:
@@ -334,12 +362,16 @@ class AdaptiveThermostatCoordinator(DataUpdateCoordinator):
         else:
             _LOGGER.debug("Preserved demand state for re-registered zone: %s", zone_id)
         _LOGGER.debug("Registered zone: %s", zone_id)
+        # A02: Notify all subscribers of zone registration
+        entity_id = zone_data.get("climate_entity_id", zone_id)
+        self._zone_dispatcher.emit(ZoneRegisteredEvent(zone_id=zone_id, entity_id=entity_id))
 
     def unregister_zone(self, zone_id: str) -> None:
         """Unregister a zone from the coordinator.
 
         Removes the zone from all tracking dicts (zones, demand states, zone loops).
-        Also unregisters from ModeSync if available.
+        Notifies subscribers (ModeSync, CentralController, ThermalGroupManager) via
+        ZoneUnregisteredEvent instead of ad-hoc direct calls.
         This should be called when a climate entity is being removed.
 
         Args:
@@ -363,15 +395,9 @@ class AdaptiveThermostatCoordinator(DataUpdateCoordinator):
         if zone_id in self._zone_loops:
             del self._zone_loops[zone_id]
 
-        # Unregister from ModeSync if available
-        domain_data = self.hass.data.get(DOMAIN, {})
-        mode_sync = domain_data.get("mode_sync")
-        if mode_sync is not None:
-            mode_sync.unregister_zone(zone_id)
-
-        # H10: Remove zone from thermal group manager to prevent stale references
-        if self._thermal_group_manager is not None:
-            self._thermal_group_manager.remove_zone(zone_id)
+        # A02: Notify all subscribers (ModeSync, CentralController, ThermalGroupManager)
+        # via pub/sub instead of ad-hoc direct calls
+        self._zone_dispatcher.emit(ZoneUnregisteredEvent(zone_id=zone_id))
 
         _LOGGER.info("Unregistered zone: %s", zone_id)
 
@@ -815,6 +841,10 @@ class ModeSync:
         self._sync_disabled_zones: set[str] = set()
         self._sync_in_progress: bool = False
 
+        # A02: Subscribe to zone lifecycle events from the coordinator dispatcher
+        coordinator.zone_dispatcher.subscribe(CycleEventType.ZONE_REGISTERED, self._on_zone_registered)
+        coordinator.zone_dispatcher.subscribe(CycleEventType.ZONE_UNREGISTERED, self._on_zone_unregistered)
+
         _LOGGER.debug("ModeSync initialized")
 
     def disable_sync_for_zone(self, zone_id: str) -> None:
@@ -1020,6 +1050,22 @@ class ModeSync:
             True if sync is in progress
         """
         return self._sync_in_progress
+
+    def _on_zone_registered(self, event: ZoneRegisteredEvent) -> None:
+        """Handle zone registered event (A02).
+
+        Args:
+            event: ZoneRegisteredEvent from the coordinator dispatcher
+        """
+        _LOGGER.debug("ModeSync: zone registered: %s", event.zone_id)
+
+    def _on_zone_unregistered(self, event: ZoneUnregisteredEvent) -> None:
+        """Handle zone unregistered event — delegates to unregister_zone (A02).
+
+        Args:
+            event: ZoneUnregisteredEvent from the coordinator dispatcher
+        """
+        self.unregister_zone(event.zone_id)
 
     def unregister_zone(self, zone_id: str) -> None:
         """Unregister a zone from mode synchronization.
