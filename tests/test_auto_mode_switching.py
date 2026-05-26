@@ -913,3 +913,78 @@ class TestGetStateAttributes:
         # Forecast still warrants HEAT, but current_mode is already HEAT
         result = manager._compute_target_mode(15.0, 21.0, "shoulder")
         assert result is None
+
+
+class TestForecastHoursAlias:
+    """M04: forecast_hours alias must not be shadowed by forecast_days schema default."""
+
+    def test_schema_forecast_days_has_no_default(self):
+        """M04: AUTO_MODE_SWITCHING_SCHEMA must NOT set a default on forecast_days.
+
+        Bug: ``vol.Optional(CONF_FORECAST_DAYS, default=DEFAULT_FORECAST_DAYS)`` injects
+        ``forecast_days=3`` even when the user only configured ``forecast_hours: 12``.
+        The manager's ``config.get(CONF_FORECAST_DAYS) or config.get("forecast_hours")``
+        then returns 3 (truthy) and the alias is silently ignored.
+
+        Fix: remove ``default=`` from the key so ``forecast_days`` is absent from the
+        validated dict when the user didn't explicitly set it.  The manager's ``or``
+        chain then reaches ``forecast_hours`` correctly.
+
+        This test inspects the schema key objects directly (voluptuous is never mocked),
+        so it is immune to the ``homeassistant.helpers.config_validation`` test-isolation
+        issue that other approaches face.
+        """
+        import voluptuous as vol
+        from custom_components.adaptive_climate import AUTO_MODE_SWITCHING_SCHEMA
+        from custom_components.adaptive_climate.const import CONF_FORECAST_DAYS
+
+        forecast_days_key = None
+        for key in AUTO_MODE_SWITCHING_SCHEMA.schema:
+            if isinstance(key, vol.Optional) and key.schema == CONF_FORECAST_DAYS:
+                forecast_days_key = key
+                break
+
+        assert forecast_days_key is not None, (
+            f"Could not find '{CONF_FORECAST_DAYS}' key in AUTO_MODE_SWITCHING_SCHEMA — did the schema change?"
+        )
+        assert forecast_days_key.default is vol.UNDEFINED, (
+            f"M04: '{CONF_FORECAST_DAYS}' must have no default in AUTO_MODE_SWITCHING_SCHEMA, "
+            f"got default={forecast_days_key.default}. "
+            "This default shadows the 'forecast_hours' backward-compat alias."
+        )
+
+    def test_manager_uses_forecast_hours_when_forecast_days_absent(self, mock_hass, mock_coordinator):
+        """M04 regression: manager must read forecast_hours when forecast_days absent from config.
+
+        This is the manager-level contract: after the schema fix the validated config
+        will NOT contain ``forecast_days`` when the user only set ``forecast_hours``,
+        so the manager's ``or``-chain must reach ``forecast_hours``.
+        """
+        # Simulate what the FIXED schema produces — no forecast_days injected
+        config = {"forecast_hours": 12}
+        manager = AutoModeSwitchingManager(mock_hass, config, mock_coordinator)
+
+        assert manager._forecast_days == 12, (
+            f"Expected _forecast_days=12 from forecast_hours, got {manager._forecast_days}. "
+            "Manager's or-chain must reach forecast_hours when forecast_days is absent."
+        )
+
+    def test_manager_forecast_days_takes_precedence_over_alias(self, mock_hass, mock_coordinator):
+        """M04 regression: explicit forecast_days wins when both keys present."""
+        config = {"forecast_days": 5, "forecast_hours": 12}
+        manager = AutoModeSwitchingManager(mock_hass, config, mock_coordinator)
+
+        assert manager._forecast_days == 5, (
+            f"Expected _forecast_days=5 (explicit key takes precedence), got {manager._forecast_days}."
+        )
+
+    def test_manager_default_when_neither_key_set(self, mock_hass, mock_coordinator):
+        """M04 regression: DEFAULT_FORECAST_DAYS (3) applies when neither key is present."""
+        from custom_components.adaptive_climate.const import DEFAULT_FORECAST_DAYS
+
+        manager = AutoModeSwitchingManager(mock_hass, {}, mock_coordinator)
+
+        assert manager._forecast_days == DEFAULT_FORECAST_DAYS, (
+            f"Expected _forecast_days={DEFAULT_FORECAST_DAYS} (default), got {manager._forecast_days}. "
+            "Default fallback must apply when no forecast key is configured."
+        )

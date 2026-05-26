@@ -202,7 +202,10 @@ if HAS_HOMEASSISTANT:
             vol.Required("enabled"): cv.boolean,
             vol.Optional(CONF_AUTO_MODE_THRESHOLD, default=DEFAULT_AUTO_MODE_THRESHOLD): vol.Coerce(float),
             vol.Optional(CONF_MIN_SWITCH_INTERVAL, default=DEFAULT_MIN_SWITCH_INTERVAL): cv.positive_int,
-            vol.Optional(CONF_FORECAST_DAYS, default=DEFAULT_FORECAST_DAYS): cv.positive_int,
+            # M04: No default here — if the user only sets forecast_hours the manager's
+            # `or` chain must reach it.  The default (DEFAULT_FORECAST_DAYS) is applied
+            # inside AutoModeSwitchingManager when both keys are absent.
+            vol.Optional(CONF_FORECAST_DAYS): cv.positive_int,
             # Backward-compat alias: "forecast_hours" was the original key name.
             # forecast_days takes precedence; this is accepted to avoid breaking
             # existing YAML configs.
