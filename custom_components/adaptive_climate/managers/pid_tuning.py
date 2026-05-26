@@ -7,6 +7,8 @@ import math
 import statistics
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
+from homeassistant.exceptions import HomeAssistantError
+
 from ..adaptive.physics import calculate_thermal_time_constant, calculate_initial_pid
 from ..protocols import PIDTuningManagerState
 from .. import const
@@ -386,72 +388,53 @@ class PIDTuningManager:
             },
         }
 
-    async def async_rollback_pid(self) -> bool:
-        """Rollback PID values to the previous configuration.
+    async def async_rollback_pid(self) -> dict[str, Any]:
+        """Rollback PID gains to the previous entry in PIDGainsManager history.
 
-        Retrieves the second-to-last PID snapshot from history and restores
-        those values. This is typically used when validation fails after
-        an auto-apply, or when a user wants to undo a recent change.
+        Uses PIDGainsManager.get_history() so no coordinator or adaptive learner
+        is required. History[-1] is current; history[-2] is the rollback target.
 
         Returns:
-            bool: True if rollback succeeded, False if no history available
+            dict: The previous history snapshot that was restored.
+
+        Raises:
+            HomeAssistantError: If history has fewer than 2 entries.
         """
-        coordinator = self._state._coordinator
-        if not coordinator:
-            _LOGGER.warning("%s: Cannot rollback PID - no coordinator", self._state.entity_id)
-            return False
+        history = self._gains_manager.get_history(self._state._hvac_mode)
+        if len(history) < 2:
+            raise HomeAssistantError(
+                f"{self._state.entity_id}: No previous gains to rollback to "
+                f"(history has {len(history)} entr{'y' if len(history) == 1 else 'ies'})"
+            )
 
-        adaptive_learner = coordinator.get_adaptive_learner(self._state.entity_id)
-        if not adaptive_learner:
-            _LOGGER.warning("%s: Cannot rollback PID - no adaptive learner", self._state.entity_id)
-            return False
-
-        # Get previous PID values
-        previous_pid = adaptive_learner.get_previous_pid()
-        if previous_pid is None:
-            _LOGGER.warning("%s: Cannot rollback PID - no previous configuration in history", self._state.entity_id)
-            return False
-
-        # Store current values for logging
-        current_kp = self._state._kp
-        current_ki = self._state._ki
-        current_kd = self._state._kd
-
-        # Clear integral to avoid wind-up
-        self._gains_manager.set_integral(0.0, PIDChangeReason.ROLLBACK)
-
-        # Apply previous PID values via PIDGainsManager (auto-records history)
-        self._gains_manager.set_gains(
-            PIDChangeReason.ROLLBACK,
-            kp=previous_pid["kp"],
-            ki=previous_pid["ki"],
-            kd=previous_pid["kd"],
-            metrics={
-                "rolled_back_from_kp": current_kp,
-                "rolled_back_from_ki": current_ki,
-                "rolled_back_from_kd": current_kd,
-            },
-        )
-
-        # Clear history to reset learning state
-        adaptive_learner.clear_history()
+        previous = history[-2]  # [-1] is current, [-2] is previous
 
         _LOGGER.warning(
-            "%s: Rolled back PID to previous config (from %s): Kp=%.4f→%.4f, Ki=%.5f→%.5f, Kd=%.3f→%.3f",
+            "%s: Rolling back PID gains: Kp %.4f→%.4f, Ki %.5f→%.5f, Kd %.3f→%.3f",
             self._state.entity_id,
-            previous_pid.get("timestamp", "unknown"),
-            current_kp,
-            previous_pid["kp"],
-            current_ki,
-            previous_pid["ki"],
-            current_kd,
-            previous_pid["kd"],
+            self._state._kp,
+            previous["kp"],
+            self._state._ki,
+            previous["ki"],
+            self._state._kd,
+            previous["kd"],
+        )
+
+        # Clear integral to avoid wind-up from old tuning
+        self._gains_manager.set_integral(0.0, PIDChangeReason.ROLLBACK)
+
+        self._gains_manager.set_gains(
+            PIDChangeReason.ROLLBACK,
+            kp=previous["kp"],
+            ki=previous["ki"],
+            kd=previous["kd"],
+            ke=previous.get("ke", 0.0),
         )
 
         await self._async_control_heating(calc_pid=True)
         await self._async_write_ha_state()
 
-        return True
+        return previous
 
     async def async_apply_adaptive_ke(self, **kwargs) -> None:
         """Apply adaptive Ke value based on learned outdoor temperature correlations.

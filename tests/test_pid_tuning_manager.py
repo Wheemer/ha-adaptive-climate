@@ -1,12 +1,13 @@
 """Tests for PIDTuningManager Protocol-based refactoring."""
 
 import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, Mock, patch
 from datetime import datetime
 
 from custom_components.adaptive_climate.managers.pid_tuning import PIDTuningManager
+from custom_components.adaptive_climate.managers.pid_gains_manager import PIDGainsManager
 from custom_components.adaptive_climate.protocols import PIDTuningManagerState
-from custom_components.adaptive_climate.const import PIDChangeReason, HeatingType
+from custom_components.adaptive_climate.const import PIDChangeReason, HeatingType, PIDGains
 from custom_components.adaptive_climate.pid_controller import PID
 
 
@@ -430,25 +431,18 @@ async def test_auto_apply_adaptive_pid():
 
 @pytest.mark.asyncio
 async def test_rollback_pid():
-    """Test PID rollback functionality."""
+    """H07: rollback reads history[-2] from _gains_manager, not get_previous_pid()."""
     mock_state = MockPIDTuningManagerState()
     pid_controller = MagicMock(spec=PID)
     pid_controller.integral = 50.0
-    gains_manager = MagicMock()
     async_control_heating = AsyncMock()
     async_write_ha_state = AsyncMock()
 
-    # Mock coordinator and learner
-    mock_coordinator = MagicMock()
-    mock_learner = MagicMock()
-    mock_learner.get_previous_pid.return_value = {
-        "kp": 1.2,
-        "ki": 0.008,
-        "kd": 8.0,
-        "timestamp": "2024-01-15T10:00:00",
-    }
-    mock_coordinator.get_adaptive_learner.return_value = mock_learner
-    mock_state._coordinator = mock_coordinator
+    # Two-entry history: [previous, current]
+    gains_manager = MagicMock()
+    previous_entry = {"kp": 1.2, "ki": 0.008, "kd": 8.0, "ke": 0.3, "timestamp": "2024-01-15T10:00:00"}
+    current_entry = {"kp": 1.5, "ki": 0.01, "kd": 10.0, "ke": 0.5, "timestamp": "2024-01-16T10:00:00"}
+    gains_manager.get_history.return_value = [previous_entry, current_entry]
 
     manager = PIDTuningManager(
         thermostat_state=mock_state,
@@ -458,46 +452,37 @@ async def test_rollback_pid():
         async_write_ha_state=async_write_ha_state,
     )
 
-    # Rollback PID
     result = await manager.async_rollback_pid()
 
-    # Verify success
-    assert result is True
+    # H07: returns the previous history entry (dict), not a bool
+    assert result == previous_entry
 
-    # Verify integral was cleared via gains_manager (D4: centralized mutation)
-    gains_manager.set_integral.assert_called_once_with(0.0, PIDChangeReason.ROLLBACK)
+    # get_history called with current hvac_mode (no coordinator access needed)
+    gains_manager.get_history.assert_called_once_with(mock_state._hvac_mode)
 
-    # Verify gains were set with ROLLBACK reason
-    assert gains_manager.set_gains.called
+    # Gains applied with ROLLBACK reason using history[-2] values
+    gains_manager.set_gains.assert_called_once()
     call_args = gains_manager.set_gains.call_args
     assert call_args[0][0] == PIDChangeReason.ROLLBACK
     assert call_args[1]["kp"] == 1.2
     assert call_args[1]["ki"] == 0.008
     assert call_args[1]["kd"] == 8.0
+    assert call_args[1]["ke"] == 0.3
 
-    # Verify learning history was cleared
-    mock_learner.clear_history.assert_called_once()
-
-    # Verify callbacks were triggered
+    # Callbacks triggered
     async_control_heating.assert_called_once_with(calc_pid=True)
     async_write_ha_state.assert_called_once()
 
 
 @pytest.mark.asyncio
 async def test_rollback_without_history():
-    """Test that rollback fails gracefully without history."""
+    """H07: rollback raises (HomeAssistantError = Exception in tests) when < 2 entries."""
     mock_state = MockPIDTuningManagerState()
     pid_controller = MagicMock(spec=PID)
     gains_manager = MagicMock()
+    gains_manager.get_history.return_value = [{"kp": 1.5, "ki": 0.01, "kd": 10.0}]  # only 1
     async_control_heating = AsyncMock()
     async_write_ha_state = AsyncMock()
-
-    # Mock coordinator and learner with no history
-    mock_coordinator = MagicMock()
-    mock_learner = MagicMock()
-    mock_learner.get_previous_pid.return_value = None
-    mock_coordinator.get_adaptive_learner.return_value = mock_learner
-    mock_state._coordinator = mock_coordinator
 
     manager = PIDTuningManager(
         thermostat_state=mock_state,
@@ -507,14 +492,65 @@ async def test_rollback_without_history():
         async_write_ha_state=async_write_ha_state,
     )
 
-    # Rollback should fail gracefully
-    result = await manager.async_rollback_pid()
+    # HomeAssistantError is mapped to Exception in the test environment (conftest.py)
+    with pytest.raises(Exception, match="No previous gains"):
+        await manager.async_rollback_pid()
 
-    # Verify failure
-    assert result is False
+    gains_manager.set_gains.assert_not_called()
+    gains_manager.set_integral.assert_not_called()
 
-    # Verify no gains were set
-    assert not gains_manager.set_gains.called
+
+@pytest.mark.asyncio
+async def test_rollback_ke_defaults_to_zero_when_missing():
+    """H07: ke defaults to 0.0 when not present in history entry."""
+    mock_state = MockPIDTuningManagerState()
+    pid_controller = MagicMock(spec=PID)
+    gains_manager = MagicMock()
+    # History without 'ke' key
+    gains_manager.get_history.return_value = [
+        {"kp": 1.0, "ki": 0.005, "kd": 6.0},  # previous — no ke
+        {"kp": 1.5, "ki": 0.01, "kd": 10.0},  # current
+    ]
+    async_control_heating = AsyncMock()
+    async_write_ha_state = AsyncMock()
+
+    manager = PIDTuningManager(
+        thermostat_state=mock_state,
+        pid_controller=pid_controller,
+        gains_manager=gains_manager,
+        async_control_heating=async_control_heating,
+        async_write_ha_state=async_write_ha_state,
+    )
+
+    await manager.async_rollback_pid()
+
+    call_args = gains_manager.set_gains.call_args
+    assert call_args[1]["ke"] == 0.0
+
+
+@pytest.mark.asyncio
+async def test_rollback_empty_history():
+    """H07: rollback raises (HomeAssistantError = Exception in tests) when history is empty."""
+    mock_state = MockPIDTuningManagerState()
+    pid_controller = MagicMock(spec=PID)
+    gains_manager = MagicMock()
+    gains_manager.get_history.return_value = []
+    async_control_heating = AsyncMock()
+    async_write_ha_state = AsyncMock()
+
+    manager = PIDTuningManager(
+        thermostat_state=mock_state,
+        pid_controller=pid_controller,
+        gains_manager=gains_manager,
+        async_control_heating=async_control_heating,
+        async_write_ha_state=async_write_ha_state,
+    )
+
+    # HomeAssistantError is mapped to Exception in the test environment (conftest.py)
+    with pytest.raises(Exception, match="No previous gains"):
+        await manager.async_rollback_pid()
+
+    gains_manager.set_gains.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -671,3 +707,110 @@ async def test_clear_learning():
 
     # Verify reset_to_physics was called (by checking gains manager)
     assert gains_manager.set_gains.called
+
+
+# ---------------------------------------------------------------------------
+# H07 — rollback must use PIDGainsManager history, not learner.get_previous_pid()
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+class TestRollbackUsesGainsHistory:
+    """H07: async_rollback_pid must read from PIDGainsManager.get_history()."""
+
+    def _make_real_gains_manager(self, hvac_mode=None):
+        """Build a real PIDGainsManager wired to a mock PID controller."""
+        from homeassistant.components.climate import HVACMode
+
+        mode = hvac_mode or HVACMode.HEAT
+        mock_pid = Mock()
+        mock_pid.set_pid_param = Mock()
+        mock_pid.integral = 0.0
+        gains_manager = PIDGainsManager(
+            pid_controller=mock_pid,
+            initial_heating_gains=PIDGains(kp=1.0, ki=0.01, kd=5.0, ke=0.0),
+            get_hvac_mode=lambda: mode,
+        )
+        return gains_manager, mock_pid
+
+    async def test_rollback_restores_previous_gains_from_history(self):
+        """H07: After applying two sets of gains, rollback restores the first set."""
+        gains_manager, mock_pid = self._make_real_gains_manager()
+
+        # Apply first set of gains (entry 0 in history)
+        gains_manager.set_gains(PIDChangeReason.SERVICE_CALL, kp=1.5, ki=0.015, kd=8.0)
+        # Apply second set (entry 1 in history — becomes "current")
+        gains_manager.set_gains(PIDChangeReason.SERVICE_CALL, kp=2.0, ki=0.020, kd=12.0)
+
+        mock_state = MockPIDTuningManagerState()
+        mock_state._coordinator = None  # No coordinator — must NOT be needed
+
+        async_control_heating = AsyncMock()
+        async_write_ha_state = AsyncMock()
+
+        manager = PIDTuningManager(
+            thermostat_state=mock_state,
+            pid_controller=mock_pid,
+            gains_manager=gains_manager,
+            async_control_heating=async_control_heating,
+            async_write_ha_state=async_write_ha_state,
+        )
+
+        result = await manager.async_rollback_pid()
+
+        # Returns the previous snapshot dict, not a boolean
+        assert isinstance(result, dict)
+        assert result["kp"] == pytest.approx(1.5)
+        assert result["ki"] == pytest.approx(0.015)
+        assert result["kd"] == pytest.approx(8.0)
+
+        # Active gains should now reflect the rolled-back values
+        from homeassistant.components.climate import HVACMode
+
+        active = gains_manager.get_gains(HVACMode.HEAT)
+        assert active.kp == pytest.approx(1.5)
+        assert active.ki == pytest.approx(0.015)
+        assert active.kd == pytest.approx(8.0)
+
+        # Callbacks must be invoked
+        async_control_heating.assert_called_once_with(calc_pid=True)
+        async_write_ha_state.assert_called_once()
+
+    async def test_rollback_raises_when_history_too_short(self):
+        """H07: HomeAssistantError raised when fewer than 2 history entries."""
+        gains_manager, mock_pid = self._make_real_gains_manager()
+        # Only one entry in history (first set_gains call)
+        gains_manager.set_gains(PIDChangeReason.SERVICE_CALL, kp=1.5, ki=0.015, kd=8.0)
+
+        mock_state = MockPIDTuningManagerState()
+        mock_state._coordinator = None
+
+        manager = PIDTuningManager(
+            thermostat_state=mock_state,
+            pid_controller=mock_pid,
+            gains_manager=gains_manager,
+            async_control_heating=AsyncMock(),
+            async_write_ha_state=AsyncMock(),
+        )
+
+        with pytest.raises(Exception, match="No previous gains"):
+            await manager.async_rollback_pid()
+
+    async def test_rollback_raises_when_history_empty(self):
+        """H07: HomeAssistantError raised when history is empty."""
+        gains_manager, mock_pid = self._make_real_gains_manager()
+        # No set_gains calls — history is empty
+
+        mock_state = MockPIDTuningManagerState()
+        mock_state._coordinator = None
+
+        manager = PIDTuningManager(
+            thermostat_state=mock_state,
+            pid_controller=mock_pid,
+            gains_manager=gains_manager,
+            async_control_heating=AsyncMock(),
+            async_write_ha_state=AsyncMock(),
+        )
+
+        with pytest.raises(Exception, match="No previous gains"):
+            await manager.async_rollback_pid()
