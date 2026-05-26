@@ -257,13 +257,13 @@ class AdaptiveThermostat(
         if config.contact_sensors:
             contact_action = config.contact_action
             contact_delay = config.contact_delay  # Already int (seconds) from schema
-            # M05: map all three valid values; "none" = observe-only, no heating action
-            if contact_action == "pause":
-                action_enum = ContactAction.PAUSE
-            elif contact_action == "frost_protection":
-                action_enum = ContactAction.FROST_PROTECTION
-            else:
-                action_enum = ContactAction.NONE
+            action_map = {
+                "pause": ContactAction.PAUSE,
+                "frost_protection": ContactAction.FROST_PROTECTION,
+                "clamp": ContactAction.CLAMP,
+                "none": ContactAction.NONE,
+            }
+            action_enum = action_map.get(contact_action, ContactAction.NONE)
             self._contact_sensor_handler = ContactSensorHandler(
                 contact_sensors=config.contact_sensors,
                 contact_delay_seconds=contact_delay,
@@ -963,9 +963,10 @@ class AdaptiveThermostat(
             self._night_setback_controller.set_learning_grace_period(minutes)
 
     def _calculate_night_setback_adjustment(self, current_time=None):
-        """Calculate effective target temperature with night setback and cooling clamp.
+        """Calculate effective target temperature with night setback, contact sensor, and cooling clamp.
 
         Delegates to NightSetbackManager for night setback logic, then applies
+        contact sensor adjustments (frost_protection or clamp), then applies
         cooling supply temperature clamp when in COOL mode.
 
         Args:
@@ -987,6 +988,20 @@ class AdaptiveThermostat(
             effective_target = self._target_temp
             in_night = False
             info = {"night_setback_active": False}
+
+        # Apply contact sensor setpoint adjustment (FROST_PROTECTION or CLAMP)
+        if self._contact_sensor_handler and self._contact_sensor_handler.should_take_action():
+            hvac_mode_str = self._hvac_mode.value if self._hvac_mode else None
+            action = self._contact_sensor_handler.get_action(hvac_mode_str)
+            if action in (ContactAction.FROST_PROTECTION, ContactAction.CLAMP):
+                adjusted = self._contact_sensor_handler.get_adjusted_setpoint(effective_target, hvac_mode=hvac_mode_str)
+                if adjusted is not None:
+                    info["contact_setpoint_adjustment"] = {
+                        "action": action.value,
+                        "original_target": effective_target,
+                        "effective_target": adjusted,
+                    }
+                    effective_target = adjusted
 
         # Apply cooling supply temperature clamp when in COOL mode
         if self._hvac_mode == HVACMode.COOL:

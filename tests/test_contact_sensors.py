@@ -554,3 +554,133 @@ class TestContactActionNone:
         result = handler.get_adjusted_setpoint(base_setpoint=20.0, current_time=t0)
 
         assert result is None, f"M05: contact_action=none must not adjust setpoint, got {result!r}."
+
+
+class TestContactActionClamp:
+    """Tests for contact_action=clamp which offsets setpoint by 2°C."""
+
+    def test_clamp_action_lowers_setpoint_in_heat_mode(self):
+        """CLAMP action lowers setpoint by 2°C when heating."""
+        handler = ContactSensorHandler(
+            contact_sensors=["binary_sensor.window"],
+            contact_delay_seconds=0,
+            action=ContactAction.CLAMP,
+        )
+        t0 = datetime(2024, 1, 1, 10, 0)
+        handler.update_contact_states({"binary_sensor.window": True}, t0)
+
+        result = handler.get_adjusted_setpoint(base_setpoint=20.0, current_time=t0, hvac_mode="heat")
+
+        assert result == 18.0, f"CLAMP in heat mode should lower setpoint by 2°C, got {result}"
+
+    def test_clamp_action_raises_setpoint_in_cool_mode(self):
+        """CLAMP action raises setpoint by 2°C when cooling."""
+        handler = ContactSensorHandler(
+            contact_sensors=["binary_sensor.window"],
+            contact_delay_seconds=0,
+            action=ContactAction.CLAMP,
+        )
+        t0 = datetime(2024, 1, 1, 10, 0)
+        handler.update_contact_states({"binary_sensor.window": True}, t0)
+
+        result = handler.get_adjusted_setpoint(base_setpoint=24.0, current_time=t0, hvac_mode="cool")
+
+        assert result == 26.0, f"CLAMP in cool mode should raise setpoint by 2°C, got {result}"
+
+    def test_clamp_action_defaults_to_heat_when_mode_unknown(self):
+        """CLAMP action defaults to lowering setpoint when hvac_mode is None."""
+        handler = ContactSensorHandler(
+            contact_sensors=["binary_sensor.window"],
+            contact_delay_seconds=0,
+            action=ContactAction.CLAMP,
+        )
+        t0 = datetime(2024, 1, 1, 10, 0)
+        handler.update_contact_states({"binary_sensor.window": True}, t0)
+
+        result = handler.get_adjusted_setpoint(base_setpoint=20.0, current_time=t0, hvac_mode=None)
+
+        assert result == 18.0, f"CLAMP with no mode should lower setpoint, got {result}"
+
+    def test_clamp_action_does_not_pause_control(self):
+        """CLAMP action does NOT trigger a control pause."""
+        from custom_components.adaptive_climate.managers.pause_detector import PauseDetector
+
+        handler = ContactSensorHandler(
+            contact_sensors=["binary_sensor.window"],
+            contact_delay_seconds=0,
+            action=ContactAction.CLAMP,
+        )
+        t0 = datetime(2024, 1, 1, 10, 0)
+        handler.update_contact_states({"binary_sensor.window": True}, t0)
+
+        pause_detector = PauseDetector(contact_sensor_handler=handler)
+
+        assert not pause_detector.is_control_paused("heat"), (
+            "CLAMP must not pause heating control — it adjusts setpoint instead"
+        )
+        assert not pause_detector.is_control_paused("cool"), (
+            "CLAMP must not pause cooling control — it adjusts setpoint instead"
+        )
+
+    def test_clamp_action_pauses_learning(self):
+        """CLAMP action DOES pause learning (any setpoint adjustment invalidates cycles)."""
+        from custom_components.adaptive_climate.managers.pause_detector import PauseDetector
+
+        handler = ContactSensorHandler(
+            contact_sensors=["binary_sensor.window"],
+            contact_delay_seconds=0,
+            action=ContactAction.CLAMP,
+        )
+        t0 = datetime(2024, 1, 1, 10, 0)
+        handler.update_contact_states({"binary_sensor.window": True}, t0)
+
+        pause_detector = PauseDetector(contact_sensor_handler=handler)
+
+        assert pause_detector.is_learning_paused(), "CLAMP should pause learning when contact is open"
+
+    def test_clamp_no_adjustment_when_closed(self):
+        """CLAMP returns None (no adjustment) when contact is closed."""
+        handler = ContactSensorHandler(
+            contact_sensors=["binary_sensor.window"],
+            contact_delay_seconds=0,
+            action=ContactAction.CLAMP,
+        )
+        t0 = datetime(2024, 1, 1, 10, 0)
+        handler.update_contact_states({"binary_sensor.window": False}, t0)
+
+        result = handler.get_adjusted_setpoint(base_setpoint=20.0, current_time=t0, hvac_mode="heat")
+
+        assert result is None, f"CLAMP with closed contact should return None, got {result}"
+
+    def test_clamp_respects_delay(self):
+        """CLAMP respects contact_delay before adjusting setpoint."""
+        handler = ContactSensorHandler(
+            contact_sensors=["binary_sensor.window"],
+            contact_delay_seconds=300,  # 5 minutes
+            action=ContactAction.CLAMP,
+        )
+        t0 = datetime(2024, 1, 1, 10, 0)
+        handler.update_contact_states({"binary_sensor.window": True}, t0)
+
+        # Before delay
+        result = handler.get_adjusted_setpoint(base_setpoint=20.0, current_time=t0, hvac_mode="heat")
+        assert result is None, "CLAMP should not adjust before delay expires"
+
+        # After delay
+        t5 = t0 + timedelta(minutes=5)
+        result = handler.get_adjusted_setpoint(base_setpoint=20.0, current_time=t5, hvac_mode="heat")
+        assert result == 18.0, f"CLAMP should adjust after delay, got {result}"
+
+    def test_manager_configures_clamp_action(self):
+        """ContactSensorManager correctly maps 'clamp' string to ContactAction.CLAMP."""
+        manager = ContactSensorManager()
+        manager.configure_zone(
+            zone_id="bedroom",
+            contact_sensors=["binary_sensor.window"],
+            contact_delay_seconds=0,
+            action="clamp",
+        )
+
+        handler = manager.get_handler("bedroom")
+        assert handler is not None
+        assert handler.action == ContactAction.CLAMP

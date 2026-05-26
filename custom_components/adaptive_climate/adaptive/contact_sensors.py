@@ -12,12 +12,15 @@ from typing import Any
 
 from homeassistant.util import dt as dt_util
 
+from ..const import CONTACT_CLAMP_DELTA
+
 
 class ContactAction(Enum):
     """Action to take when contact sensor opens."""
 
     PAUSE = "pause"  # Stop heating completely
     FROST_PROTECTION = "frost_protection"  # Lower to frost protection temp (e.g., 5°C)
+    CLAMP = "clamp"  # Offset setpoint by 2°C (lower in heat, raise in cool)
     NONE = "none"  # M05: Observe-only — track sensor state but take no heating action
 
 
@@ -159,12 +162,18 @@ class ContactSensorHandler:
             return ContactAction.PAUSE
         return self.action
 
-    def get_adjusted_setpoint(self, base_setpoint: float, current_time: datetime | None = None) -> float | None:
+    def get_adjusted_setpoint(
+        self,
+        base_setpoint: float,
+        current_time: datetime | None = None,
+        hvac_mode: str | None = None,
+    ) -> float | None:
         """Get adjusted setpoint based on contact state.
 
         Args:
             base_setpoint: Normal temperature setpoint
             current_time: Current datetime (defaults to now)
+            hvac_mode: Current HVAC mode ("heat", "cool", etc.)
 
         Returns:
             Adjusted setpoint, or None if no adjustment needed
@@ -174,9 +183,11 @@ class ContactSensorHandler:
 
         if self.action == ContactAction.FROST_PROTECTION:
             return self.frost_protection_temp
+        elif self.action == ContactAction.CLAMP:
+            if hvac_mode == "cool":
+                return base_setpoint + CONTACT_CLAMP_DELTA
+            return base_setpoint - CONTACT_CLAMP_DELTA
         elif self.action == ContactAction.PAUSE:
-            # For PAUSE action, return None to indicate heating should stop
-            # (caller should interpret None as "pause heating")
             return None
 
         return None
@@ -251,7 +262,13 @@ class ContactSensorManager:
             learning_grace_seconds: Grace period after startup (seconds)
         """
         # Convert string action to enum
-        action_enum = ContactAction.PAUSE if action.lower() == "pause" else ContactAction.FROST_PROTECTION
+        action_map = {
+            "pause": ContactAction.PAUSE,
+            "frost_protection": ContactAction.FROST_PROTECTION,
+            "clamp": ContactAction.CLAMP,
+            "none": ContactAction.NONE,
+        }
+        action_enum = action_map.get(action.lower(), ContactAction.PAUSE)
 
         self._zone_handlers[zone_id] = ContactSensorHandler(
             contact_sensors=contact_sensors,
@@ -294,7 +311,11 @@ class ContactSensorManager:
         return handler.should_take_action(current_time)
 
     def get_adjusted_setpoint(
-        self, zone_id: str, base_setpoint: float, current_time: datetime | None = None
+        self,
+        zone_id: str,
+        base_setpoint: float,
+        current_time: datetime | None = None,
+        hvac_mode: str | None = None,
     ) -> float | None:
         """Get adjusted setpoint for a zone based on contact state.
 
@@ -302,6 +323,7 @@ class ContactSensorManager:
             zone_id: Zone identifier
             base_setpoint: Normal temperature setpoint
             current_time: Current datetime (defaults to now)
+            hvac_mode: Current HVAC mode ("heat", "cool", etc.)
 
         Returns:
             Adjusted setpoint, or None if no adjustment or zone not configured
@@ -310,7 +332,7 @@ class ContactSensorManager:
             return None
 
         handler = self._zone_handlers[zone_id]
-        return handler.get_adjusted_setpoint(base_setpoint, current_time)
+        return handler.get_adjusted_setpoint(base_setpoint, current_time, hvac_mode)
 
     def get_handler(self, zone_id: str) -> ContactSensorHandler | None:
         """Get contact sensor handler for a zone.
