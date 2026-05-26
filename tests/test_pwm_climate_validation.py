@@ -1,61 +1,29 @@
 """Test PWM + climate entity validation."""
 
 import pytest
-import sys
-from pathlib import Path
+import voluptuous as vol
 from datetime import timedelta
+from unittest.mock import patch
 
-# Add parent directory to path
-sys.path.insert(0, str(Path(__file__).parent.parent / "custom_components" / "adaptive_climate"))
-
-from const import CONF_HEATER, CONF_COOLER, CONF_PWM
+from custom_components.adaptive_climate.const import CONF_HEATER, CONF_COOLER, CONF_PWM
+from custom_components.adaptive_climate.climate_setup import validate_pwm_compatibility
 
 
-# Inline the validation function for testing
-def validate_pwm_compatibility(config):
-    """Validate that PWM mode is not used with climate entities.
+def _mock_split_entity_id(entity_id: str) -> tuple[str, str]:
+    """Mock split_entity_id to avoid HA dependency."""
+    if "." in entity_id:
+        return tuple(entity_id.split(".", 1))
+    return ("", "")
 
-    PWM (Pulse Width Modulation) creates nested control loops when used with
-    climate entities, which have their own internal PID controllers. This can
-    cause instability and erratic behavior.
 
-    Args:
-        config: Platform configuration dictionary
-
-    Raises:
-        ValueError: If PWM is configured with a climate entity
-
-    Returns:
-        config: Validated configuration (unchanged if valid)
-    """
-    pwm = config.get(CONF_PWM)
-    pwm_seconds = pwm.seconds if pwm else 0
-
-    # Only validate if PWM is actually enabled (> 0 seconds)
-    if pwm_seconds == 0:
-        return config
-
-    # Check heater entity
-    heater_entities = config.get(CONF_HEATER, [])
-    for entity_id in heater_entities:
-        if entity_id.startswith("climate."):
-            raise ValueError(
-                f"PWM mode cannot be used with climate entity '{entity_id}'. "
-                f"Climate entities have their own PID controllers, creating nested control loops. "
-                f"Solutions: (1) Set pwm to '00:00:00' for valve mode, or (2) Use a switch/light entity instead."
-            )
-
-    # Check cooler entity
-    cooler_entities = config.get(CONF_COOLER, [])
-    for entity_id in cooler_entities:
-        if entity_id.startswith("climate."):
-            raise ValueError(
-                f"PWM mode cannot be used with climate entity '{entity_id}'. "
-                f"Climate entities have their own PID controllers, creating nested control loops. "
-                f"Solutions: (1) Set pwm to '00:00:00' for valve mode, or (2) Use a switch/light entity instead."
-            )
-
-    return config
+@pytest.fixture(autouse=True)
+def mock_split_entity_id():
+    """Auto-use fixture to mock split_entity_id for all tests."""
+    with patch(
+        "custom_components.adaptive_climate.climate_setup.split_entity_id",
+        side_effect=_mock_split_entity_id,
+    ):
+        yield
 
 
 class TestPWMClimateValidation:
@@ -106,7 +74,7 @@ class TestPWMClimateValidation:
             CONF_HEATER: ["climate.underfloor"],
             CONF_PWM: timedelta(minutes=15),
         }
-        with pytest.raises(ValueError) as exc_info:
+        with pytest.raises(vol.Invalid) as exc_info:
             validate_pwm_compatibility(config)
 
         assert "climate.underfloor" in str(exc_info.value)
@@ -119,7 +87,7 @@ class TestPWMClimateValidation:
             CONF_COOLER: ["climate.ac_unit"],
             CONF_PWM: timedelta(minutes=10),
         }
-        with pytest.raises(ValueError) as exc_info:
+        with pytest.raises(vol.Invalid) as exc_info:
             validate_pwm_compatibility(config)
 
         assert "climate.ac_unit" in str(exc_info.value)
@@ -132,7 +100,7 @@ class TestPWMClimateValidation:
             CONF_PWM: timedelta(minutes=15),
         }
         # Should raise on first climate entity found
-        with pytest.raises(ValueError) as exc_info:
+        with pytest.raises(vol.Invalid) as exc_info:
             validate_pwm_compatibility(config)
 
         assert "climate." in str(exc_info.value)
@@ -155,7 +123,7 @@ class TestPWMClimateValidation:
             CONF_HEATER: ["climate.radiant_floor"],
             CONF_PWM: timedelta(minutes=20),
         }
-        with pytest.raises(ValueError) as exc_info:
+        with pytest.raises(vol.Invalid) as exc_info:
             validate_pwm_compatibility(config)
 
         error_msg = str(exc_info.value)
