@@ -1411,5 +1411,66 @@ async def test_mode_sync_conform_reentrant_call_suppressed(hass):
     assert mode_sync._sync_in_progress is False
 
 
+@pytest.mark.asyncio
+async def test_mode_sync_disabled_originator_turn_on_does_not_propagate(hass):
+    """Sync-disabled zone turning ON (off→heat) does NOT propagate to other zones (M11)."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    coord = coordinator.AdaptiveThermostatCoordinator(hass, {})
+    hass.services.async_call = AsyncMock()
+
+    coord.register_zone("zone_a", {"climate_entity_id": "climate.zone_a"})
+    coord.register_zone("zone_b", {"climate_entity_id": "climate.zone_b"})
+
+    def fake_states_get(entity_id):
+        state_map = {
+            "climate.zone_a": MagicMock(state="cool"),
+            "climate.zone_b": MagicMock(state="off"),
+        }
+        return state_map.get(entity_id)
+
+    hass.states.get = fake_states_get
+
+    mode_sync = coordinator.ModeSync(hass, coord)
+    # zone_b has sync disabled — it is fully independent
+    mode_sync.disable_sync_for_zone("zone_b")
+    # zone_b turns ON into heat (off→heat): must NOT flip zone_a and must NOT conform itself
+    await mode_sync.on_mode_change("zone_b", "off", "heat", "climate.zone_b")
+
+    # sync-disabled originator imposes nothing — no service call at all
+    hass.services.async_call.assert_not_called()
+    # zone_b's mode is still tracked
+    assert mode_sync._zone_modes.get("zone_b") == "heat"
+
+
+@pytest.mark.asyncio
+async def test_mode_sync_disabled_originator_deliberate_switch_does_not_propagate(hass):
+    """Sync-disabled zone doing heat→cool does NOT propagate to other active zones (M11)."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    coord = coordinator.AdaptiveThermostatCoordinator(hass, {})
+    hass.services.async_call = AsyncMock()
+
+    coord.register_zone("zone_a", {"climate_entity_id": "climate.zone_a"})
+    coord.register_zone("zone_b", {"climate_entity_id": "climate.zone_b"})
+
+    def fake_states_get(entity_id):
+        state_map = {
+            "climate.zone_a": MagicMock(state="heat"),
+            "climate.zone_b": MagicMock(state="heat"),
+        }
+        return state_map.get(entity_id)
+
+    hass.states.get = fake_states_get
+
+    mode_sync = coordinator.ModeSync(hass, coord)
+    mode_sync.disable_sync_for_zone("zone_b")
+    # zone_b deliberately switches heat→cool: must NOT push "cool" onto zone_a
+    await mode_sync.on_mode_change("zone_b", "heat", "cool", "climate.zone_b")
+
+    hass.services.async_call.assert_not_called()
+    assert mode_sync._zone_modes.get("zone_b") == "cool"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

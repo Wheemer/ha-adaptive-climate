@@ -935,6 +935,16 @@ class ModeSync:
             )
             return
 
+        # A sync-disabled zone is independent: it neither imposes its mode on
+        # other zones nor conforms to theirs. Track its mode but do not sync.
+        if self.is_sync_disabled(zone_id):
+            _LOGGER.debug(
+                "Zone %s changed to %s mode - sync disabled, not propagating",
+                zone_id,
+                new_mode,
+            )
+            return
+
         # Prevent feedback loop: skip if already syncing
         if self._sync_in_progress:
             _LOGGER.debug(
@@ -958,7 +968,7 @@ class ModeSync:
 
             # Turn-on path: zone coming from OFF adopts prevailing house mode
             # instead of imposing its own, to prevent flipping the house mode.
-            if old_mode.lower() == "off" and not self.is_sync_disabled(zone_id):
+            if old_mode.lower() == "off":
                 prevailing = self._prevailing_house_mode(all_zones, exclude_zone_id=zone_id)
                 if prevailing is not None and prevailing != new_mode.lower():
                     _LOGGER.info(
