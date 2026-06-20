@@ -1251,5 +1251,165 @@ def test_all_subscribers_receive_zone_unregistered(coord):
     coord.hass.async_create_task.assert_called()
 
 
+# =============================================================================
+# M11: ModeSync turn-on conform (OFF→active adopts prevailing house mode)
+# =============================================================================
+
+
+@pytest.mark.asyncio
+async def test_mode_sync_turn_on_conforms_to_prevailing_house_mode(hass):
+    """Zone turning ON (off→heat) adopts prevailing COOL mode; zone A stays COOL (M11)."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    coord = coordinator.AdaptiveThermostatCoordinator(hass, {})
+    hass.services.async_call = AsyncMock()
+
+    coord.register_zone("zone_a", {"climate_entity_id": "climate.zone_a"})
+    coord.register_zone("zone_b", {"climate_entity_id": "climate.zone_b"})
+
+    def fake_states_get(entity_id):
+        state_map = {
+            "climate.zone_a": MagicMock(state="cool"),
+            "climate.zone_b": MagicMock(state="off"),
+        }
+        return state_map.get(entity_id)
+
+    hass.states.get = fake_states_get
+
+    mode_sync = coordinator.ModeSync(hass, coord)
+    await mode_sync.on_mode_change("zone_b", "off", "heat", "climate.zone_b")
+
+    # Should have been called exactly once — to conform zone_b to "cool"
+    hass.services.async_call.assert_called_once()
+    call_kwargs = hass.services.async_call.call_args
+    # Service data dict is the third positional arg
+    assert call_kwargs[0][2]["entity_id"] == "climate.zone_b"
+    assert call_kwargs[0][2]["hvac_mode"] == "cool"
+
+
+@pytest.mark.asyncio
+async def test_mode_sync_turn_on_no_other_active_zones_keeps_own_mode(hass):
+    """Zone turning ON with no other active zones keeps its own mode; no service call (M11)."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    coord = coordinator.AdaptiveThermostatCoordinator(hass, {})
+    hass.services.async_call = AsyncMock()
+
+    coord.register_zone("zone_a", {"climate_entity_id": "climate.zone_a"})
+    coord.register_zone("zone_b", {"climate_entity_id": "climate.zone_b"})
+
+    def fake_states_get(entity_id):
+        state_map = {
+            "climate.zone_a": MagicMock(state="off"),
+            "climate.zone_b": MagicMock(state="off"),
+        }
+        return state_map.get(entity_id)
+
+    hass.states.get = fake_states_get
+
+    mode_sync = coordinator.ModeSync(hass, coord)
+    await mode_sync.on_mode_change("zone_b", "off", "heat", "climate.zone_b")
+
+    # No other active zones → no conform needed, no propagation (others are OFF)
+    hass.services.async_call.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_mode_sync_deliberate_switch_still_propagates(hass):
+    """Zone actively switching HEAT→COOL propagates to other active zones (M11 regression)."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    coord = coordinator.AdaptiveThermostatCoordinator(hass, {})
+    hass.services.async_call = AsyncMock()
+
+    coord.register_zone("zone_a", {"climate_entity_id": "climate.zone_a"})
+    coord.register_zone("zone_b", {"climate_entity_id": "climate.zone_b"})
+
+    def fake_states_get(entity_id):
+        state_map = {
+            "climate.zone_a": MagicMock(state="heat"),
+            "climate.zone_b": MagicMock(state="heat"),
+        }
+        return state_map.get(entity_id)
+
+    hass.states.get = fake_states_get
+
+    mode_sync = coordinator.ModeSync(hass, coord)
+    await mode_sync.on_mode_change("zone_a", "heat", "cool", "climate.zone_a")
+
+    # Deliberate switch: zone_b must be propagated to "cool"
+    hass.services.async_call.assert_called_once()
+    assert hass.services.async_call.call_args[0][2]["entity_id"] == "climate.zone_b"
+    assert hass.services.async_call.call_args[0][2]["hvac_mode"] == "cool"
+
+
+@pytest.mark.asyncio
+async def test_mode_sync_turn_on_matching_mode_no_redundant_call(hass):
+    """Zone turning ON with mode matching prevailing house mode causes no service call (M11)."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    coord = coordinator.AdaptiveThermostatCoordinator(hass, {})
+    hass.services.async_call = AsyncMock()
+
+    coord.register_zone("zone_a", {"climate_entity_id": "climate.zone_a"})
+    coord.register_zone("zone_b", {"climate_entity_id": "climate.zone_b"})
+
+    def fake_states_get(entity_id):
+        state_map = {
+            "climate.zone_a": MagicMock(state="cool"),
+            "climate.zone_b": MagicMock(state="off"),
+        }
+        return state_map.get(entity_id)
+
+    hass.states.get = fake_states_get
+
+    mode_sync = coordinator.ModeSync(hass, coord)
+    await mode_sync.on_mode_change("zone_b", "off", "cool", "climate.zone_b")
+
+    # zone_b is already turning on in "cool" which matches prevailing → no service call needed
+    hass.services.async_call.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_mode_sync_conform_reentrant_call_suppressed(hass):
+    """Re-entrant on_mode_change during conform is suppressed by _sync_in_progress (M11)."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    coord = coordinator.AdaptiveThermostatCoordinator(hass, {})
+
+    coord.register_zone("zone_a", {"climate_entity_id": "climate.zone_a"})
+    coord.register_zone("zone_b", {"climate_entity_id": "climate.zone_b"})
+
+    def fake_states_get(entity_id):
+        state_map = {
+            "climate.zone_a": MagicMock(state="cool"),
+            "climate.zone_b": MagicMock(state="off"),
+        }
+        return state_map.get(entity_id)
+
+    hass.states.get = fake_states_get
+
+    mode_sync = coordinator.ModeSync(hass, coord)
+
+    # Simulate what the real climate entity does: when the service call sets zone_b
+    # to "cool", async_set_hvac_mode fires on_mode_change again (re-entrant).
+    async def reentrant_service_call(*args, **kwargs):
+        # Re-enter on_mode_change as if zone_b's climate entity processed the mode change
+        await mode_sync.on_mode_change("zone_b", "heat", "cool", "climate.zone_b")
+
+    hass.services.async_call = AsyncMock(side_effect=reentrant_service_call)
+
+    await mode_sync.on_mode_change("zone_b", "off", "heat", "climate.zone_b")
+
+    # _sync_in_progress guard must suppress the re-entrant call:
+    # async_call is invoked exactly once (the conform call), not twice.
+    assert hass.services.async_call.call_count == 1
+    assert hass.services.async_call.call_args[0][2]["entity_id"] == "climate.zone_b"
+    assert hass.services.async_call.call_args[0][2]["hvac_mode"] == "cool"
+
+    # Flag must be cleared by the finally block after on_mode_change returns.
+    assert mode_sync._sync_in_progress is False
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

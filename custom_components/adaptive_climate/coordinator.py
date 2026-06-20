@@ -876,6 +876,34 @@ class ModeSync:
         """
         return zone_id in self._sync_disabled_zones
 
+    def _prevailing_house_mode(self, all_zones: dict, exclude_zone_id: str) -> str | None:
+        """Return the first active (heat/cool) mode among sync-enabled zones.
+
+        Scans all registered zones except the one identified by exclude_zone_id,
+        skipping zones with sync disabled, zones with no climate_entity_id, and
+        zones whose HA state is OFF or unavailable.
+
+        Args:
+            all_zones: Mapping of zone_id → zone_data from coordinator.get_all_zones()
+            exclude_zone_id: Zone ID to skip (the originating zone)
+
+        Returns:
+            "heat" or "cool" if a prevailing mode is found, else None
+        """
+        for other_zone_id, zone_data in all_zones.items():
+            if other_zone_id == exclude_zone_id:
+                continue
+            if self.is_sync_disabled(other_zone_id):
+                continue
+            other_entity_id = zone_data.get("climate_entity_id")
+            if not other_entity_id:
+                continue
+            state = self.hass.states.get(other_entity_id)
+            if state is None or state.state not in ("heat", "cool"):
+                continue
+            return state.state
+        return None
+
     async def on_mode_change(
         self,
         zone_id: str,
@@ -927,6 +955,20 @@ class ModeSync:
         try:
             # Get all zones from coordinator
             all_zones = self.coordinator.get_all_zones()
+
+            # Turn-on path: zone coming from OFF adopts prevailing house mode
+            # instead of imposing its own, to prevent flipping the house mode.
+            if old_mode.lower() == "off" and not self.is_sync_disabled(zone_id):
+                prevailing = self._prevailing_house_mode(all_zones, exclude_zone_id=zone_id)
+                if prevailing is not None and prevailing != new_mode.lower():
+                    _LOGGER.info(
+                        "Zone %s turning on in %s mode but house is running %s - conforming zone to house mode",
+                        zone_id,
+                        new_mode,
+                        prevailing,
+                    )
+                    await self._set_zone_mode(zone_id, climate_entity_id, prevailing)
+                    return
 
             # Sync mode to all other zones (except sync-disabled ones)
             for other_zone_id, zone_data in all_zones.items():
