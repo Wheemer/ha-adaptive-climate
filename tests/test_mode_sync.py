@@ -10,39 +10,64 @@ from datetime import timedelta
 # Add parent directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent / "custom_components" / "adaptive_climate"))
 
-# Mock homeassistant modules before importing coordinator
-sys.modules["homeassistant"] = Mock()
+# This file predates tests/conftest.py's shared Home Assistant mocks and
+# imports `coordinator` as a bare top-level module (via the sys.path hack
+# above), so it needs its own throwaway `sys.modules["homeassistant..."]`
+# entries. Overwriting those keys unconditionally would otherwise permanently
+# replace conftest.py's carefully configured mocks (e.g.
+# homeassistant.exceptions.HomeAssistantError = Exception) with bare, inert
+# Mock() objects for the rest of the pytest process — silently breaking any
+# test file collected afterward that relies on those mocks (e.g. a service
+# call's side_effect=HomeAssistantError(...) no longer actually raises,
+# because the Mock's HomeAssistantError attribute isn't an Exception
+# subclass). Snapshot and restore in `finally` so this module's own hack
+# never leaks into other test files, regardless of whether the rest of this
+# module's import succeeds.
+_HA_MODULE_KEYS = (
+    "homeassistant",
+    "homeassistant.core",
+    "homeassistant.exceptions",
+    "homeassistant.helpers",
+    "homeassistant.helpers.update_coordinator",
+)
+_original_ha_modules = {key: sys.modules.get(key) for key in _HA_MODULE_KEYS}
 
+try:
+    # Mock homeassistant modules before importing coordinator
+    sys.modules["homeassistant"] = Mock()
 
-# Event needs to support subscripting for type hints like Event[EventStateChangedData]
-class MockEvent:
-    """Mock Event class that supports generic subscripting."""
+    # Event needs to support subscripting for type hints like Event[EventStateChangedData]
+    class MockEvent:
+        """Mock Event class that supports generic subscripting."""
 
-    def __class_getitem__(cls, item):
-        return cls
+        def __class_getitem__(cls, item):
+            return cls
 
+    mock_core = Mock()
+    mock_core.Event = MockEvent
+    sys.modules["homeassistant.core"] = mock_core
+    sys.modules["homeassistant.exceptions"] = Mock()
+    sys.modules["homeassistant.helpers"] = Mock()
+    sys.modules["homeassistant.helpers.update_coordinator"] = Mock()
 
-mock_core = Mock()
-mock_core.Event = MockEvent
-sys.modules["homeassistant.core"] = mock_core
-sys.modules["homeassistant.exceptions"] = Mock()
-sys.modules["homeassistant.helpers"] = Mock()
-sys.modules["homeassistant.helpers.update_coordinator"] = Mock()
+    # Create mock base class
+    class MockDataUpdateCoordinator:
+        def __init__(self, hass, logger, name, update_interval):
+            self.hass = hass
+            self.logger = logger
+            self.name = name
+            self.update_interval = update_interval
 
+    sys.modules["homeassistant.helpers.update_coordinator"].DataUpdateCoordinator = MockDataUpdateCoordinator
 
-# Create mock base class
-class MockDataUpdateCoordinator:
-    def __init__(self, hass, logger, name, update_interval):
-        self.hass = hass
-        self.logger = logger
-        self.name = name
-        self.update_interval = update_interval
-
-
-sys.modules["homeassistant.helpers.update_coordinator"].DataUpdateCoordinator = MockDataUpdateCoordinator
-
-# Import coordinator module
-import coordinator
+    # Import coordinator module
+    import coordinator
+finally:
+    for _key, _original in _original_ha_modules.items():
+        if _original is None:
+            sys.modules.pop(_key, None)
+        else:
+            sys.modules[_key] = _original
 
 
 @pytest.fixture
