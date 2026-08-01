@@ -38,6 +38,7 @@ from .sensors.comfort import (
 )
 from .sensors.actuator_wear import ActuatorWearSensor
 from .sensors.health import SystemHealthSensor
+from .sensors.water_temp import WaterTempSupplySensor
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -151,6 +152,12 @@ async def async_setup_platform(
             )
         else:
             _LOGGER.warning("No energy_meter_entity configured - WeeklyCostSensor will not be created")
+
+        # Create the water temperature diagnostic sensor when control is configured
+        coordinator = hass.data[DOMAIN].get("coordinator")
+        if coordinator is not None and getattr(coordinator, "water_temp_controller", None) is not None:
+            sensors.append(WaterTempSupplySensor(hass))
+            _LOGGER.info("WaterTempSupplySensor created")
 
         # Mark as created
         hass.data[DOMAIN]["system_sensors_created"] = True
