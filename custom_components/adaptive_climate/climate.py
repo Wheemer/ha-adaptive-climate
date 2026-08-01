@@ -1034,7 +1034,7 @@ class AdaptiveThermostat(
                     info["cooling_supply_clamp"] = {
                         "original_target": effective_target,
                         "effective_target": min_target,
-                        "supply_temp": coordinator.cooling_supply_temp,
+                        "supply_temp": coordinator.effective_cooling_supply_temp,
                         "margin": coordinator.cooling_supply_margin,
                     }
                     effective_target = min_target

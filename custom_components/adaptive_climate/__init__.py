@@ -615,6 +615,41 @@ async def async_save_water_temp_state_now(hass: HomeAssistant) -> None:
         _LOGGER.error("Failed to save water temperature state: %s", err)
 
 
+def check_cooling_supply_conflict(domain_config: dict[str, Any]) -> str | None:
+    """Return a warning when the static and dynamic cooling floors disagree.
+
+    ``cooling_supply_temp`` (static) and ``water_temp_control.cooling.min_supply_temp``
+    (dynamic floor) describe the same physical limit.  Divergent values mean one
+    of them is wrong.
+
+    Args:
+        domain_config: The validated ``adaptive_climate:`` domain config.
+
+    Returns:
+        A warning message naming both values, or None when there is no conflict.
+    """
+    water_temp = domain_config.get(CONF_WATER_TEMP_CONTROL) or {}
+    cooling = water_temp.get(CONF_WATER_TEMP_COOLING)
+    if not cooling:
+        return None
+
+    auto_mode = domain_config.get(CONF_AUTO_MODE_SWITCHING) or {}
+    static = auto_mode.get(CONF_COOLING_SUPPLY_TEMP) or domain_config.get(CONF_COOLING_SUPPLY_TEMP)
+    if static is None:
+        return None
+
+    dynamic = cooling.get(CONF_WATER_TEMP_MIN_SUPPLY_TEMP, DEFAULT_WATER_TEMP_MIN_SUPPLY_TEMP)
+    if float(static) == float(dynamic):
+        return None
+
+    return (
+        f"cooling_supply_temp ({static}°C) differs from "
+        f"water_temp_control.cooling.min_supply_temp ({dynamic}°C). "
+        "The dynamic value now drives min_cooling_target; the static one is only a "
+        "fallback before the first computation. Align them to avoid surprises."
+    )
+
+
 async def async_send_persistent_notification(
     hass: HomeAssistant,
     notification_id: str,
@@ -706,6 +741,10 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     # Create coordinator with domain config for auto mode switching
     coordinator = AdaptiveThermostatCoordinator(hass, domain_config)
     hass.data[DOMAIN]["coordinator"] = coordinator
+
+    conflict = check_cooling_supply_conflict(domain_config)
+    if conflict:
+        _LOGGER.warning(conflict)
 
     # Create vacation mode handler
     vacation_mode = VacationMode(hass, coordinator)

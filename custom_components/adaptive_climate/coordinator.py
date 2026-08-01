@@ -353,9 +353,27 @@ class AdaptiveThermostatCoordinator(DataUpdateCoordinator):
         return self._config.get("cooling_supply_margin", 1.5)
 
     @property
+    def effective_cooling_supply_temp(self) -> float | None:
+        """Return the supply temperature that currently limits cooling setpoints.
+
+        Prefers the water temperature controller's live effective value; falls
+        back to the static ``cooling_supply_temp`` before the controller's first
+        computation, or when water temperature control is not configured.
+
+        With a dynamic supply temperature, a static clamp lets zones chase
+        setpoints the water cannot deliver — integral windup plus spurious
+        undershoot Ki boosts.
+        """
+        if self._water_temp_controller is not None:
+            dynamic = self._water_temp_controller.effective_cooling_supply_temp
+            if dynamic is not None:
+                return dynamic
+        return self.cooling_supply_temp
+
+    @property
     def min_cooling_target(self) -> float | None:
-        """Return the minimum cooling target (supply_temp + margin), or None if not configured."""
-        supply_temp = self.cooling_supply_temp
+        """Return the minimum cooling target (effective supply temp + margin), or None."""
+        supply_temp = self.effective_cooling_supply_temp
         if supply_temp is None:
             return None
         return supply_temp + self.cooling_supply_margin
