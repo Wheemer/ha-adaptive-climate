@@ -13,6 +13,7 @@ from custom_components.adaptive_climate.const import (
     WATER_TEMP_BINDING_MIN_SUPPLY,
     WATER_TEMP_BINDING_RAMP,
     WATER_TEMP_BINDING_TARGET,
+    WATER_TEMP_BLIND_MIN_SUPPLY,
     WATER_TEMP_MODE_COOLING,
     WATER_TEMP_MODE_HEATING,
 )
@@ -66,8 +67,15 @@ def climate_state(mode, overrides=None):
     return state
 
 
-def build_controller(*, cooling=None, heating=None, zones_in_mode=None, states=None, **top_level):
-    """Construct a controller with the scanner stubbed out."""
+def build_controller(*, cooling=None, heating=None, zones_in_mode=None, states=None, all_zones=None, **top_level):
+    """Construct a controller with the scanner stubbed out.
+
+    ``all_zones`` feeds ``coordinator.get_all_zones()`` (used to detect
+    registered-but-unresolvable-mode zones — see TestUnresolvableModeZones).
+    Defaults to the union of every mode's zones in ``zones_in_mode``, which
+    reconstructs the complete registered-zone set for every test that has no
+    "invisible" zone of its own.
+    """
     hass = MagicMock()
     hass.states.get = (states or {}).get
     hass.services.async_call = AsyncMock(return_value=None)
@@ -75,6 +83,11 @@ def build_controller(*, cooling=None, heating=None, zones_in_mode=None, states=N
     coordinator = MagicMock()
     zones_in_mode = zones_in_mode or {}
     coordinator.get_zones_in_mode = lambda mode: zones_in_mode.get(mode, {})
+    if all_zones is None:
+        all_zones = {}
+        for mode_zones in zones_in_mode.values():
+            all_zones.update(mode_zones)
+    coordinator.get_all_zones = lambda: all_zones
 
     config = {"idle_days": 7, "min_write_interval": 1800}
     config.update(top_level)
@@ -946,6 +959,79 @@ class TestTimers:
         await controller._async_timer_tick(None)  # must not raise
 
         controller.async_apply.assert_awaited_once()
+
+
+# =============================================================================
+# R4: unresolvable-mode zones (review finding #8, coordinator/controller layer)
+# =============================================================================
+
+
+class TestUnresolvableModeZones:
+    """A registered zone whose HVAC mode can't be resolved at all (its climate
+    entity has no state whatsoever) must still contribute a blind reading,
+    rather than being silently invisible to the dew-point scan.  Uses the
+    REAL DewPointScanner (no stub_scan) so the merge logic is exercised
+    end-to-end; "living" has no humidity_sensor of its own so it only serves
+    to keep cooling active without competing in the worst-source selection.
+    """
+
+    def test_unresolvable_mode_zone_pulls_target_to_blind_floor_while_another_zone_cools(self):
+        all_zones = {
+            "living": {"climate_entity_id": "climate.living"},
+            "attic": {"climate_entity_id": "climate.attic", "humidity_sensor": "sensor.attic_humidity"},
+        }
+        controller = build_controller(
+            cooling=cooling_config(),
+            zones_in_mode={"cool": {"living": all_zones["living"]}},
+            all_zones=all_zones,
+            states={COOL_ENTITY: number_state(22.0)},
+            # "climate.attic" deliberately absent from states: hass.states.get
+            # returns None for it, i.e. genuinely unresolvable (not "off"/"heat").
+        )
+        controller._ramp[WATER_TEMP_MODE_COOLING].last_active = NOW - timedelta(hours=1)
+
+        targets = controller.compute_targets(NOW)
+
+        assert targets[WATER_TEMP_MODE_COOLING] == pytest.approx(WATER_TEMP_BLIND_MIN_SUPPLY)
+        assert controller.diagnostics()["worst_source"] == "attic"
+
+    def test_resolvable_but_non_cool_zone_does_not_contribute(self):
+        """A zone that resolves fine (just not to "cool") is correctly excluded."""
+        all_zones = {
+            "living": {"climate_entity_id": "climate.living"},
+            "bedroom": {"climate_entity_id": "climate.bedroom", "humidity_sensor": "sensor.bedroom_humidity"},
+        }
+        controller = build_controller(
+            cooling=cooling_config(),
+            zones_in_mode={"cool": {"living": all_zones["living"]}},
+            all_zones=all_zones,
+            states={
+                COOL_ENTITY: number_state(22.0),
+                "climate.bedroom": climate_state("heat"),  # resolvable -> genuinely not cooling
+            },
+        )
+        controller._ramp[WATER_TEMP_MODE_COOLING].last_active = NOW - timedelta(hours=1)
+
+        targets = controller.compute_targets(NOW)
+
+        # No dew-point source at all (living has none, bedroom correctly
+        # excluded) -> scanner's own "no sources" blind floor, not "bedroom".
+        assert targets[WATER_TEMP_MODE_COOLING] == pytest.approx(WATER_TEMP_BLIND_MIN_SUPPLY)
+        assert controller.diagnostics()["worst_source"] is None
+
+    def test_no_contribution_when_cooling_is_not_active(self):
+        all_zones = {
+            "living": {"climate_entity_id": "climate.living"},
+            "attic": {"climate_entity_id": "climate.attic", "humidity_sensor": "sensor.attic_humidity"},
+        }
+        controller = build_controller(
+            cooling=cooling_config(),
+            zones_in_mode={"cool": {}},  # nothing resolved to COOL
+            all_zones=all_zones,
+            states={COOL_ENTITY: number_state(22.0)},
+        )
+
+        assert WATER_TEMP_MODE_COOLING not in controller.compute_targets(NOW)
 
 
 if __name__ == "__main__":

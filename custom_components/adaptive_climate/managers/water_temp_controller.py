@@ -59,6 +59,7 @@ from ..const import (
     WATER_TEMP_WARN_INTERVAL_SECONDS,
 )
 from .heater_service_caller import HeaterServiceCaller
+from .water_temp_blind_zones import merge_unresolvable_zone_readings
 from .water_temp_sources import DewPointScan, DewPointScanner
 from .water_temp_writer import entity_limits, is_safe_direction, round_safe
 
@@ -309,6 +310,14 @@ class WaterTempController:
         margin = float(cooling.get(CONF_WATER_TEMP_DEW_POINT_MARGIN, DEFAULT_WATER_TEMP_DEW_POINT_MARGIN))
 
         scan = self._scanner.scan(now) if self._scanner is not None else None
+        scan = merge_unresolvable_zone_readings(
+            scan,
+            hass=self.hass,
+            coordinator=self._coordinator,
+            scanner=self._scanner,
+            cool_hvac_state=MODE_HVAC_STATE[WATER_TEMP_MODE_COOLING],
+            now=now,
+        )
         self._last_scan = scan
 
         if scan is None or scan.blind or scan.dew_point is None:
