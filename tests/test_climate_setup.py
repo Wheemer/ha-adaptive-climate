@@ -323,3 +323,57 @@ class TestNumberPlatformDiscovery:
         assert len(number_calls) == 0, (
             "number platform must not be loaded again when number_platform_loaded flag is set."
         )
+
+
+class TestDewPointZoneData:
+    """Zone registration must expose what the dew point scanner needs."""
+
+    def test_platform_schema_accepts_exclude_from_dew_point(self):
+        """The entity-level opt-out is registered as a platform schema key.
+
+        ``homeassistant.components.climate.PLATFORM_SCHEMA`` is a MagicMock in
+        this suite (see conftest.py, which mocks all of
+        ``homeassistant.components.climate`` including ``cv.*`` validators), so
+        a real ``vol.Schema`` round-trip through ``PLATFORM_SCHEMA(...)`` can't
+        be exercised here — it would just echo mocks back. Instead this
+        inspects the dict ``climate_setup.py`` passed to
+        ``PLATFORM_SCHEMA.extend(...)`` at import time, which is real
+        (un-mocked) data.
+        """
+        from custom_components.adaptive_climate import const
+        from homeassistant.components.climate import PLATFORM_SCHEMA as BASE_PLATFORM_SCHEMA
+
+        extend_dict = BASE_PLATFORM_SCHEMA.extend.call_args[0][0]
+        assert const.CONF_EXCLUDE_FROM_DEW_POINT in extend_dict
+
+    def test_platform_schema_defaults_exclude_from_dew_point_to_false(self):
+        """Zones opt in to the scan by default."""
+        from custom_components.adaptive_climate import const
+        from homeassistant.components.climate import PLATFORM_SCHEMA as BASE_PLATFORM_SCHEMA
+
+        extend_dict = BASE_PLATFORM_SCHEMA.extend.call_args[0][0]
+        marker = next(key for key in extend_dict if key == const.CONF_EXCLUDE_FROM_DEW_POINT)
+        assert marker.default() is False
+
+    def test_zone_data_carries_humidity_sensor_and_exclusion_flag(self):
+        """register_zone's payload must include both dew-point keys."""
+        from custom_components.adaptive_climate import const
+        from custom_components.adaptive_climate.climate_setup import build_dew_point_zone_data
+
+        config = {
+            const.CONF_HUMIDITY_SENSOR: "sensor.bathroom_rh",
+            const.CONF_EXCLUDE_FROM_DEW_POINT: True,
+        }
+        assert build_dew_point_zone_data(config) == {
+            "humidity_sensor": "sensor.bathroom_rh",
+            "exclude_from_dew_point": True,
+        }
+
+    def test_zone_data_defaults_when_nothing_configured(self):
+        """A zone with no humidity sensor still registers both keys."""
+        from custom_components.adaptive_climate.climate_setup import build_dew_point_zone_data
+
+        assert build_dew_point_zone_data({}) == {
+            "humidity_sensor": None,
+            "exclude_from_dew_point": False,
+        }

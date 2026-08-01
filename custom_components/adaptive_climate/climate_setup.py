@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from datetime import timedelta
+from typing import Any
 
 import voluptuous as vol
 
@@ -87,6 +88,7 @@ PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend(
         vol.Optional(const.CONF_CONTACT_DELAY, default=const.DEFAULT_CONTACT_DELAY): vol.Coerce(int),
         # Humidity detection
         vol.Optional(const.CONF_HUMIDITY_SENSOR): cv.entity_id,
+        vol.Optional(const.CONF_EXCLUDE_FROM_DEW_POINT, default=False): cv.boolean,
         vol.Optional(const.CONF_HUMIDITY_SPIKE_THRESHOLD, default=const.DEFAULT_HUMIDITY_SPIKE_THRESHOLD): vol.Coerce(
             float
         ),
@@ -213,6 +215,25 @@ def _resolve_pwm(
     if domain_pwm is not None:
         return domain_pwm
     return timedelta(minutes=15)  # const.DEFAULT_PWM = "00:15:00"
+
+
+def build_dew_point_zone_data(config: ConfigType) -> dict[str, Any]:
+    """Return the zone_data keys the water-temperature dew point scanner reads.
+
+    Extracted as a helper so the contract between ``register_zone`` and
+    ``DewPointScanner`` is directly unit-testable.
+
+    Args:
+        config: The validated entity platform config.
+
+    Returns:
+        Dict with ``humidity_sensor`` (entity id or None) and
+        ``exclude_from_dew_point`` (bool).
+    """
+    return {
+        "humidity_sensor": config.get(const.CONF_HUMIDITY_SENSOR),
+        "exclude_from_dew_point": bool(config.get(const.CONF_EXCLUDE_FROM_DEW_POINT, False)),
+    }
 
 
 async def async_setup_platform(hass: HomeAssistant, config: ConfigType, async_add_entities, discovery_info=None):
@@ -414,6 +435,7 @@ async def async_setup_platform(hass: HomeAssistant, config: ConfigType, async_ad
             "adaptive_learner": adaptive_learner,
             "pwm_seconds": config.get(const.CONF_PWM).seconds if config.get(const.CONF_PWM) else 0,
             "window_orientation": config.get(const.CONF_WINDOW_ORIENTATION),
+            **build_dew_point_zone_data(config),
         }
 
         # Store ke_learner data for async_added_to_hass to use
