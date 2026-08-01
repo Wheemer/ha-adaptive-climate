@@ -15,13 +15,27 @@ from datetime import datetime
 from typing import Any
 
 from ..const import (
+    CONF_WATER_TEMP_RAMP_RATE,
+    CONF_WATER_TEMP_RAMP_START,
+    DEFAULT_WATER_TEMP_COOLING_RAMP_RATE,
+    DEFAULT_WATER_TEMP_COOLING_RAMP_START,
+    DEFAULT_WATER_TEMP_HEATING_RAMP_RATE,
+    DEFAULT_WATER_TEMP_HEATING_RAMP_START,
     DEFAULT_WATER_TEMP_STEP,
     SUPPLY_TEMP_MAX,
     SUPPLY_TEMP_MIN,
     WATER_TEMP_MODE_COOLING,
+    WATER_TEMP_MODE_HEATING,
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+_SECONDS_PER_DAY = 86400.0
+
+
+def elapsed_days(start: datetime, now: datetime) -> float:
+    """Return elapsed days, clamped at >= 0 to survive clock corrections."""
+    return max(0.0, (now - start).total_seconds() / _SECONDS_PER_DAY)
 
 
 def is_safe_direction(mode: str, new_value: float, last_value: float) -> bool:
@@ -74,6 +88,47 @@ def entity_limits(state: Any) -> tuple[float, float, float]:
     if minimum > maximum:
         minimum, maximum = maximum, minimum
     return minimum, maximum, step
+
+
+def configured_ramp_start(mode: str, config: dict[str, Any] | None) -> float:
+    """Return the configured ``ramp_start`` for a mode, with its default.
+
+    Shared by ramp seeding, the live per-cycle ramp origin (R13 — read live
+    every compute, never cached), and the deactivation park value: all three
+    need the same "what does config say right now" resolution.
+    """
+    default = (
+        DEFAULT_WATER_TEMP_HEATING_RAMP_START
+        if mode == WATER_TEMP_MODE_HEATING
+        else DEFAULT_WATER_TEMP_COOLING_RAMP_START
+    )
+    return float((config or {}).get(CONF_WATER_TEMP_RAMP_START, default))
+
+
+def configured_ramp_rate(mode: str, config: dict[str, Any] | None) -> float:
+    """Return the configured ``ramp_rate`` for a mode, with its default.
+
+    Shared by the ramp math and the days-remaining diagnostic.
+    """
+    default = (
+        DEFAULT_WATER_TEMP_HEATING_RAMP_RATE
+        if mode == WATER_TEMP_MODE_HEATING
+        else DEFAULT_WATER_TEMP_COOLING_RAMP_RATE
+    )
+    return float((config or {}).get(CONF_WATER_TEMP_RAMP_RATE, default))
+
+
+def ramp_origin(configured_start: float, persisted_seed: float | None) -> float:
+    """Return the live ramp origin for a heating ramp.
+
+    Config is read live every compute so a mid-ramp edit to ``ramp_start``
+    takes effect immediately. The persisted seed (the entity value captured
+    at ramp start, when it ran hotter than config -- backup-heater trap)
+    still wins whenever it's higher, protecting against a later config drop.
+    """
+    if persisted_seed is None:
+        return configured_start
+    return max(configured_start, persisted_seed)
 
 
 def entity_limit_binds(mode: str, rounded: float, minimum: float, maximum: float) -> bool:

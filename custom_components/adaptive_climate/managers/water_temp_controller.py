@@ -29,16 +29,10 @@ from ..const import (
     CONF_WATER_TEMP_MIN_SUPPLY_TEMP,
     CONF_WATER_TEMP_MIN_WRITE_INTERVAL,
     CONF_WATER_TEMP_CONDENSATION_SENSOR,
-    CONF_WATER_TEMP_RAMP_RATE,
-    CONF_WATER_TEMP_RAMP_START,
     CONF_WATER_TEMP_TARGET,
     CONF_WATER_TEMP_TARGET_ENTITY,
-    DEFAULT_WATER_TEMP_COOLING_RAMP_RATE,
-    DEFAULT_WATER_TEMP_COOLING_RAMP_START,
     DEFAULT_WATER_TEMP_DEW_POINT_MARGIN,
     DEFAULT_WATER_TEMP_FALLBACK_HUMIDITY,
-    DEFAULT_WATER_TEMP_HEATING_RAMP_RATE,
-    DEFAULT_WATER_TEMP_HEATING_RAMP_START,
     DEFAULT_WATER_TEMP_IDLE_DAYS,
     DEFAULT_WATER_TEMP_MIN_SUPPLY_TEMP,
     DEFAULT_WATER_TEMP_MIN_WRITE_INTERVAL,
@@ -63,9 +57,13 @@ from .water_temp_blind_zones import merge_unresolvable_zone_readings
 from .water_temp_interlocks import CoolingInterlockManager
 from .water_temp_sources import DewPointScan, DewPointScanner
 from .water_temp_writer import (
+    configured_ramp_rate,
+    configured_ramp_start,
+    elapsed_days,
     entity_limit_binds,
     entity_limits,
     is_safe_direction,
+    ramp_origin,
     round_safe,
     warn_entity_limited,
 )
@@ -76,8 +74,6 @@ if TYPE_CHECKING:
     from ..coordinator import AdaptiveThermostatCoordinator
 
 _LOGGER = logging.getLogger(__name__)
-
-_SECONDS_PER_DAY = 86400.0
 
 MODE_HVAC_STATE = {
     WATER_TEMP_MODE_COOLING: "cool",
@@ -91,6 +87,11 @@ class ModeRampState:
 
     All timestamps are wall-clock ``dt_util.utcnow()`` values persisted as ISO
     strings — never ``time.monotonic()``, which resets on restart.
+
+    ``ramp_start_value`` is the value a ramp started from. Cooling ignores
+    it in the ramp math (``ramp_start`` is read live from config each
+    compute) and keeps it only for logging. Heating persists it as a seed
+    floor under the live configured ``ramp_start`` (backup-heater trap).
     """
 
     last_active: datetime | None = None
@@ -216,13 +217,18 @@ class WaterTempController:
     # ── persistence ──────────────────────────────────────────────────────────
 
     def get_state_for_persistence(self) -> dict[str, Any]:
-        """Return a JSON-serializable snapshot of ramp and write state."""
+        """Return a JSON-serializable snapshot of ramp and write state.
+
+        Only the heating seed is persisted under ``ramp_start_value``:
+        cooling's ramp origin is read live from config each compute, so
+        there is nothing worth persisting for it (R13).
+        """
         state: dict[str, Any] = {}
         for mode, ramp in self._ramp.items():
             state[mode] = {
                 "last_active": ramp.last_active.isoformat() if ramp.last_active else None,
                 "ramp_started": ramp.ramp_started.isoformat() if ramp.ramp_started else None,
-                "ramp_start_value": ramp.ramp_start_value,
+                "ramp_start_value": ramp.ramp_start_value if mode == WATER_TEMP_MODE_HEATING else None,
             }
         state["last_written"] = dict(getattr(self, "_last_written", {}))
         return state
@@ -234,6 +240,11 @@ class WaterTempController:
         corrections — a persisted ``ramp_started`` in the future would
         otherwise produce a negative elapsed time.
 
+        Transparently migrates old-format stores that persisted
+        ``ramp_start_value`` for both modes (R13): cooling's stored value is
+        ignored (live config is authoritative), heating's is restored as
+        the seed. No storage version bump needed since the key is unchanged.
+
         Args:
             state: Previously persisted dict, or None on first run.
         """
@@ -244,8 +255,11 @@ class WaterTempController:
                 ramp = self._ramp[mode]
                 ramp.last_active = self._parse_timestamp(mode_state.get("last_active"), now)
                 ramp.ramp_started = self._parse_timestamp(mode_state.get("ramp_started"), now)
-                value = mode_state.get("ramp_start_value")
-                ramp.ramp_start_value = float(value) if isinstance(value, (int, float)) else None
+                if mode == WATER_TEMP_MODE_HEATING:
+                    value = mode_state.get("ramp_start_value")
+                    ramp.ramp_start_value = float(value) if isinstance(value, (int, float)) else None
+                else:
+                    ramp.ramp_start_value = None
 
             last_written = state.get("last_written")
             if isinstance(last_written, dict):
@@ -332,9 +346,13 @@ class WaterTempController:
         self._update_ramp(WATER_TEMP_MODE_COOLING, now, seed_from_entity=False)
         ramp = self._ramp[WATER_TEMP_MODE_COOLING]
 
-        if ramp.ramp_started is not None and ramp.ramp_start_value is not None:
-            rate = float(cooling.get(CONF_WATER_TEMP_RAMP_RATE, DEFAULT_WATER_TEMP_COOLING_RAMP_RATE))
-            ramp_value = ramp.ramp_start_value - rate * self._days_since(ramp.ramp_started, now)
+        if ramp.ramp_started is not None:
+            # R13: origin is read live from config every compute -- no
+            # persisted value -- so a mid-ramp ramp_start edit applies on
+            # the very next cycle instead of needing .storage surgery.
+            rate = configured_ramp_rate(WATER_TEMP_MODE_COOLING, cooling)
+            origin = configured_ramp_start(WATER_TEMP_MODE_COOLING, cooling)
+            ramp_value = origin - rate * elapsed_days(ramp.ramp_started, now)
             if ramp_value > dew_target:
                 self._binding[WATER_TEMP_MODE_COOLING] = WATER_TEMP_BINDING_RAMP
                 return ramp_value
@@ -392,9 +410,14 @@ class WaterTempController:
         ramp = self._ramp[WATER_TEMP_MODE_HEATING]
         heating = self._heating or {}
 
-        if ramp.ramp_started is not None and ramp.ramp_start_value is not None:
-            rate = float(heating.get(CONF_WATER_TEMP_RAMP_RATE, DEFAULT_WATER_TEMP_HEATING_RAMP_RATE))
-            ramp_value = ramp.ramp_start_value + rate * self._days_since(ramp.ramp_started, now)
+        if ramp.ramp_started is not None:
+            # R13: origin = max(live config ramp_start, persisted entity
+            # seed) -- config is read live so a raise applies mid-ramp, but
+            # a higher seed (backup-heater trap) still wins.
+            rate = configured_ramp_rate(WATER_TEMP_MODE_HEATING, heating)
+            configured_start = configured_ramp_start(WATER_TEMP_MODE_HEATING, heating)
+            origin = ramp_origin(configured_start, ramp.ramp_start_value)
+            ramp_value = origin + rate * elapsed_days(ramp.ramp_started, now)
             if ramp_value < self._heating_target:
                 self._binding[WATER_TEMP_MODE_HEATING] = WATER_TEMP_BINDING_RAMP
                 return ramp_value
@@ -425,7 +448,7 @@ class WaterTempController:
         if ramp.last_active is None:
             idle_days = float("inf")  # first run: treat as long-idle, ramp conservatively
         else:
-            idle_days = max(0.0, self._days_since(ramp.last_active, now))
+            idle_days = max(0.0, elapsed_days(ramp.last_active, now))
 
         if idle_days >= self._idle_days:
             ramp.ramp_started = now
@@ -448,12 +471,7 @@ class WaterTempController:
         the entity would start too cold on a warm slab.
         """
         config = self._heating if mode == WATER_TEMP_MODE_HEATING else self._cooling
-        default = (
-            DEFAULT_WATER_TEMP_HEATING_RAMP_START
-            if mode == WATER_TEMP_MODE_HEATING
-            else DEFAULT_WATER_TEMP_COOLING_RAMP_START
-        )
-        configured = float((config or {}).get(CONF_WATER_TEMP_RAMP_START, default))
+        configured = configured_ramp_start(mode, config)
 
         if not seed_from_entity:
             return configured
@@ -470,11 +488,6 @@ class WaterTempController:
             _LOGGER.info("Water temp control: %s ramp complete", mode)
         ramp.ramp_started = None
         ramp.ramp_start_value = None
-
-    @staticmethod
-    def _days_since(start: datetime, now: datetime) -> float:
-        """Return elapsed days, clamped at >= 0 to survive clock corrections."""
-        return max(0.0, (now - start).total_seconds() / _SECONDS_PER_DAY)
 
     # ── entity helpers ───────────────────────────────────────────────────────
 
@@ -534,12 +547,7 @@ class WaterTempController:
     def _park_value(self, mode: str) -> float:
         """Return the configured ramp_start used as this mode's park value."""
         config = self._heating if mode == WATER_TEMP_MODE_HEATING else self._cooling
-        default = (
-            DEFAULT_WATER_TEMP_HEATING_RAMP_START
-            if mode == WATER_TEMP_MODE_HEATING
-            else DEFAULT_WATER_TEMP_COOLING_RAMP_START
-        )
-        return float((config or {}).get(CONF_WATER_TEMP_RAMP_START, default))
+        return configured_ramp_start(mode, config)
 
     # ── write policy ─────────────────────────────────────────────────────────
 
@@ -771,12 +779,7 @@ class WaterTempController:
             return None
 
         config = self._heating if mode == WATER_TEMP_MODE_HEATING else self._cooling
-        default_rate = (
-            DEFAULT_WATER_TEMP_HEATING_RAMP_RATE
-            if mode == WATER_TEMP_MODE_HEATING
-            else DEFAULT_WATER_TEMP_COOLING_RAMP_RATE
-        )
-        rate = float((config or {}).get(CONF_WATER_TEMP_RAMP_RATE, default_rate))
+        rate = configured_ramp_rate(mode, config)
         if rate <= 0:
             return None
 

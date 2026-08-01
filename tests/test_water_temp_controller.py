@@ -453,6 +453,52 @@ class TestRamps:
         assert controller.ramp_state[WATER_TEMP_MODE_COOLING].ramp_started == NOW
         assert controller.ramp_state[WATER_TEMP_MODE_HEATING].ramp_started is None
 
+    def test_mid_ramp_cooling_config_change_alters_the_next_computed_value(self):
+        """R13 binding test: a live edit to ``ramp_start`` (22 -> 20) takes
+        effect on the very next cycle -- no ``.storage`` hand-editing
+        required. Previously ``ramp_start_value`` was captured at seed time
+        and persisted, making a mid-ramp config change silently ineffective.
+        """
+        cooling_cfg = cooling_config()  # ramp_start=22.0, ramp_rate=1.0
+        controller = build_controller(
+            cooling=cooling_cfg,
+            zones_in_mode={"cool": {"living": {}}},
+            states={COOL_ENTITY: number_state(22.0)},
+        )
+        stub_scan(controller, dew_point=14.0)  # dew_target floors to min_supply=18.0
+        controller.compute_targets(NOW)  # ramp seeded at the (then) configured 22.0
+
+        cooling_cfg["ramp_start"] = 20.0  # live config edit, mid-ramp
+
+        targets = controller.compute_targets(NOW + timedelta(days=1))
+
+        # 20.0 - 1.0*1 day = 19.0 -- NOT 21.0 (which the stale persisted
+        # ramp_start_value=22.0 would have produced).
+        assert targets[WATER_TEMP_MODE_COOLING] == pytest.approx(19.0)
+
+    def test_heating_mid_ramp_config_raise_applies_while_a_higher_persisted_seed_still_wins(self):
+        """R13: heating ramp origin = max(live config ramp_start, persisted
+        entity seed). The seed (captured because the entity was already
+        running hot -- backup-heater trap) keeps protecting against a config
+        drop below it, but a config raise ABOVE the seed takes effect
+        immediately, mid-ramp."""
+        heating_cfg = heating_config()  # ramp_start=25.0, target=35.0, ramp_rate=2.0
+        controller = build_controller(
+            heating=heating_cfg,
+            zones_in_mode={"heat": {"living": {}}},
+            states={HEAT_ENTITY: number_state(33.0)},  # entity running hot -> seed=33.0
+        )
+        controller.compute_targets(NOW)
+        assert controller.ramp_state[WATER_TEMP_MODE_HEATING].ramp_start_value == pytest.approx(33.0)
+
+        heating_cfg["ramp_start"] = 30.0  # still below the seed: seed still wins
+        targets = controller.compute_targets(NOW + timedelta(hours=6))  # 0.25 day
+        assert targets[WATER_TEMP_MODE_HEATING] == pytest.approx(33.5)  # 33.0 seed + 2.0*0.25
+
+        heating_cfg["ramp_start"] = 34.0  # raised ABOVE the seed: live config now wins
+        targets = controller.compute_targets(NOW + timedelta(hours=9))  # 0.375 day
+        assert targets[WATER_TEMP_MODE_HEATING] == pytest.approx(34.75)  # 34.0 config + 2.0*0.375
+
 
 # =============================================================================
 # Persistence round-trip
@@ -500,6 +546,58 @@ class TestPersistenceState:
 
         assert controller.ramp_state[WATER_TEMP_MODE_COOLING].ramp_started is None
         assert controller.restored is True
+
+    def test_persisted_state_omits_ramp_start_value_for_cooling(self):
+        """R13: cooling's ramp origin is read live from config each compute,
+        so nothing needs to be persisted for it -- only the heating seed is
+        written out."""
+        controller = build_controller(
+            cooling=cooling_config(),
+            zones_in_mode={"cool": {"living": {}}},
+            states={COOL_ENTITY: number_state(22.0)},
+        )
+        stub_scan(controller, dew_point=14.0)
+        controller.compute_targets(NOW)
+
+        state = controller.get_state_for_persistence()
+
+        assert state[WATER_TEMP_MODE_COOLING]["ramp_start_value"] is None
+
+    def test_persisted_state_keeps_ramp_start_value_for_heating(self):
+        controller = build_controller(
+            heating=heating_config(),
+            zones_in_mode={"heat": {"living": {}}},
+            states={HEAT_ENTITY: number_state(33.0)},
+        )
+        controller.compute_targets(NOW)
+
+        state = controller.get_state_for_persistence()
+
+        assert state[WATER_TEMP_MODE_HEATING]["ramp_start_value"] == pytest.approx(33.0)
+
+    def test_old_format_store_ramp_start_value_ignored_for_cooling_used_as_seed_for_heating(self):
+        """Migration: old stores persisted ``ramp_start_value`` for both
+        modes. Cooling must ignore it on restore (live config is now
+        authoritative); heating must still restore it and use it as the
+        persisted seed. No storage version bump."""
+        old_store = {
+            WATER_TEMP_MODE_COOLING: {
+                "last_active": NOW.isoformat(),
+                "ramp_started": NOW.isoformat(),
+                "ramp_start_value": 22.0,
+            },
+            WATER_TEMP_MODE_HEATING: {
+                "last_active": NOW.isoformat(),
+                "ramp_started": NOW.isoformat(),
+                "ramp_start_value": 33.0,
+            },
+        }
+        controller = build_controller(cooling=cooling_config(), heating=heating_config())
+
+        controller.restore_state(old_store)
+
+        assert controller.ramp_state[WATER_TEMP_MODE_COOLING].ramp_start_value is None
+        assert controller.ramp_state[WATER_TEMP_MODE_HEATING].ramp_start_value == pytest.approx(33.0)
 
     def test_compute_is_skipped_until_state_is_restored(self):
         hass = MagicMock()
