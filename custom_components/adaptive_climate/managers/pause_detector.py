@@ -40,6 +40,7 @@ class PauseDetector:
         night_setback_controller: NightSetbackManager | None = None,
         contact_sensor_handler: ContactSensorHandler | None = None,
         humidity_detector: HumidityDetector | None = None,
+        water_temp_gate: bool = False,
     ) -> None:
         """Initialise with optional component references.
 
@@ -49,10 +50,14 @@ class PauseDetector:
             contact_sensor_handler: Checked for open contacts (learning) or
                 delayed contact actions (control).
             humidity_detector: Checked via ``should_pause()`` for both flavours.
+            water_temp_gate: True while the water-temperature controller is
+                ramping or settling after a large write.  Suppresses learning
+                only — the actuator keeps running.
         """
         self._night_setback_controller = night_setback_controller
         self._contact_sensor_handler = contact_sensor_handler
         self._humidity_detector = humidity_detector
+        self._water_temp_gate = water_temp_gate
 
     @classmethod
     def from_entity(cls, entity: Any) -> PauseDetector:
@@ -63,7 +68,8 @@ class PauseDetector:
 
         Args:
             entity: Any object that may expose ``_night_setback_controller``,
-                ``_contact_sensor_handler``, and/or ``_humidity_detector``.
+                ``_contact_sensor_handler``, ``_humidity_detector``, and/or
+                ``water_temp_learning_gate_active``.
 
         Returns:
             A fully constructed :class:`PauseDetector` instance.
@@ -72,6 +78,7 @@ class PauseDetector:
             night_setback_controller=getattr(entity, "_night_setback_controller", None),
             contact_sensor_handler=getattr(entity, "_contact_sensor_handler", None),
             humidity_detector=getattr(entity, "_humidity_detector", None),
+            water_temp_gate=bool(getattr(entity, "water_temp_learning_gate_active", False)),
         )
 
     # ------------------------------------------------------------------
@@ -85,6 +92,7 @@ class PauseDetector:
         1. Night-setback learning grace period is active.
         2. Any contact sensor is currently open.
         3. Humidity spike (shower steam) is active.
+        4. Water temperature ramp / post-write settling window is active.
 
         Returns:
             True if *any* pause condition is active; False otherwise.
@@ -116,7 +124,8 @@ class PauseDetector:
             except (TypeError, AttributeError):
                 pass
 
-        return False
+        # 4. Water temperature ramp / post-write settling window
+        return self._water_temp_gate
 
     # ------------------------------------------------------------------
     # Control pause – used for deciding whether to stop the actuator

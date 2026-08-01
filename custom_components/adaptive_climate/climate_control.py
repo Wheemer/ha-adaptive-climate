@@ -154,9 +154,13 @@ class ClimateControlMixin:
                         )
                     )
 
-                # Update undershoot detector and check for Ki adjustment
+                # Update undershoot detector and check for Ki adjustment.
+                # Skipped while the water temperature is ramping: a moving supply
+                # temperature produces exactly the undershoot signature this
+                # detector looks for, and the resulting Ki boosts take weeks to unwind.
                 if (
                     self._hvac_mode == HVACMode.HEAT
+                    and not self.water_temp_learning_gate_active
                     and coordinator
                     and self._zone_id
                     and self._current_temp is not None

@@ -950,11 +950,33 @@ class AdaptiveThermostat(
         return self._temperature_manager.presets
 
     @property
+    def water_temp_learning_gate_active(self) -> bool:
+        """Return True while water temperature changes suppress this zone's learning.
+
+        Water-temp changes move the plant gain under the adaptive learner
+        (zone gain ~ T_room - T_water); a multi-day ramp looks exactly like the
+        UndershootDetector failure signature.
+        """
+        coordinator = self._coordinator
+        if coordinator is None:
+            return False
+        try:
+            return bool(coordinator.water_temp_learning_gate(self._hvac_mode))
+        except (TypeError, AttributeError):
+            return False
+
+    @property
     def in_learning_grace_period(self) -> bool:
-        """Check if learning should be paused due to recent night setback transition."""
+        """Check if learning should be paused.
+
+        True after a recent night setback transition, or while the water
+        temperature controller is ramping / settling after a large write.
+        """
+        if self.water_temp_learning_gate_active:
+            return True
         if self._night_setback_controller:
             return self._night_setback_controller.in_learning_grace_period
-        # No night setback controller means no grace period
+        # No night setback controller and no water-temp gate means no grace period
         return False
 
     def _set_learning_grace_period(self, minutes: int = 60):

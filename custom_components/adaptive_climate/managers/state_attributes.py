@@ -762,11 +762,18 @@ def _build_status_attribute(thermostat: SmartThermostat) -> dict[str, Any]:
     # === Learning grace override data ===
     learning_grace_active = False
     learning_grace_until = None
+
+    # The water-temperature ramp gate surfaces through the same learning_grace override
+    try:
+        if getattr(thermostat, "water_temp_learning_gate_active", False):
+            learning_grace_active = True
+    except (TypeError, AttributeError):
+        pass
+
     if thermostat._night_setback_controller:
         try:
-            learning_grace_active = thermostat._night_setback_controller.in_learning_grace_period
-            if learning_grace_active:
-                # Get grace period end time if available
+            if thermostat._night_setback_controller.in_learning_grace_period:
+                learning_grace_active = True
                 grace_end = getattr(thermostat._night_setback_controller, "_learning_grace_end", None)
                 if grace_end:
                     learning_grace_until = grace_end.isoformat()
