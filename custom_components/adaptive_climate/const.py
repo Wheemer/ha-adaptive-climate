@@ -1138,3 +1138,78 @@ DEFAULT_COOLING_SUPPLY_MARGIN = 1.5  # °C above supply temp
 # When control_output stays below this for 2×PWM period, SETTLING_STARTED is emitted
 # to close the heating session (replaces v0.28 async_turn_off emission).
 MIN_OUTPUT_THRESHOLD = 2  # percent
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Water temperature control (dew-point cooling + startup ramps)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Domain-level config keys
+CONF_WATER_TEMP_CONTROL = "water_temp_control"
+CONF_WATER_TEMP_IDLE_DAYS = "idle_days"
+CONF_WATER_TEMP_MIN_WRITE_INTERVAL = "min_write_interval"
+CONF_WATER_TEMP_CONDENSATION_SENSOR = "condensation_sensor"
+CONF_WATER_TEMP_COOLING = "cooling"
+CONF_WATER_TEMP_HEATING = "heating"
+
+# Per-mode config keys
+CONF_WATER_TEMP_TARGET_ENTITY = "target_entity"
+CONF_WATER_TEMP_MIN_SUPPLY_TEMP = "min_supply_temp"
+CONF_WATER_TEMP_DEW_POINT_MARGIN = "dew_point_margin"
+CONF_WATER_TEMP_FALLBACK_HUMIDITY = "fallback_humidity"
+CONF_WATER_TEMP_RAMP_START = "ramp_start"
+CONF_WATER_TEMP_RAMP_RATE = "ramp_rate"
+CONF_WATER_TEMP_EXTRA_SENSORS = "extra_sensors"
+CONF_WATER_TEMP_TARGET = "target"
+CONF_WATER_TEMP_EXTRA_HUMIDITY = "humidity"
+CONF_WATER_TEMP_EXTRA_TEMPERATURE = "temperature"
+
+# Entity-level config key
+CONF_EXCLUDE_FROM_DEW_POINT = "exclude_from_dew_point"
+
+# Internal mode keys (also the persistence keys and diagnostic sensor values)
+WATER_TEMP_MODE_COOLING = "cooling"
+WATER_TEMP_MODE_HEATING = "heating"
+
+# Defaults (spec-approved values — do not change without a spec amendment)
+DEFAULT_WATER_TEMP_IDLE_DAYS = 7
+DEFAULT_WATER_TEMP_MIN_WRITE_INTERVAL = 1800  # seconds
+DEFAULT_WATER_TEMP_MIN_SUPPLY_TEMP = 18.0  # °C
+DEFAULT_WATER_TEMP_DEW_POINT_MARGIN = 2.0  # °C above dew point
+DEFAULT_WATER_TEMP_FALLBACK_HUMIDITY = 65.0  # % RH
+DEFAULT_WATER_TEMP_COOLING_RAMP_START = 22.0  # °C
+DEFAULT_WATER_TEMP_COOLING_RAMP_RATE = 1.0  # °C/day downward
+DEFAULT_WATER_TEMP_HEATING_RAMP_START = 25.0  # °C
+DEFAULT_WATER_TEMP_HEATING_RAMP_RATE = 2.0  # °C/day upward
+
+# Heating target validation bounds (narrower than SUPPLY_TEMP_MIN/MAX, which
+# also govern physics-based PID init).
+WATER_TEMP_HEATING_TARGET_MIN = 20.0
+WATER_TEMP_HEATING_TARGET_MAX = 45.0
+
+# Write policy
+DEFAULT_WATER_TEMP_STEP = 0.5  # fallback when the target entity exposes no step
+WATER_TEMP_UPDATE_INTERVAL_SECONDS = 300  # recompute every 5 min
+WATER_TEMP_STARTUP_DELAY_SECONDS = 30  # after HA start, let zones register + state restore
+
+# Source scanning
+WATER_TEMP_EMA_WINDOW_MINUTES = 20.0  # per-source RH smoothing time constant
+WATER_TEMP_STALE_MINUTES = 60.0  # state.last_updated older than this = stale
+WATER_TEMP_RH_MIN = 15.0  # % — below this RH reading is implausible
+WATER_TEMP_RH_MAX = 100.0  # %
+WATER_TEMP_AIR_TEMP_MIN = 5.0  # °C — below this air temp reading is implausible
+WATER_TEMP_AIR_TEMP_MAX = 40.0  # °C
+WATER_TEMP_BLIND_MIN_SUPPLY = 20.0  # °C floor when no source has a real reading
+WATER_TEMP_WARN_INTERVAL_SECONDS = 3600  # rate limit for implausible/stale warnings
+
+# Interlocks and learning gate
+WATER_TEMP_INTERLOCK_STABILIZATION_SECONDS = 1800  # 30 min hold after interlock clears
+WATER_TEMP_SETTLING_MINUTES = 60  # slowest heating type's settling window
+WATER_TEMP_GATE_WRITE_DELTA = 1.0  # °C write change that (re)opens the learning gate
+
+# Diagnostic sensor binding_constraint values
+WATER_TEMP_BINDING_DEW_POINT = "dew_point"
+WATER_TEMP_BINDING_MIN_SUPPLY = "min_supply"
+WATER_TEMP_BINDING_RAMP = "ramp"
+WATER_TEMP_BINDING_TARGET = "target"
+WATER_TEMP_BINDING_INTERLOCK = "interlock"
+WATER_TEMP_BINDING_BLIND = "blind"

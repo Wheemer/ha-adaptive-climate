@@ -84,6 +84,34 @@ from .const import (
     CONF_COOLING_SUPPLY_TEMP,
     CONF_COOLING_SUPPLY_MARGIN,
     DEFAULT_COOLING_SUPPLY_MARGIN,
+    # Water temperature control
+    CONF_WATER_TEMP_CONTROL,
+    CONF_WATER_TEMP_COOLING,
+    CONF_WATER_TEMP_HEATING,
+    CONF_WATER_TEMP_TARGET,
+    CONF_WATER_TEMP_TARGET_ENTITY,
+    CONF_WATER_TEMP_MIN_SUPPLY_TEMP,
+    CONF_WATER_TEMP_DEW_POINT_MARGIN,
+    CONF_WATER_TEMP_FALLBACK_HUMIDITY,
+    CONF_WATER_TEMP_RAMP_START,
+    CONF_WATER_TEMP_RAMP_RATE,
+    CONF_WATER_TEMP_EXTRA_SENSORS,
+    CONF_WATER_TEMP_EXTRA_HUMIDITY,
+    CONF_WATER_TEMP_EXTRA_TEMPERATURE,
+    CONF_WATER_TEMP_IDLE_DAYS,
+    CONF_WATER_TEMP_MIN_WRITE_INTERVAL,
+    CONF_WATER_TEMP_CONDENSATION_SENSOR,
+    DEFAULT_WATER_TEMP_IDLE_DAYS,
+    DEFAULT_WATER_TEMP_MIN_WRITE_INTERVAL,
+    DEFAULT_WATER_TEMP_MIN_SUPPLY_TEMP,
+    DEFAULT_WATER_TEMP_DEW_POINT_MARGIN,
+    DEFAULT_WATER_TEMP_FALLBACK_HUMIDITY,
+    DEFAULT_WATER_TEMP_COOLING_RAMP_START,
+    DEFAULT_WATER_TEMP_COOLING_RAMP_RATE,
+    DEFAULT_WATER_TEMP_HEATING_RAMP_START,
+    DEFAULT_WATER_TEMP_HEATING_RAMP_RATE,
+    WATER_TEMP_HEATING_TARGET_MIN,
+    WATER_TEMP_HEATING_TARGET_MAX,
     # Climate settings (domain-level defaults with per-entity override)
     CONF_MIN_TEMP,
     CONF_MAX_TEMP,
@@ -168,6 +196,60 @@ def valid_notify_service(value: Any) -> str:
     return value
 
 
+def validate_water_temp_control(config: dict[str, Any]) -> dict[str, Any]:
+    """Validate ``water_temp_control`` against sibling domain keys.
+
+    Runs as a domain-level ``vol.All`` wrapper because two rules reach outside
+    ``WATER_TEMP_CONTROL_SCHEMA``:
+
+    1. ``heating.target`` falls back to the domain-level ``supply_temperature``.
+       Neither present is a configuration error.
+    2. ``cooling.target_entity`` and ``heating.target_entity`` must differ —
+       writing both halves to one entity would make the two controllers fight.
+
+    Args:
+        config: The validated ``adaptive_climate:`` domain config dict.
+
+    Returns:
+        The same dict, unchanged, when valid.
+
+    Raises:
+        vol.Invalid: When a rule above is violated.
+    """
+    water_temp = config.get(CONF_WATER_TEMP_CONTROL)
+    if not water_temp:
+        return config
+
+    cooling = water_temp.get(CONF_WATER_TEMP_COOLING)
+    heating = water_temp.get(CONF_WATER_TEMP_HEATING)
+
+    if heating is not None and heating.get(CONF_WATER_TEMP_TARGET) is None:
+        fallback = config.get(CONF_SUPPLY_TEMPERATURE)
+        if fallback is None:
+            raise vol.Invalid(
+                "water_temp_control.heating.target is required when the domain-level "
+                "supply_temperature is not configured"
+            )
+        if not WATER_TEMP_HEATING_TARGET_MIN <= float(fallback) <= WATER_TEMP_HEATING_TARGET_MAX:
+            raise vol.Invalid(
+                f"supply_temperature ({fallback}°C) is outside the water_temp_control heating "
+                f"target range ({WATER_TEMP_HEATING_TARGET_MIN}-{WATER_TEMP_HEATING_TARGET_MAX}°C); "
+                "set water_temp_control.heating.target explicitly"
+            )
+
+    if cooling is not None and heating is not None:
+        cool_entity = cooling.get(CONF_WATER_TEMP_TARGET_ENTITY)
+        heat_entity = heating.get(CONF_WATER_TEMP_TARGET_ENTITY)
+        if cool_entity == heat_entity:
+            raise vol.Invalid(
+                "water_temp_control.cooling.target_entity and "
+                "water_temp_control.heating.target_entity must differ "
+                f"(both set to '{cool_entity}')"
+            )
+
+    return config
+
+
 # Domain configuration schema
 # This validates the configuration under the adaptive_climate: key
 if HAS_HOMEASSISTANT:
@@ -222,90 +304,205 @@ if HAS_HOMEASSISTANT:
         }
     )
 
+    def _water_temp_ensure_list(value: Any) -> list[Any]:
+        """Wrap a single mapping in a list, same semantics as ``cv.ensure_list``.
+
+        Defined locally (rather than using ``cv.ensure_list`` directly) because
+        the value is fed straight into a list-item schema below; keeping the
+        wrapping logic here makes it independent of how ``cv`` is provided.
+        """
+        if value is None:
+            return []
+        return value if isinstance(value, list) else [value]
+
+    def _water_temp_entity_id(value: Any) -> str:
+        """Validate an entity ID, same semantics as ``cv.entity_id``.
+
+        Defined locally (rather than using ``cv.entity_id`` directly) so the
+        validated value is the original string in every environment this
+        schema is exercised in.
+        """
+        if not isinstance(value, str):
+            raise vol.Invalid(f"entity ID must be a string, got {type(value).__name__}")
+        domain, sep, object_id = value.partition(".")
+        if not sep or not domain or not object_id:
+            raise vol.Invalid(f"{value!r} is not a valid entity ID")
+        return value
+
+    # Water temperature control — extra (non-zone) humidity/temperature pair
+    WATER_TEMP_EXTRA_SENSOR_SCHEMA = vol.Schema(
+        {
+            vol.Required(CONF_WATER_TEMP_EXTRA_HUMIDITY): _water_temp_entity_id,
+            vol.Required(CONF_WATER_TEMP_EXTRA_TEMPERATURE): _water_temp_entity_id,
+        }
+    )
+
+    # Water temperature control — cooling half (dew-point driven)
+    WATER_TEMP_COOLING_SCHEMA = vol.Schema(
+        {
+            vol.Required(CONF_WATER_TEMP_TARGET_ENTITY): _water_temp_entity_id,
+            vol.Optional(CONF_WATER_TEMP_MIN_SUPPLY_TEMP, default=DEFAULT_WATER_TEMP_MIN_SUPPLY_TEMP): vol.All(
+                vol.Coerce(float),
+                vol.Range(min=5.0, max=30.0, msg="min_supply_temp must be between 5 and 30°C"),
+            ),
+            vol.Optional(CONF_WATER_TEMP_DEW_POINT_MARGIN, default=DEFAULT_WATER_TEMP_DEW_POINT_MARGIN): vol.All(
+                vol.Coerce(float),
+                vol.Range(min=0.0, max=10.0, msg="dew_point_margin must be between 0 and 10°C"),
+            ),
+            vol.Optional(CONF_WATER_TEMP_FALLBACK_HUMIDITY, default=DEFAULT_WATER_TEMP_FALLBACK_HUMIDITY): vol.All(
+                vol.Coerce(float),
+                vol.Range(min=15.0, max=100.0, msg="fallback_humidity must be between 15 and 100%"),
+            ),
+            vol.Optional(CONF_WATER_TEMP_RAMP_START, default=DEFAULT_WATER_TEMP_COOLING_RAMP_START): vol.All(
+                vol.Coerce(float),
+                vol.Range(min=5.0, max=40.0, msg="cooling ramp_start must be between 5 and 40°C"),
+            ),
+            vol.Optional(CONF_WATER_TEMP_RAMP_RATE, default=DEFAULT_WATER_TEMP_COOLING_RAMP_RATE): vol.All(
+                vol.Coerce(float),
+                vol.Range(min=0.1, max=10.0, msg="cooling ramp_rate must be between 0.1 and 10°C/day"),
+            ),
+            vol.Optional(CONF_WATER_TEMP_EXTRA_SENSORS, default=[]): vol.All(
+                _water_temp_ensure_list, [WATER_TEMP_EXTRA_SENSOR_SCHEMA]
+            ),
+        }
+    )
+
+    # Water temperature control — heating half (fixed target + ramp)
+    WATER_TEMP_HEATING_SCHEMA = vol.Schema(
+        {
+            vol.Required(CONF_WATER_TEMP_TARGET_ENTITY): _water_temp_entity_id,
+            # No default: absence triggers the supply_temperature fallback in
+            # validate_water_temp_control().
+            vol.Optional(CONF_WATER_TEMP_TARGET): vol.All(
+                vol.Coerce(float),
+                vol.Range(
+                    min=WATER_TEMP_HEATING_TARGET_MIN,
+                    max=WATER_TEMP_HEATING_TARGET_MAX,
+                    msg=(
+                        f"heating target must be between {WATER_TEMP_HEATING_TARGET_MIN} "
+                        f"and {WATER_TEMP_HEATING_TARGET_MAX}°C"
+                    ),
+                ),
+            ),
+            vol.Optional(CONF_WATER_TEMP_RAMP_START, default=DEFAULT_WATER_TEMP_HEATING_RAMP_START): vol.All(
+                vol.Coerce(float),
+                vol.Range(min=15.0, max=60.0, msg="heating ramp_start must be between 15 and 60°C"),
+            ),
+            vol.Optional(CONF_WATER_TEMP_RAMP_RATE, default=DEFAULT_WATER_TEMP_HEATING_RAMP_RATE): vol.All(
+                vol.Coerce(float),
+                vol.Range(min=0.1, max=10.0, msg="heating ramp_rate must be between 0.1 and 10°C/day"),
+            ),
+        }
+    )
+
+    # Water temperature control — top level
+    WATER_TEMP_CONTROL_SCHEMA = vol.Schema(
+        {
+            vol.Optional(CONF_WATER_TEMP_IDLE_DAYS, default=DEFAULT_WATER_TEMP_IDLE_DAYS): vol.All(
+                vol.Coerce(int),
+                vol.Range(min=1, max=365, msg="idle_days must be between 1 and 365"),
+            ),
+            vol.Optional(CONF_WATER_TEMP_MIN_WRITE_INTERVAL, default=DEFAULT_WATER_TEMP_MIN_WRITE_INTERVAL): vol.All(
+                vol.Coerce(int),
+                vol.Range(min=0, max=86400, msg="min_write_interval must be between 0 and 86400 seconds"),
+            ),
+            vol.Optional(CONF_WATER_TEMP_CONDENSATION_SENSOR): _water_temp_entity_id,
+            vol.Optional(CONF_WATER_TEMP_COOLING): WATER_TEMP_COOLING_SCHEMA,
+            vol.Optional(CONF_WATER_TEMP_HEATING): WATER_TEMP_HEATING_SCHEMA,
+        }
+    )
+
     CONFIG_SCHEMA = vol.Schema(
         {
-            DOMAIN: vol.Schema(
-                {
-                    # Notification settings
-                    vol.Optional(CONF_NOTIFY_SERVICE): valid_notify_service,
-                    vol.Optional(CONF_PERSISTENT_NOTIFICATION, default=DEFAULT_PERSISTENT_NOTIFICATION): cv.boolean,
-                    # Debug mode
-                    vol.Optional(CONF_DEBUG, default=DEFAULT_DEBUG): cv.boolean,
-                    # Energy tracking
-                    vol.Optional(CONF_ENERGY_METER_ENTITY): cv.entity_id,
-                    vol.Optional(CONF_ENERGY_COST_ENTITY): cv.entity_id,
-                    # Supply temperature for physics-based PID scaling
-                    vol.Optional(CONF_SUPPLY_TEMPERATURE): vol.All(
-                        vol.Coerce(float),
-                        vol.Range(
-                            min=SUPPLY_TEMP_MIN,
-                            max=SUPPLY_TEMP_MAX,
-                            msg=f"supply_temperature must be between {SUPPLY_TEMP_MIN} and {SUPPLY_TEMP_MAX}°C",
+            DOMAIN: vol.All(
+                vol.Schema(
+                    {
+                        # Notification settings
+                        vol.Optional(CONF_NOTIFY_SERVICE): valid_notify_service,
+                        vol.Optional(CONF_PERSISTENT_NOTIFICATION, default=DEFAULT_PERSISTENT_NOTIFICATION): cv.boolean,
+                        # Debug mode
+                        vol.Optional(CONF_DEBUG, default=DEFAULT_DEBUG): cv.boolean,
+                        # Energy tracking
+                        vol.Optional(CONF_ENERGY_METER_ENTITY): cv.entity_id,
+                        vol.Optional(CONF_ENERGY_COST_ENTITY): cv.entity_id,
+                        # Supply temperature for physics-based PID scaling
+                        vol.Optional(CONF_SUPPLY_TEMPERATURE): vol.All(
+                            vol.Coerce(float),
+                            vol.Range(
+                                min=SUPPLY_TEMP_MIN,
+                                max=SUPPLY_TEMP_MAX,
+                                msg=f"supply_temperature must be between {SUPPLY_TEMP_MIN} and {SUPPLY_TEMP_MAX}°C",
+                            ),
                         ),
-                    ),
-                    # Central heat source control
-                    vol.Optional(CONF_MAIN_HEATER_SWITCH): cv.entity_ids,
-                    vol.Optional(CONF_MAIN_COOLER_SWITCH): cv.entity_ids,
-                    vol.Optional(CONF_SOURCE_STARTUP_DELAY, default=DEFAULT_SOURCE_STARTUP_DELAY): vol.All(
-                        vol.Coerce(int),
-                        vol.Range(min=0, max=300, msg="source_startup_delay must be between 0 and 300 seconds"),
-                    ),
-                    # Mode synchronization
-                    vol.Optional(CONF_SYNC_MODES, default=DEFAULT_SYNC_MODES): cv.boolean,
-                    # Learning configuration
-                    vol.Optional(CONF_LEARNING_WINDOW_DAYS, default=DEFAULT_LEARNING_WINDOW_DAYS): vol.All(
-                        vol.Coerce(int),
-                        vol.Range(min=1, max=30, msg="learning_window_days must be between 1 and 30 days"),
-                    ),
-                    vol.Optional(CONF_CHRONIC_APPROACH_HISTORIC_SCAN, default=False): cv.boolean,
-                    # Weather and physics
-                    vol.Optional(CONF_WEATHER_ENTITY): cv.entity_id,
-                    vol.Optional(CONF_OUTDOOR_SENSOR): cv.entity_id,
-                    vol.Optional(CONF_WIND_SPEED_SENSOR): cv.entity_id,
-                    vol.Optional(CONF_HOUSE_ENERGY_RATING): vol.In(
-                        VALID_ENERGY_RATINGS,
-                        msg=f"house_energy_rating must be one of: {', '.join(VALID_ENERGY_RATINGS)}",
-                    ),
-                    vol.Optional(CONF_WINDOW_RATING, default=DEFAULT_WINDOW_RATING): cv.string,
-                    # Heat output sensors
-                    vol.Optional(CONF_SUPPLY_TEMP_SENSOR): cv.entity_id,
-                    vol.Optional(CONF_RETURN_TEMP_SENSOR): cv.entity_id,
-                    vol.Optional(CONF_FLOW_RATE_SENSOR): cv.entity_id,
-                    vol.Optional(CONF_VOLUME_METER_ENTITY): cv.entity_id,
-                    vol.Optional(CONF_FALLBACK_FLOW_RATE, default=DEFAULT_FALLBACK_FLOW_RATE): vol.All(
-                        vol.Coerce(float),
-                        vol.Range(min=0.01, max=10.0, msg="fallback_flow_rate must be between 0.01 and 10.0 L/s"),
-                    ),
-                    # Preset temperatures
-                    vol.Optional(CONF_AWAY_TEMP): vol.Coerce(float),
-                    vol.Optional(CONF_ECO_TEMP): vol.Coerce(float),
-                    vol.Optional(CONF_BOOST_TEMP): vol.Coerce(float),
-                    vol.Optional(CONF_COMFORT_TEMP): vol.Coerce(float),
-                    vol.Optional(CONF_HOME_TEMP): vol.Coerce(float),
-                    vol.Optional(CONF_ACTIVITY_TEMP): vol.Coerce(float),
-                    vol.Optional(CONF_PRESET_SYNC_MODE, default=DEFAULT_PRESET_SYNC_MODE): vol.In(["sync", "none"]),
-                    vol.Optional(CONF_BOOST_PID_OFF, default=False): cv.boolean,
-                    # Climate settings (domain-level defaults, can be overridden per-entity)
-                    vol.Optional(CONF_MIN_TEMP): vol.Coerce(float),
-                    vol.Optional(CONF_MAX_TEMP): vol.Coerce(float),
-                    vol.Optional(CONF_TARGET_TEMP): vol.Coerce(float),
-                    vol.Optional(CONF_TARGET_TEMP_STEP): vol.In([0.1, 0.5, 1.0]),
-                    vol.Optional(CONF_HOT_TOLERANCE): vol.Coerce(float),
-                    vol.Optional(CONF_COLD_TOLERANCE): vol.Coerce(float),
-                    vol.Optional(CONF_PRECISION): vol.In([0.1, 0.5, 1.0]),
-                    vol.Optional(CONF_PWM): vol.All(cv.time_period, cv.positive_timedelta),
-                    vol.Optional(CONF_MIN_OPEN_TIME): vol.All(cv.time_period, cv.positive_timedelta),
-                    vol.Optional(CONF_MIN_CLOSED_TIME): vol.All(cv.time_period, cv.positive_timedelta),
-                    # Thermal groups for static multi-zone coordination
-                    vol.Optional(CONF_THERMAL_GROUPS): vol.All(cv.ensure_list, [THERMAL_GROUP_SCHEMA]),
-                    # Manifolds for hydraulic transport delay tracking
-                    vol.Optional(CONF_MANIFOLDS): vol.All(cv.ensure_list, [MANIFOLD_SCHEMA]),
-                    # Auto mode switching for heat/cool based on outdoor temperature
-                    vol.Optional(CONF_AUTO_MODE_SWITCHING): AUTO_MODE_SWITCHING_SCHEMA,
-                    # Cooling supply temperature clamp (for floor cooling with limited supply temp)
-                    vol.Optional(CONF_COOLING_SUPPLY_TEMP): vol.Coerce(float),
-                    vol.Optional(CONF_COOLING_SUPPLY_MARGIN, default=DEFAULT_COOLING_SUPPLY_MARGIN): vol.Coerce(float),
-                }
+                        # Central heat source control
+                        vol.Optional(CONF_MAIN_HEATER_SWITCH): cv.entity_ids,
+                        vol.Optional(CONF_MAIN_COOLER_SWITCH): cv.entity_ids,
+                        vol.Optional(CONF_SOURCE_STARTUP_DELAY, default=DEFAULT_SOURCE_STARTUP_DELAY): vol.All(
+                            vol.Coerce(int),
+                            vol.Range(min=0, max=300, msg="source_startup_delay must be between 0 and 300 seconds"),
+                        ),
+                        # Mode synchronization
+                        vol.Optional(CONF_SYNC_MODES, default=DEFAULT_SYNC_MODES): cv.boolean,
+                        # Learning configuration
+                        vol.Optional(CONF_LEARNING_WINDOW_DAYS, default=DEFAULT_LEARNING_WINDOW_DAYS): vol.All(
+                            vol.Coerce(int),
+                            vol.Range(min=1, max=30, msg="learning_window_days must be between 1 and 30 days"),
+                        ),
+                        vol.Optional(CONF_CHRONIC_APPROACH_HISTORIC_SCAN, default=False): cv.boolean,
+                        # Weather and physics
+                        vol.Optional(CONF_WEATHER_ENTITY): cv.entity_id,
+                        vol.Optional(CONF_OUTDOOR_SENSOR): cv.entity_id,
+                        vol.Optional(CONF_WIND_SPEED_SENSOR): cv.entity_id,
+                        vol.Optional(CONF_HOUSE_ENERGY_RATING): vol.In(
+                            VALID_ENERGY_RATINGS,
+                            msg=f"house_energy_rating must be one of: {', '.join(VALID_ENERGY_RATINGS)}",
+                        ),
+                        vol.Optional(CONF_WINDOW_RATING, default=DEFAULT_WINDOW_RATING): cv.string,
+                        # Heat output sensors
+                        vol.Optional(CONF_SUPPLY_TEMP_SENSOR): cv.entity_id,
+                        vol.Optional(CONF_RETURN_TEMP_SENSOR): cv.entity_id,
+                        vol.Optional(CONF_FLOW_RATE_SENSOR): cv.entity_id,
+                        vol.Optional(CONF_VOLUME_METER_ENTITY): cv.entity_id,
+                        vol.Optional(CONF_FALLBACK_FLOW_RATE, default=DEFAULT_FALLBACK_FLOW_RATE): vol.All(
+                            vol.Coerce(float),
+                            vol.Range(min=0.01, max=10.0, msg="fallback_flow_rate must be between 0.01 and 10.0 L/s"),
+                        ),
+                        # Preset temperatures
+                        vol.Optional(CONF_AWAY_TEMP): vol.Coerce(float),
+                        vol.Optional(CONF_ECO_TEMP): vol.Coerce(float),
+                        vol.Optional(CONF_BOOST_TEMP): vol.Coerce(float),
+                        vol.Optional(CONF_COMFORT_TEMP): vol.Coerce(float),
+                        vol.Optional(CONF_HOME_TEMP): vol.Coerce(float),
+                        vol.Optional(CONF_ACTIVITY_TEMP): vol.Coerce(float),
+                        vol.Optional(CONF_PRESET_SYNC_MODE, default=DEFAULT_PRESET_SYNC_MODE): vol.In(["sync", "none"]),
+                        vol.Optional(CONF_BOOST_PID_OFF, default=False): cv.boolean,
+                        # Climate settings (domain-level defaults, can be overridden per-entity)
+                        vol.Optional(CONF_MIN_TEMP): vol.Coerce(float),
+                        vol.Optional(CONF_MAX_TEMP): vol.Coerce(float),
+                        vol.Optional(CONF_TARGET_TEMP): vol.Coerce(float),
+                        vol.Optional(CONF_TARGET_TEMP_STEP): vol.In([0.1, 0.5, 1.0]),
+                        vol.Optional(CONF_HOT_TOLERANCE): vol.Coerce(float),
+                        vol.Optional(CONF_COLD_TOLERANCE): vol.Coerce(float),
+                        vol.Optional(CONF_PRECISION): vol.In([0.1, 0.5, 1.0]),
+                        vol.Optional(CONF_PWM): vol.All(cv.time_period, cv.positive_timedelta),
+                        vol.Optional(CONF_MIN_OPEN_TIME): vol.All(cv.time_period, cv.positive_timedelta),
+                        vol.Optional(CONF_MIN_CLOSED_TIME): vol.All(cv.time_period, cv.positive_timedelta),
+                        # Thermal groups for static multi-zone coordination
+                        vol.Optional(CONF_THERMAL_GROUPS): vol.All(cv.ensure_list, [THERMAL_GROUP_SCHEMA]),
+                        # Manifolds for hydraulic transport delay tracking
+                        vol.Optional(CONF_MANIFOLDS): vol.All(cv.ensure_list, [MANIFOLD_SCHEMA]),
+                        # Auto mode switching for heat/cool based on outdoor temperature
+                        vol.Optional(CONF_AUTO_MODE_SWITCHING): AUTO_MODE_SWITCHING_SCHEMA,
+                        # Cooling supply temperature clamp (for floor cooling with limited supply temp)
+                        vol.Optional(CONF_COOLING_SUPPLY_TEMP): vol.Coerce(float),
+                        vol.Optional(CONF_COOLING_SUPPLY_MARGIN, default=DEFAULT_COOLING_SUPPLY_MARGIN): vol.Coerce(
+                            float
+                        ),
+                        # Water temperature control (dew-point cooling + startup ramps)
+                        vol.Optional(CONF_WATER_TEMP_CONTROL): WATER_TEMP_CONTROL_SCHEMA,
+                    }
+                ),
+                validate_water_temp_control,
             )
         },
         extra=vol.ALLOW_EXTRA,  # Allow other domains in config
@@ -315,6 +512,10 @@ else:
     CONFIG_SCHEMA = None
     THERMAL_GROUP_SCHEMA = None
     MANIFOLD_SCHEMA = None
+    WATER_TEMP_EXTRA_SENSOR_SCHEMA = None
+    WATER_TEMP_COOLING_SCHEMA = None
+    WATER_TEMP_HEATING_SCHEMA = None
+    WATER_TEMP_CONTROL_SCHEMA = None
 
 
 async def async_send_notification(
