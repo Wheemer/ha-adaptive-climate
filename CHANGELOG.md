@@ -1,6 +1,39 @@
 # CHANGELOG
 
 
+## v0.65.1 (2026-06-20)
+
+### Bug Fixes
+
+- **mode-sync**: Conform turned-on zone to house mode instead of flipping it
+  ([`35434e4`](https://github.com/afewyards/ha-adaptive-climate/commit/35434e4c6afae9abd82de810ccbd09083ca1c257))
+
+Turning a zone ON (OFF->active) previously propagated that zone's restored mode to all other active
+  zones via ModeSync.on_mode_change, flipping the global mode (e.g. house in COOL, a zone woke in
+  HEAT, whole house went HEAT).
+
+On a turn-on, the newly activated zone now conforms to the prevailing house mode (mode of other
+  active, sync-enabled zones) instead of imposing its own. Deliberate HEAT<->COOL switches of an
+  already-active zone still propagate.
+
+Adds ModeSync._prevailing_house_mode helper and coordinator tests covering conform,
+  no-other-active-zones, deliberate-switch propagation, matching-mode no-op, and re-entrancy guard
+  suppression.
+
+- **mode-sync**: Stop sync-disabled zone from propagating its mode
+  ([`9dcdf92`](https://github.com/afewyards/ha-adaptive-climate/commit/9dcdf929b81f164bdbba0fe0a903733672c0dd95))
+
+A zone with mode-sync disabled is meant to be fully independent, but on_mode_change only skipped
+  disabled zones as sync targets, not as the originator. A disabled zone turning on or switching
+  mode still drove the propagation loop, flipping every other active zone.
+
+Add an early return when the originating zone is sync-disabled (its mode is still tracked, but
+  nothing is propagated or conformed), and drop the now redundant is_sync_disabled check from the
+  turn-on conform branch.
+
+Adds coordinator tests for a disabled originator on turn-on and on a deliberate switch.
+
+
 ## v0.65.0 (2026-05-26)
 
 ### Bug Fixes
