@@ -250,6 +250,11 @@ class TestFromEntity:
         entity._night_setback_controller = None
         entity._contact_sensor_handler = None
         entity._humidity_detector = None
+        # A bare MagicMock auto-creates any attribute access as a truthy Mock,
+        # so the water-temp gate flag must be pinned explicitly — otherwise
+        # getattr(entity, "water_temp_learning_gate_active", False) returns a
+        # Mock instead of the intended default.
+        entity.water_temp_learning_gate_active = False
 
         detector = PauseDetector.from_entity(entity)
         assert detector.is_learning_paused() is False

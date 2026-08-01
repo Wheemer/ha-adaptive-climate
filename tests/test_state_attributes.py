@@ -320,6 +320,12 @@ class TestDutyAccumulatorAttributes:
         )
 
         thermostat = MagicMock()
+        # A bare MagicMock auto-creates any attribute access as a truthy Mock,
+        # so the water-temp learning gate must be pinned explicitly — otherwise
+        # getattr(thermostat, "water_temp_learning_gate_active", False) returns
+        # a Mock instead of the intended default, spuriously activating the
+        # learning_grace override.
+        thermostat.water_temp_learning_gate_active = False
         thermostat._away_temp = 18.0
         thermostat._eco_temp = 19.0
         thermostat._boost_temp = 24.0
@@ -367,6 +373,12 @@ class TestDutyAccumulatorAttributes:
         )
 
         thermostat = MagicMock()
+        # A bare MagicMock auto-creates any attribute access as a truthy Mock,
+        # so the water-temp learning gate must be pinned explicitly — otherwise
+        # getattr(thermostat, "water_temp_learning_gate_active", False) returns
+        # a Mock instead of the intended default, spuriously activating the
+        # learning_grace override.
+        thermostat.water_temp_learning_gate_active = False
         thermostat._away_temp = 18.0
         thermostat._eco_temp = 19.0
         thermostat._boost_temp = 24.0
@@ -416,6 +428,12 @@ class TestDutyAccumulatorAttributes:
         )
 
         thermostat = MagicMock()
+        # A bare MagicMock auto-creates any attribute access as a truthy Mock,
+        # so the water-temp learning gate must be pinned explicitly — otherwise
+        # getattr(thermostat, "water_temp_learning_gate_active", False) returns
+        # a Mock instead of the intended default, spuriously activating the
+        # learning_grace override.
+        thermostat.water_temp_learning_gate_active = False
         thermostat._away_temp = 18.0
         thermostat._eco_temp = 19.0
         thermostat._boost_temp = 24.0
@@ -465,6 +483,12 @@ class TestDutyAccumulatorAttributes:
         )
 
         thermostat = MagicMock()
+        # A bare MagicMock auto-creates any attribute access as a truthy Mock,
+        # so the water-temp learning gate must be pinned explicitly — otherwise
+        # getattr(thermostat, "water_temp_learning_gate_active", False) returns
+        # a Mock instead of the intended default, spuriously activating the
+        # learning_grace override.
+        thermostat.water_temp_learning_gate_active = False
         thermostat._heater_controller = MagicMock()
         thermostat._heater_controller.duty_accumulator_seconds = 300.0
         thermostat._heater_controller.min_open_time = 300.0
@@ -480,6 +504,12 @@ class TestDutyAccumulatorAttributes:
         )
 
         thermostat = MagicMock()
+        # A bare MagicMock auto-creates any attribute access as a truthy Mock,
+        # so the water-temp learning gate must be pinned explicitly — otherwise
+        # getattr(thermostat, "water_temp_learning_gate_active", False) returns
+        # a Mock instead of the intended default, spuriously activating the
+        # learning_grace override.
+        thermostat.water_temp_learning_gate_active = False
         thermostat._heater_controller = MagicMock()
         thermostat._heater_controller.duty_accumulator_seconds = 500.0
         thermostat._heater_controller.min_open_time = 300.0
@@ -495,6 +525,12 @@ class TestDutyAccumulatorAttributes:
         )
 
         thermostat = MagicMock()
+        # A bare MagicMock auto-creates any attribute access as a truthy Mock,
+        # so the water-temp learning gate must be pinned explicitly — otherwise
+        # getattr(thermostat, "water_temp_learning_gate_active", False) returns
+        # a Mock instead of the intended default, spuriously activating the
+        # learning_grace override.
+        thermostat.water_temp_learning_gate_active = False
         thermostat._heater_controller = None
 
         pct = _compute_duty_accumulator_pct(thermostat)
@@ -508,6 +544,12 @@ class TestDutyAccumulatorAttributes:
         )
 
         thermostat = MagicMock()
+        # A bare MagicMock auto-creates any attribute access as a truthy Mock,
+        # so the water-temp learning gate must be pinned explicitly — otherwise
+        # getattr(thermostat, "water_temp_learning_gate_active", False) returns
+        # a Mock instead of the intended default, spuriously activating the
+        # learning_grace override.
+        thermostat.water_temp_learning_gate_active = False
         thermostat._heater_controller = MagicMock()
         thermostat._heater_controller.duty_accumulator_seconds = 100.0
         thermostat._heater_controller.min_open_time = 0.0
@@ -532,6 +574,12 @@ class TestPerModeConvergenceConfidence:
         )
 
         thermostat = MagicMock()
+        # A bare MagicMock auto-creates any attribute access as a truthy Mock,
+        # so the water-temp learning gate must be pinned explicitly — otherwise
+        # getattr(thermostat, "water_temp_learning_gate_active", False) returns
+        # a Mock instead of the intended default, spuriously activating the
+        # learning_grace override.
+        thermostat.water_temp_learning_gate_active = False
         thermostat._away_temp = 18.0
         thermostat._eco_temp = 19.0
         thermostat._boost_temp = 24.0
@@ -590,6 +638,12 @@ class TestPerModeConvergenceConfidence:
         )
 
         thermostat = MagicMock()
+        # A bare MagicMock auto-creates any attribute access as a truthy Mock,
+        # so the water-temp learning gate must be pinned explicitly — otherwise
+        # getattr(thermostat, "water_temp_learning_gate_active", False) returns
+        # a Mock instead of the intended default, spuriously activating the
+        # learning_grace override.
+        thermostat.water_temp_learning_gate_active = False
         thermostat._away_temp = 18.0
         thermostat._eco_temp = 19.0
         thermostat._boost_temp = 24.0
@@ -638,6 +692,12 @@ class TestPerModeConvergenceConfidence:
         from homeassistant.components.climate import HVACMode
 
         thermostat = MagicMock()
+        # A bare MagicMock auto-creates any attribute access as a truthy Mock,
+        # so the water-temp learning gate must be pinned explicitly — otherwise
+        # getattr(thermostat, "water_temp_learning_gate_active", False) returns
+        # a Mock instead of the intended default, spuriously activating the
+        # learning_grace override.
+        thermostat.water_temp_learning_gate_active = False
         thermostat._away_temp = 18.0
         thermostat._eco_temp = 19.0
         thermostat._boost_temp = 24.0
@@ -700,6 +760,12 @@ class TestPerModeConvergenceConfidence:
         from homeassistant.components.climate import HVACMode
 
         thermostat = MagicMock()
+        # A bare MagicMock auto-creates any attribute access as a truthy Mock,
+        # so the water-temp learning gate must be pinned explicitly — otherwise
+        # getattr(thermostat, "water_temp_learning_gate_active", False) returns
+        # a Mock instead of the intended default, spuriously activating the
+        # learning_grace override.
+        thermostat.water_temp_learning_gate_active = False
         thermostat._away_temp = 18.0
         thermostat._eco_temp = 19.0
         thermostat._boost_temp = 24.0
@@ -771,6 +837,12 @@ class TestPerModeConvergenceConfidence:
         )
 
         thermostat = MagicMock()
+        # A bare MagicMock auto-creates any attribute access as a truthy Mock,
+        # so the water-temp learning gate must be pinned explicitly — otherwise
+        # getattr(thermostat, "water_temp_learning_gate_active", False) returns
+        # a Mock instead of the intended default, spuriously activating the
+        # learning_grace override.
+        thermostat.water_temp_learning_gate_active = False
         thermostat._away_temp = 18.0
         thermostat._eco_temp = 19.0
         thermostat._boost_temp = 24.0
@@ -821,6 +893,12 @@ class TestPerModeConvergenceConfidence:
         )
 
         thermostat = MagicMock()
+        # A bare MagicMock auto-creates any attribute access as a truthy Mock,
+        # so the water-temp learning gate must be pinned explicitly — otherwise
+        # getattr(thermostat, "water_temp_learning_gate_active", False) returns
+        # a Mock instead of the intended default, spuriously activating the
+        # learning_grace override.
+        thermostat.water_temp_learning_gate_active = False
         thermostat._away_temp = 18.0
         thermostat._eco_temp = 19.0
         thermostat._boost_temp = 24.0
@@ -880,6 +958,12 @@ class TestPerModeConvergenceConfidence:
         from homeassistant.components.climate import HVACMode
 
         thermostat = MagicMock()
+        # A bare MagicMock auto-creates any attribute access as a truthy Mock,
+        # so the water-temp learning gate must be pinned explicitly — otherwise
+        # getattr(thermostat, "water_temp_learning_gate_active", False) returns
+        # a Mock instead of the intended default, spuriously activating the
+        # learning_grace override.
+        thermostat.water_temp_learning_gate_active = False
         thermostat._away_temp = 18.0
         thermostat._eco_temp = 19.0
         thermostat._boost_temp = 24.0
@@ -947,6 +1031,12 @@ class TestHumidityDetectionAttributes:
         )
 
         thermostat = MagicMock()
+        # A bare MagicMock auto-creates any attribute access as a truthy Mock,
+        # so the water-temp learning gate must be pinned explicitly — otherwise
+        # getattr(thermostat, "water_temp_learning_gate_active", False) returns
+        # a Mock instead of the intended default, spuriously activating the
+        # learning_grace override.
+        thermostat.water_temp_learning_gate_active = False
         thermostat._contact_sensor_handler = None
         thermostat._humidity_detector = None
         thermostat._night_setback_controller = None
@@ -968,6 +1058,12 @@ class TestHumidityDetectionAttributes:
         )
 
         thermostat = MagicMock()
+        # A bare MagicMock auto-creates any attribute access as a truthy Mock,
+        # so the water-temp learning gate must be pinned explicitly — otherwise
+        # getattr(thermostat, "water_temp_learning_gate_active", False) returns
+        # a Mock instead of the intended default, spuriously activating the
+        # learning_grace override.
+        thermostat.water_temp_learning_gate_active = False
         thermostat._contact_sensor_handler = None
         thermostat._night_setback_controller = None
 
@@ -995,6 +1091,12 @@ class TestHumidityDetectionAttributes:
         )
 
         thermostat = MagicMock()
+        # A bare MagicMock auto-creates any attribute access as a truthy Mock,
+        # so the water-temp learning gate must be pinned explicitly — otherwise
+        # getattr(thermostat, "water_temp_learning_gate_active", False) returns
+        # a Mock instead of the intended default, spuriously activating the
+        # learning_grace override.
+        thermostat.water_temp_learning_gate_active = False
         thermostat._contact_sensor_handler = None
 
         # Setup humidity detector in paused state
@@ -1024,6 +1126,12 @@ class TestHumidityDetectionAttributes:
         )
 
         thermostat = MagicMock()
+        # A bare MagicMock auto-creates any attribute access as a truthy Mock,
+        # so the water-temp learning gate must be pinned explicitly — otherwise
+        # getattr(thermostat, "water_temp_learning_gate_active", False) returns
+        # a Mock instead of the intended default, spuriously activating the
+        # learning_grace override.
+        thermostat.water_temp_learning_gate_active = False
         thermostat._contact_sensor_handler = None
 
         # Setup humidity detector in stabilizing state with resume time
@@ -1053,6 +1161,12 @@ class TestHumidityDetectionAttributes:
         )
 
         thermostat = MagicMock()
+        # A bare MagicMock auto-creates any attribute access as a truthy Mock,
+        # so the water-temp learning gate must be pinned explicitly — otherwise
+        # getattr(thermostat, "water_temp_learning_gate_active", False) returns
+        # a Mock instead of the intended default, spuriously activating the
+        # learning_grace override.
+        thermostat.water_temp_learning_gate_active = False
         thermostat._contact_sensor_handler = None
 
         # Setup humidity detector in stabilizing state with 0 resume time (about to exit)
@@ -1083,6 +1197,12 @@ class TestHumidityDetectionAttributes:
         )
 
         thermostat = MagicMock()
+        # A bare MagicMock auto-creates any attribute access as a truthy Mock,
+        # so the water-temp learning gate must be pinned explicitly — otherwise
+        # getattr(thermostat, "water_temp_learning_gate_active", False) returns
+        # a Mock instead of the intended default, spuriously activating the
+        # learning_grace override.
+        thermostat.water_temp_learning_gate_active = False
 
         # Setup humidity detector in stabilizing state with resume time
         humidity_detector = MagicMock()
@@ -1108,6 +1228,12 @@ class TestStatusAttribute:
         )
 
         thermostat = MagicMock()
+        # A bare MagicMock auto-creates any attribute access as a truthy Mock,
+        # so the water-temp learning gate must be pinned explicitly — otherwise
+        # getattr(thermostat, "water_temp_learning_gate_active", False) returns
+        # a Mock instead of the intended default, spuriously activating the
+        # learning_grace override.
+        thermostat.water_temp_learning_gate_active = False
         thermostat._contact_sensor_handler = None
         thermostat._humidity_detector = None
         thermostat._night_setback_controller = None
@@ -1127,6 +1253,12 @@ class TestStatusAttribute:
         )
 
         thermostat = MagicMock()
+        # A bare MagicMock auto-creates any attribute access as a truthy Mock,
+        # so the water-temp learning gate must be pinned explicitly — otherwise
+        # getattr(thermostat, "water_temp_learning_gate_active", False) returns
+        # a Mock instead of the intended default, spuriously activating the
+        # learning_grace override.
+        thermostat.water_temp_learning_gate_active = False
 
         # Contact sensor closed and not paused
         contact_handler = MagicMock()
@@ -1153,6 +1285,12 @@ class TestStatusAttribute:
         from custom_components.adaptive_climate.adaptive.contact_sensors import ContactAction
 
         thermostat = MagicMock()
+        # A bare MagicMock auto-creates any attribute access as a truthy Mock,
+        # so the water-temp learning gate must be pinned explicitly — otherwise
+        # getattr(thermostat, "water_temp_learning_gate_active", False) returns
+        # a Mock instead of the intended default, spuriously activating the
+        # learning_grace override.
+        thermostat.water_temp_learning_gate_active = False
 
         # Contact sensor open and paused
         contact_handler = MagicMock()
@@ -1182,6 +1320,12 @@ class TestStatusAttribute:
         )
 
         thermostat = MagicMock()
+        # A bare MagicMock auto-creates any attribute access as a truthy Mock,
+        # so the water-temp learning gate must be pinned explicitly — otherwise
+        # getattr(thermostat, "water_temp_learning_gate_active", False) returns
+        # a Mock instead of the intended default, spuriously activating the
+        # learning_grace override.
+        thermostat.water_temp_learning_gate_active = False
 
         # Contact sensor open but not yet paused (in countdown)
         contact_handler = MagicMock()
@@ -1210,6 +1354,12 @@ class TestStatusAttribute:
         )
 
         thermostat = MagicMock()
+        # A bare MagicMock auto-creates any attribute access as a truthy Mock,
+        # so the water-temp learning gate must be pinned explicitly — otherwise
+        # getattr(thermostat, "water_temp_learning_gate_active", False) returns
+        # a Mock instead of the intended default, spuriously activating the
+        # learning_grace override.
+        thermostat.water_temp_learning_gate_active = False
         thermostat._contact_sensor_handler = None
 
         # Humidity detector paused
@@ -1237,6 +1387,12 @@ class TestStatusAttribute:
         )
 
         thermostat = MagicMock()
+        # A bare MagicMock auto-creates any attribute access as a truthy Mock,
+        # so the water-temp learning gate must be pinned explicitly — otherwise
+        # getattr(thermostat, "water_temp_learning_gate_active", False) returns
+        # a Mock instead of the intended default, spuriously activating the
+        # learning_grace override.
+        thermostat.water_temp_learning_gate_active = False
         thermostat._contact_sensor_handler = None
 
         # Humidity detector stabilizing
@@ -1266,6 +1422,12 @@ class TestStatusAttribute:
         from custom_components.adaptive_climate.adaptive.contact_sensors import ContactAction
 
         thermostat = MagicMock()
+        # A bare MagicMock auto-creates any attribute access as a truthy Mock,
+        # so the water-temp learning gate must be pinned explicitly — otherwise
+        # getattr(thermostat, "water_temp_learning_gate_active", False) returns
+        # a Mock instead of the intended default, spuriously activating the
+        # learning_grace override.
+        thermostat.water_temp_learning_gate_active = False
 
         # Contact sensor paused
         contact_handler = MagicMock()
@@ -1302,6 +1464,12 @@ class TestStatusAttribute:
         )
 
         thermostat = MagicMock()
+        # A bare MagicMock auto-creates any attribute access as a truthy Mock,
+        # so the water-temp learning gate must be pinned explicitly — otherwise
+        # getattr(thermostat, "water_temp_learning_gate_active", False) returns
+        # a Mock instead of the intended default, spuriously activating the
+        # learning_grace override.
+        thermostat.water_temp_learning_gate_active = False
         thermostat._contact_sensor_handler = None
 
         # Humidity detector stabilizing with countdown
@@ -1334,6 +1502,12 @@ class TestStatusAttributeIntegration:
         )
 
         thermostat = MagicMock()
+        # A bare MagicMock auto-creates any attribute access as a truthy Mock,
+        # so the water-temp learning gate must be pinned explicitly — otherwise
+        # getattr(thermostat, "water_temp_learning_gate_active", False) returns
+        # a Mock instead of the intended default, spuriously activating the
+        # learning_grace override.
+        thermostat.water_temp_learning_gate_active = False
         # Setup minimal thermostat in idle state
         thermostat._away_temp = 18.0
         thermostat._eco_temp = 19.0
@@ -1381,6 +1555,12 @@ class TestStatusAttributeIntegration:
         )
 
         thermostat = MagicMock()
+        # A bare MagicMock auto-creates any attribute access as a truthy Mock,
+        # so the water-temp learning gate must be pinned explicitly — otherwise
+        # getattr(thermostat, "water_temp_learning_gate_active", False) returns
+        # a Mock instead of the intended default, spuriously activating the
+        # learning_grace override.
+        thermostat.water_temp_learning_gate_active = False
         # Setup thermostat actively heating
         thermostat._away_temp = 18.0
         thermostat._eco_temp = 19.0
@@ -1429,6 +1609,12 @@ class TestStatusAttributeIntegration:
         from custom_components.adaptive_climate.adaptive.contact_sensors import ContactAction
 
         thermostat = MagicMock()
+        # A bare MagicMock auto-creates any attribute access as a truthy Mock,
+        # so the water-temp learning gate must be pinned explicitly — otherwise
+        # getattr(thermostat, "water_temp_learning_gate_active", False) returns
+        # a Mock instead of the intended default, spuriously activating the
+        # learning_grace override.
+        thermostat.water_temp_learning_gate_active = False
         # Setup thermostat paused by contact sensor
         thermostat._away_temp = 18.0
         thermostat._eco_temp = 19.0
@@ -1488,6 +1674,12 @@ class TestStatusAttributeIntegration:
         )
 
         thermostat = MagicMock()
+        # A bare MagicMock auto-creates any attribute access as a truthy Mock,
+        # so the water-temp learning gate must be pinned explicitly — otherwise
+        # getattr(thermostat, "water_temp_learning_gate_active", False) returns
+        # a Mock instead of the intended default, spuriously activating the
+        # learning_grace override.
+        thermostat.water_temp_learning_gate_active = False
         # Setup thermostat paused by humidity
         thermostat._away_temp = 18.0
         thermostat._eco_temp = 19.0
@@ -1546,6 +1738,12 @@ class TestStatusAttributeIntegration:
         mock_now = datetime(2024, 1, 15, 6, 30, 0)
         with patch("custom_components.adaptive_climate.managers.status_manager.dt_util.now", return_value=mock_now):
             thermostat = MagicMock()
+            # A bare MagicMock auto-creates any attribute access as a truthy Mock,
+            # so the water-temp learning gate must be pinned explicitly — otherwise
+            # getattr(thermostat, "water_temp_learning_gate_active", False) returns
+            # a Mock instead of the intended default, spuriously activating the
+            # learning_grace override.
+            thermostat.water_temp_learning_gate_active = False
             # Setup thermostat in night setback
             thermostat._away_temp = 18.0
             thermostat._eco_temp = 19.0
@@ -1610,6 +1808,12 @@ class TestStatusAttributeIntegration:
         mock_now = datetime(2024, 1, 15, 6, 30, 0)
         with patch("custom_components.adaptive_climate.managers.status_manager.dt_util.now", return_value=mock_now):
             thermostat = MagicMock()
+            # A bare MagicMock auto-creates any attribute access as a truthy Mock,
+            # so the water-temp learning gate must be pinned explicitly — otherwise
+            # getattr(thermostat, "water_temp_learning_gate_active", False) returns
+            # a Mock instead of the intended default, spuriously activating the
+            # learning_grace override.
+            thermostat.water_temp_learning_gate_active = False
             # Setup thermostat with multiple conditions
             thermostat._away_temp = 18.0
             thermostat._eco_temp = 19.0
@@ -1671,6 +1875,12 @@ class TestStatusAttributeIntegration:
         mock_now = datetime(2024, 1, 15, 6, 30, 0)
         with patch("custom_components.adaptive_climate.managers.status_manager.dt_util.now", return_value=mock_now):
             thermostat = MagicMock()
+            # A bare MagicMock auto-creates any attribute access as a truthy Mock,
+            # so the water-temp learning gate must be pinned explicitly — otherwise
+            # getattr(thermostat, "water_temp_learning_gate_active", False) returns
+            # a Mock instead of the intended default, spuriously activating the
+            # learning_grace override.
+            thermostat.water_temp_learning_gate_active = False
             # Setup thermostat in preheat mode
             thermostat._away_temp = 18.0
             thermostat._eco_temp = 19.0
@@ -1730,6 +1940,12 @@ class TestStatusAttributeIntegration:
         )
 
         thermostat = MagicMock()
+        # A bare MagicMock auto-creates any attribute access as a truthy Mock,
+        # so the water-temp learning gate must be pinned explicitly — otherwise
+        # getattr(thermostat, "water_temp_learning_gate_active", False) returns
+        # a Mock instead of the intended default, spuriously activating the
+        # learning_grace override.
+        thermostat.water_temp_learning_gate_active = False
         # Setup thermostat in settling phase
         thermostat._away_temp = 18.0
         thermostat._eco_temp = 19.0
@@ -1780,6 +1996,12 @@ class TestStatusAttributeIntegration:
         )
 
         thermostat = MagicMock()
+        # A bare MagicMock auto-creates any attribute access as a truthy Mock,
+        # so the water-temp learning gate must be pinned explicitly — otherwise
+        # getattr(thermostat, "water_temp_learning_gate_active", False) returns
+        # a Mock instead of the intended default, spuriously activating the
+        # learning_grace override.
+        thermostat.water_temp_learning_gate_active = False
         # Setup minimal thermostat
         thermostat._away_temp = 18.0
         thermostat._eco_temp = 19.0
@@ -1828,6 +2050,12 @@ class TestStatusAttributeIntegration:
         )
 
         thermostat = MagicMock()
+        # A bare MagicMock auto-creates any attribute access as a truthy Mock,
+        # so the water-temp learning gate must be pinned explicitly — otherwise
+        # getattr(thermostat, "water_temp_learning_gate_active", False) returns
+        # a Mock instead of the intended default, spuriously activating the
+        # learning_grace override.
+        thermostat.water_temp_learning_gate_active = False
         # Setup thermostat with humidity pause and resume time
         thermostat._away_temp = 18.0
         thermostat._eco_temp = 19.0
@@ -2104,6 +2332,12 @@ class TestStateAttributesNoSideEffects:
         # Build a minimal thermostat mock that has a milestone_tracker wired up
         # so the old code *would* fire a background task.
         thermostat = MagicMock()
+        # A bare MagicMock auto-creates any attribute access as a truthy Mock,
+        # so the water-temp learning gate must be pinned explicitly — otherwise
+        # getattr(thermostat, "water_temp_learning_gate_active", False) returns
+        # a Mock instead of the intended default, spuriously activating the
+        # learning_grace override.
+        thermostat.water_temp_learning_gate_active = False
         thermostat._control_output = 45.0
         thermostat.pid_control_i = 5.0
         thermostat._heater_controller = MagicMock()
