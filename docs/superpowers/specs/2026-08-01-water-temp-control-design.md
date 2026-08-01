@@ -95,7 +95,7 @@ Then: `dew_target = max(max(dew_points) + dew_point_margin, min_supply_temp)`.
 
 ## Interlocks (cooling)
 
-Immediately (bypassing `min_write_interval`) write the park value (`ramp_start`) and hold while:
+Immediately (bypassing `min_write_interval`) write the interlock park value — `max(ramp_start, current dew target)`, so an interlock can never LOWER the supply temperature — and hold while:
 - `condensation_sensor` is ON (a strapped-on pipe sensor is a measurement; computed dew point is an inference), or
 - any COOL zone reports an `open_window` or `contact_open` override (humid night air onto a cold slab is the top condensation event).
 
