@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 from typing import Any
 import logging
 
@@ -359,7 +360,9 @@ class LearningDataStore:
             return None
 
         _LOGGER.info("Loaded water temperature control state")
-        return water_temp_state
+        # Return a deep copy - callers must never be able to mutate our
+        # internal _data by mutating the dict they got back from load().
+        return copy.deepcopy(water_temp_state)
 
     async def async_save_water_temp_state(self, state: dict[str, Any]) -> None:
         """
@@ -379,6 +382,11 @@ class LearningDataStore:
             self._save_lock = asyncio.Lock()
 
         async with self._save_lock:
-            self._data["water_temp_state"] = state
+            # Store a deep copy - a debounced zone-save (schedule_zone_save)
+            # serializes self._data later on its own timer, and the caller may
+            # keep mutating `state` (e.g. an in-progress ramp record) after
+            # this call returns. Without a copy that later save could persist
+            # a torn/partially-mutated record.
+            self._data["water_temp_state"] = copy.deepcopy(state)
             await self._store.async_save(self._data)
             _LOGGER.debug("Saved water temperature control state")

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import copy
+import json
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -94,3 +96,55 @@ async def test_load_requires_a_hass_instance(store):
 
     with pytest.raises(RuntimeError, match="requires HomeAssistant instance"):
         await store.async_load_water_temp_state()
+
+
+@pytest.mark.asyncio
+async def test_save_requires_a_hass_instance(store):
+    store.hass = None
+
+    with pytest.raises(RuntimeError, match="requires HomeAssistant instance"):
+        await store.async_save_water_temp_state(SAMPLE_STATE)
+
+
+@pytest.mark.asyncio
+async def test_save_stores_a_deep_copy_not_a_live_reference(store):
+    """A debounced zone-save serializes `self._data` later — mutating the
+    caller's dict after save() returns must never affect what gets persisted.
+    """
+    mutable_state = copy.deepcopy(SAMPLE_STATE)
+
+    await store.async_save_water_temp_state(mutable_state)
+    mutable_state["cooling"]["ramp_start_value"] = 99.0
+    mutable_state["last_written"]["number.hp_cool_supply"] = 1.0
+
+    assert store._data["water_temp_state"] == SAMPLE_STATE
+
+
+@pytest.mark.asyncio
+async def test_load_returns_a_copy_not_the_live_internal_dict(store):
+    """Mutating the dict returned by load() must never corrupt internal state.
+
+    Saves an isolated deep copy of SAMPLE_STATE (never the shared module-level
+    object itself) so that, pre-fix, mutating `loaded` cannot leak into the
+    SAMPLE_STATE constant and mask the bug via a trivially-true self-reference
+    comparison.
+    """
+    await store.async_save_water_temp_state(copy.deepcopy(SAMPLE_STATE))
+
+    loaded = await store.async_load_water_temp_state()
+    loaded["cooling"]["ramp_start_value"] = 999.0
+    loaded["last_written"]["number.hp_cool_supply"] = 1.0
+
+    assert store._data["water_temp_state"] == SAMPLE_STATE
+    assert await store.async_load_water_temp_state() == SAMPLE_STATE
+
+
+@pytest.mark.asyncio
+async def test_saved_state_round_trips_through_json(store):
+    """Spec mandates ISO strings only — a stray datetime object leaking into
+    the state must fail this fast (json.dumps raises on non-serializable types).
+    """
+    await store.async_save_water_temp_state(SAMPLE_STATE)
+
+    saved = store._store.async_save.await_args.args[0]
+    assert json.loads(json.dumps(saved["water_temp_state"])) == SAMPLE_STATE
