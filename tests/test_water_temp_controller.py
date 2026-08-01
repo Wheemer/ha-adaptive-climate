@@ -416,5 +416,271 @@ class TestPersistenceState:
         assert controller.restored is False
 
 
+# =============================================================================
+# Write policy
+# =============================================================================
+
+
+def written_values(controller):
+    """Return the list of values passed to number.set_value."""
+    return [call.args[2]["value"] for call in controller.hass.services.async_call.call_args_list]
+
+
+def written_domains(controller):
+    return [call.args[0] for call in controller.hass.services.async_call.call_args_list]
+
+
+class TestWritePolicy:
+    @pytest.mark.asyncio
+    async def test_writes_the_computed_value_to_the_target_entity(self):
+        controller = build_controller(
+            cooling=cooling_config(),
+            zones_in_mode={"cool": {"living": {}}},
+            states={COOL_ENTITY: number_state(20.0)},
+        )
+        stub_scan(controller, dew_point=17.0)
+        controller._ramp[WATER_TEMP_MODE_COOLING].last_active = NOW - timedelta(hours=1)
+
+        await controller.async_apply(NOW)
+
+        controller.hass.services.async_call.assert_awaited_once()
+        domain, service, payload = controller.hass.services.async_call.await_args.args[:3]
+        assert (domain, service) == ("number", "set_value")
+        assert payload == {"entity_id": COOL_ENTITY, "value": 19.0}
+
+    @pytest.mark.asyncio
+    async def test_input_number_entities_use_the_input_number_domain(self):
+        entity = "input_number.hp_cool_supply"
+        controller = build_controller(
+            cooling=cooling_config(target_entity=entity),
+            zones_in_mode={"cool": {"living": {}}},
+            states={entity: number_state(20.0)},
+        )
+        stub_scan(controller, dew_point=17.0)
+        controller._ramp[WATER_TEMP_MODE_COOLING].last_active = NOW - timedelta(hours=1)
+
+        await controller.async_apply(NOW)
+
+        assert written_domains(controller) == ["input_number"]
+
+    @pytest.mark.asyncio
+    async def test_cooling_rounds_up_to_the_entity_step(self):
+        """Nearest-rounding would silently spend safety margin."""
+        controller = build_controller(
+            cooling=cooling_config(),
+            zones_in_mode={"cool": {"living": {}}},
+            states={COOL_ENTITY: number_state(20.0, step=0.5)},
+        )
+        stub_scan(controller, dew_point=17.1)  # 19.1 -> rounds up to 19.5
+        controller._ramp[WATER_TEMP_MODE_COOLING].last_active = NOW - timedelta(hours=1)
+
+        await controller.async_apply(NOW)
+
+        assert written_values(controller) == [19.5]
+
+    @pytest.mark.asyncio
+    async def test_heating_rounds_down_to_the_entity_step(self):
+        controller = build_controller(
+            heating=heating_config(target=35.3),
+            zones_in_mode={"heat": {"living": {}}},
+            states={HEAT_ENTITY: number_state(30.0, step=0.5)},
+        )
+        controller._ramp[WATER_TEMP_MODE_HEATING].last_active = NOW - timedelta(hours=1)
+
+        await controller.async_apply(NOW)
+
+        assert written_values(controller) == [35.0]
+
+    @pytest.mark.asyncio
+    async def test_missing_step_attribute_falls_back_to_half_a_degree(self):
+        state = number_state(20.0)
+        state.attributes = {"min": 15.0, "max": 45.0}
+        controller = build_controller(
+            cooling=cooling_config(),
+            zones_in_mode={"cool": {"living": {}}},
+            states={COOL_ENTITY: state},
+        )
+        stub_scan(controller, dew_point=17.1)
+        controller._ramp[WATER_TEMP_MODE_COOLING].last_active = NOW - timedelta(hours=1)
+
+        await controller.async_apply(NOW)
+
+        assert written_values(controller) == [19.5]
+
+    @pytest.mark.asyncio
+    async def test_value_is_clamped_to_the_entity_min_and_max(self):
+        controller = build_controller(
+            cooling=cooling_config(min_supply_temp=5.0),
+            zones_in_mode={"cool": {"living": {}}},
+            states={COOL_ENTITY: number_state(20.0, minimum=16.0, maximum=30.0)},
+        )
+        stub_scan(controller, dew_point=8.0)  # 10.0, below the entity min
+        controller._ramp[WATER_TEMP_MODE_COOLING].last_active = NOW - timedelta(hours=1)
+
+        await controller.async_apply(NOW)
+
+        assert written_values(controller) == [16.0]
+
+    @pytest.mark.asyncio
+    async def test_out_of_range_value_is_not_rewritten_every_cycle(self):
+        """Comparing pre-clamp values would re-issue identical calls forever."""
+        controller = build_controller(
+            cooling=cooling_config(min_supply_temp=5.0),
+            zones_in_mode={"cool": {"living": {}}},
+            states={COOL_ENTITY: number_state(20.0, minimum=16.0, maximum=30.0)},
+        )
+        controller._ramp[WATER_TEMP_MODE_COOLING].last_active = NOW - timedelta(hours=1)
+
+        stub_scan(controller, dew_point=8.0)
+        await controller.async_apply(NOW)
+        stub_scan(controller, dew_point=7.0)  # still clamps to 16.0
+        await controller.async_apply(NOW + timedelta(minutes=5))
+
+        assert written_values(controller) == [16.0]
+
+    @pytest.mark.asyncio
+    async def test_safe_direction_change_writes_immediately(self):
+        """Cooling upward is the safe direction — no dwell required."""
+        controller = build_controller(
+            cooling=cooling_config(),
+            zones_in_mode={"cool": {"living": {}}},
+            states={COOL_ENTITY: number_state(19.0)},
+        )
+        controller._ramp[WATER_TEMP_MODE_COOLING].last_active = NOW - timedelta(hours=1)
+
+        stub_scan(controller, dew_point=17.0)
+        await controller.async_apply(NOW)
+        stub_scan(controller, dew_point=19.0)  # 21.0, upward
+        await controller.async_apply(NOW + timedelta(minutes=5))
+
+        assert written_values(controller) == [19.0, 21.0]
+
+    @pytest.mark.asyncio
+    async def test_unsafe_direction_change_requires_the_dwell_window(self):
+        controller = build_controller(
+            cooling=cooling_config(),
+            zones_in_mode={"cool": {"living": {}}},
+            states={COOL_ENTITY: number_state(21.0)},
+        )
+        controller._ramp[WATER_TEMP_MODE_COOLING].last_active = NOW - timedelta(hours=1)
+
+        stub_scan(controller, dew_point=19.0)
+        await controller.async_apply(NOW)  # writes 21.0
+        stub_scan(controller, dew_point=17.0)  # 19.0, downward
+        await controller.async_apply(NOW + timedelta(minutes=5))
+        assert written_values(controller) == [21.0]  # held
+
+        await controller.async_apply(NOW + timedelta(minutes=40))  # > 1800 s
+        assert written_values(controller) == [21.0, 19.0]
+
+    @pytest.mark.asyncio
+    async def test_dwell_timer_restarts_when_the_pending_value_changes(self):
+        controller = build_controller(
+            cooling=cooling_config(),
+            zones_in_mode={"cool": {"living": {}}},
+            states={COOL_ENTITY: number_state(21.0)},
+        )
+        controller._ramp[WATER_TEMP_MODE_COOLING].last_active = NOW - timedelta(hours=1)
+
+        stub_scan(controller, dew_point=19.0)
+        await controller.async_apply(NOW)
+        stub_scan(controller, dew_point=17.0)
+        await controller.async_apply(NOW + timedelta(minutes=20))
+        stub_scan(controller, dew_point=16.0)  # different pending value, timer restarts
+        await controller.async_apply(NOW + timedelta(minutes=25))
+        await controller.async_apply(NOW + timedelta(minutes=40))  # only 15 min on the new value
+
+        assert written_values(controller) == [21.0]
+
+    @pytest.mark.asyncio
+    async def test_no_dither_at_a_step_boundary_under_rh_noise(self):
+        """+-1% RH noise around a rounding boundary must produce one write."""
+        controller = build_controller(
+            cooling=cooling_config(),
+            zones_in_mode={"cool": {"living": {}}},
+            states={COOL_ENTITY: number_state(19.5)},
+        )
+        controller._ramp[WATER_TEMP_MODE_COOLING].last_active = NOW - timedelta(hours=1)
+
+        for index, dew in enumerate([17.24, 17.26, 17.24, 17.26, 17.25]):
+            stub_scan(controller, dew_point=dew)
+            await controller.async_apply(NOW + timedelta(minutes=5 * index))
+
+        # All five readings round up to the same 19.5: exactly one write on the
+        # first cycle, then the dithering-prevention equality check (comparing
+        # post-clamp values) suppresses every identical repeat.
+        assert written_values(controller) == [19.5]
+
+    @pytest.mark.asyncio
+    async def test_inactive_mode_is_never_written_after_parking(self):
+        controller = build_controller(
+            cooling=cooling_config(),
+            zones_in_mode={"cool": {}},
+            states={COOL_ENTITY: number_state(22.0)},
+        )
+        stub_scan(controller, dew_point=17.0)
+
+        await controller.async_apply(NOW)
+        await controller.async_apply(NOW + timedelta(minutes=5))
+
+        assert written_values(controller) == []
+
+    @pytest.mark.asyncio
+    async def test_deactivation_parks_the_entity_at_ramp_start(self):
+        """Never leave the most aggressive value latched for the next season."""
+        zones = {"cool": {"living": {}}}
+        controller = build_controller(
+            cooling=cooling_config(),
+            zones_in_mode=zones,
+            states={COOL_ENTITY: number_state(19.0)},
+        )
+        stub_scan(controller, dew_point=17.0)
+        controller._ramp[WATER_TEMP_MODE_COOLING].last_active = NOW - timedelta(hours=1)
+        await controller.async_apply(NOW)
+
+        zones["cool"] = {}
+        await controller.async_apply(NOW + timedelta(minutes=5))
+
+        assert written_values(controller) == [19.0, 22.0]
+
+    @pytest.mark.asyncio
+    async def test_park_happens_exactly_once(self):
+        zones = {"cool": {"living": {}}}
+        controller = build_controller(
+            cooling=cooling_config(),
+            zones_in_mode=zones,
+            states={COOL_ENTITY: number_state(19.0)},
+        )
+        stub_scan(controller, dew_point=17.0)
+        controller._ramp[WATER_TEMP_MODE_COOLING].last_active = NOW - timedelta(hours=1)
+        await controller.async_apply(NOW)
+
+        zones["cool"] = {}
+        await controller.async_apply(NOW + timedelta(minutes=5))
+        await controller.async_apply(NOW + timedelta(minutes=10))
+
+        assert written_values(controller) == [19.0, 22.0]
+
+    @pytest.mark.asyncio
+    async def test_service_failure_is_logged_and_retried_next_cycle(self):
+        from homeassistant.exceptions import HomeAssistantError
+
+        controller = build_controller(
+            cooling=cooling_config(),
+            zones_in_mode={"cool": {"living": {}}},
+            states={COOL_ENTITY: number_state(21.0)},
+        )
+        stub_scan(controller, dew_point=17.0)
+        controller._ramp[WATER_TEMP_MODE_COOLING].last_active = NOW - timedelta(hours=1)
+        controller.hass.services.async_call = AsyncMock(side_effect=HomeAssistantError("boom"))
+
+        await controller.async_apply(NOW)
+        assert controller._last_written.get(COOL_ENTITY) is None
+
+        controller.hass.services.async_call = AsyncMock(return_value=None)
+        await controller.async_apply(NOW + timedelta(minutes=5))
+        assert controller._last_written[COOL_ENTITY] == pytest.approx(19.0)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
