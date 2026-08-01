@@ -1,9 +1,28 @@
 # CHANGELOG
 
 
+## v0.66.0 (2026-08-01)
+
+### Chores
+
+- Merge v0.65.1 release from origin/main
+  ([`d6550d5`](https://github.com/afewyards/ha-adaptive-climate/commit/d6550d5ead1478a016221cff077043fdf20c3a61))
+
+
 ## v0.65.1 (2026-06-20)
 
 ### Bug Fixes
+
+- **config**: Harden water_temp_control entity ID validation and close test gaps
+  ([`335dd8d`](https://github.com/afewyards/ha-adaptive-climate/commit/335dd8df801b5b968bf2857e1865372f030a1d28))
+
+- **config**: Reject unsafe cooling/heating ramp_start values
+  ([`a372cf8`](https://github.com/afewyards/ha-adaptive-climate/commit/a372cf891e37c98b2aa7bc24d50f0f03f18ba3ac))
+
+validate_water_temp_control now rejects cooling.ramp_start below cooling.min_supply_temp (would
+  park/interlock below the safety floor) and heating.ramp_start above the resolved heating target,
+  including the supply_temperature fallback path (would make the ramp a no-op). Equal-value
+  boundaries are accepted.
 
 - **mode-sync**: Conform turned-on zone to house mode instead of flipping it
   ([`35434e4`](https://github.com/afewyards/ha-adaptive-climate/commit/35434e4c6afae9abd82de810ccbd09083ca1c257))
@@ -32,6 +51,161 @@ Add an early return when the originating zone is sync-disabled (its mode is stil
   turn-on conform branch.
 
 Adds coordinator tests for a disabled originator on turn-on and on a deliberate switch.
+
+- **persistence**: Deep-copy water temp state on save and load
+  ([`c94ff92`](https://github.com/afewyards/ha-adaptive-climate/commit/c94ff92221bae0675892df92eb08a8337a01fbb8))
+
+- **tests**: Mock managers.water_temp_controller in test_central_controller legacy import
+  ([`78b251c`](https://github.com/afewyards/ha-adaptive-climate/commit/78b251c0b1799bcafa84dcd9ef13e886d65b7dcf))
+
+- **tests**: Stop test_mode_sync/test_vacation_mode from leaking sys.modules mocks across the suite
+  ([`04d177e`](https://github.com/afewyards/ha-adaptive-climate/commit/04d177e2802e1436a201a77789a738c3855e3cb2))
+
+- **watertemp**: Close three cooling-safety gaps in blind/ramp/interlock paths
+  ([`6b9fc49`](https://github.com/afewyards/ha-adaptive-climate/commit/6b9fc494e3bda6795584863ebd2e1997dfa0b4e7))
+
+Fixes three safety-critical bugs found in code review, all on the path that computes the cooling
+  supply-water temperature:
+
+- Blind dew-point path: the blind floor was replacing a degraded-but-real dew point estimate instead
+  of flooring it, letting a hot/humid room on fallback humidity command water colder than
+  condensation safety requires. - Ramp restart: a ramp interrupted mid-flight by a long idle gap
+  (season ends before it completes) left ramp_started stale, so reactivation after the gap skipped
+  the restart and landed the full step in one write instead of a fresh, gradual ramp. - Interlock
+  park: parking always used the bare configured ramp_start, which could be colder than the current
+  dew target and momentarily undercut condensation safety while an interlock was engaged (spec
+  amended: max(ramp_start, current dew target)).
+
+Also folds in two related findings: an interlock no longer lets its held duration fast-forward an
+  in-progress ramp once it clears (ramp_started and last_active are advanced by the interlock's
+  duration instead), and the one-shot interlock-cleared write flag is now reset at the top of every
+  compute cycle so it can't leak into a cycle where cooling itself goes inactive.
+
+Every fix ships with a test where the bound actually binds (dew point above the blind floor, a
+  genuinely stale ramp_started, an interlock dew target above ramp_start) per review finding that
+  prior fixtures were non-binding.
+
+- **watertemp**: Close write-path silent-failure and dwell-starvation gaps
+  ([`58eabec`](https://github.com/afewyards/ha-adaptive-climate/commit/58eabec2d40042fb19af37406e8dd8d9100bb03c))
+
+Fixes four review-wave2 should-fix findings on the water-temp write path:
+
+- entity_limits() fell back to the heating-shaped SUPPLY_TEMP_MIN/MAX (25/80) bounds when a target
+  entity had no state at all, silently clamping and writing into that range and poisoning
+  _last_written. Now the write is skipped entirely when the entity has no state; the 5-minute timer
+  retries once it loads. - A maximum-clamp (cooling) or minimum-clamp (heating) that lands a write
+  past the computed target in the unsafe direction was silent. Now it logs a rate-limited WARNING
+  and surfaces a new binding_constraint value, "entity_limit", via diagnostics. - The
+  unsafe-direction write dwell restarted its timer on every pending- value change, so a monotonic
+  ramp with a fine entity step could cross a new rounded value faster than min_write_interval and
+  never clear the dwell -- writes froze at their initial value forever. The dwell now anchors to
+  when the value first left the last-written band and only resets on a genuine direction reversal. -
+  Promoted DewPointScanner._blind_zone_reading to a public blind_zone_reading, since
+  water_temp_blind_zones.py already depends on it across module boundaries.
+
+Also adds the previously-missing coverage: a heating (upward) unsafe-direction dwell test, and a
+  state_attributes test pinning that the water-temp learning gate surfaces its own learning_grace
+  override independent of night setback (every existing test pinned this flag to False, so that
+  branch was untested).
+
+- **watertemp**: Contribute blind reading for unresolvable-mode zones
+  ([`e236e5e`](https://github.com/afewyards/ha-adaptive-climate/commit/e236e5e4db0eca4eb8348c395b016ace5475f3ee))
+
+- **watertemp**: Reset interlock state off-season, fix dwell noise starvation
+  ([`f989068`](https://github.com/afewyards/ha-adaptive-climate/commit/f9890681fe4cd228fc0c52277b71c29995c7ee99))
+
+Fixes a re-review blocker plus two structural/robustness findings:
+
+- BLOCKER: an interlock engaged right as cooling season ended never reset, freezing its "engaged at"
+  timestamp. On reactivation months later the entire off-season gap got misread as the interlock's
+  own held duration, advancing last_active to ~now and silently skipping the seasonal ramp restart
+  with a force-write past the dwell. The interlock state machine now resets whenever cooling itself
+  goes inactive. - The unsafe-direction write dwell compared each new candidate only against the
+  immediately preceding one, so any safe-direction noise blip restarted the timer -- a target that
+  was genuinely trending in the unsafe direction but noisy never accumulated enough held time and
+  froze after its first write. The dwell now tracks the running most-unsafe extreme since the
+  anchor; a reversal only counts once the value has moved back from that extreme by more than one
+  entity step. - Extracted the cooling interlock state machine into a new
+  managers/water_temp_interlocks.py (CoolingInterlockManager), and moved the entity-limit helpers
+  into water_temp_writer.py, to bring water_temp_controller.py back under the project's 800-line
+  ceiling.
+
+Every fix ships with a test where the bound actually binds: a control-vs-interlock pair proving both
+  resume identically on a fresh ramp after a simulated off-season, and an oscillating-but-trending
+  write sequence that starves under the old dwell logic and produces multiple writes under the fixed
+  one.
+
+### Documentation
+
+- Add water_temp_interlocks module to managers table
+  ([`b6d4832`](https://github.com/afewyards/ha-adaptive-climate/commit/b6d4832249eb6f902a3897eacab84e2165a038e5))
+
+- Document entity_limit binding, no-state write skip and interlock park floor
+  ([`ac8c549`](https://github.com/afewyards/ha-adaptive-climate/commit/ac8c549fc6953b1767e069bc07eea26058170572))
+
+- Document water temperature control architecture and tests
+  ([`e781d57`](https://github.com/afewyards/ha-adaptive-climate/commit/e781d57bd448e8579bdca3082126ac51fe72e5a0))
+
+- **plans**: Add water temperature control implementation plan
+  ([`73c6787`](https://github.com/afewyards/ha-adaptive-climate/commit/73c6787f49c740675aa0f1a80c30e24520e19c6e))
+
+- **specs**: Add water temperature control design spec
+  ([`7fef6a0`](https://github.com/afewyards/ha-adaptive-climate/commit/7fef6a099e43f502af92a3f4386f0ce63ea9881c))
+
+- **specs**: Amend water temp control spec after HVAC and architecture review
+  ([`d80dc62`](https://github.com/afewyards/ha-adaptive-climate/commit/d80dc62ae7304895e2b36857c59350c780dafa0b))
+
+- **specs**: Interlock park must never lower the supply temperature
+  ([`dba9866`](https://github.com/afewyards/ha-adaptive-climate/commit/dba9866c3285708479d6cc9c74d9d4642e1d7344))
+
+### Features
+
+- **config**: Add water_temp_control schema and cross-key validation
+  ([`826e1af`](https://github.com/afewyards/ha-adaptive-climate/commit/826e1afd400fab5087fcf4806bce72a73050dcf4))
+
+- **cooling**: Drive min_cooling_target from the dynamic supply temperature
+  ([`5b93231`](https://github.com/afewyards/ha-adaptive-climate/commit/5b932313e9a47210c227b1f6ee05080637191253))
+
+- **coordinator**: Add entity-state zone mode and temperature helpers
+  ([`ad84a04`](https://github.com/afewyards/ha-adaptive-climate/commit/ad84a04848b32d1bd4066c8fac4ac708dc23dda1))
+
+- **dewpoint**: Add pure Magnus-Tetens dew point helper
+  ([`575d103`](https://github.com/afewyards/ha-adaptive-climate/commit/575d1031554dc9cd6c104f86b7e473dbf1e573c9))
+
+- **learning**: Suppress cycle recording and undershoot during water temp ramps
+  ([`75a9b0d`](https://github.com/afewyards/ha-adaptive-climate/commit/75a9b0d2f20403889b664878d4c1521a13cc6036))
+
+- **persistence**: Store water temperature control state
+  ([`31b4f2a`](https://github.com/afewyards/ha-adaptive-climate/commit/31b4f2a8f87e2d5d9aeeb2ca37b25374cdfcb967))
+
+- **sensor**: Add water supply temperature diagnostic sensor
+  ([`dd681e6`](https://github.com/afewyards/ha-adaptive-climate/commit/dd681e64275e0748835c8132a0a4b5386075e33f))
+
+- **watertemp**: Add controller targets and ramp lifecycle
+  ([`4f58252`](https://github.com/afewyards/ha-adaptive-climate/commit/4f582522a40b87619bafc329e171d80623794a2f))
+
+- **watertemp**: Add dew point source scanner with EMA and guards
+  ([`88fc2f6`](https://github.com/afewyards/ha-adaptive-climate/commit/88fc2f64bc1059c184cade0d0475f2c5b98afc8f))
+
+- **watertemp**: Add interlocks, learning gate, timers and diagnostics
+  ([`b81a4c8`](https://github.com/afewyards/ha-adaptive-climate/commit/b81a4c899d03d2a8f6833050d670467128488ec7))
+
+- **watertemp**: Add safe-direction write policy with asymmetric dwell
+  ([`a4ac681`](https://github.com/afewyards/ha-adaptive-climate/commit/a4ac681592f68c671bf7a6b4a753f5c2a08f69f1))
+
+- **watertemp**: Wire controller into coordinator lifecycle and persistence
+  ([`aa1bd1f`](https://github.com/afewyards/ha-adaptive-climate/commit/aa1bd1ff9beaf09df159bb4fd57233cdf3951ca5))
+
+- **zones**: Expose humidity sensor and dew point exclusion in zone data
+  ([`3f3d072`](https://github.com/afewyards/ha-adaptive-climate/commit/3f3d07230bb6db64d036a2ba41e40db745fc98e6))
+
+### Testing
+
+- **coordinator**: Pin missing-entity-id guard and reject non-finite temps
+  ([`d60fc16`](https://github.com/afewyards/ha-adaptive-climate/commit/d60fc16908bf8adb9dadf00411da183ff2651d50))
+
+- **learning-gate**: Pin water_temp_learning_gate_active=False in mock thermostat/entity fixtures
+  ([`686fac7`](https://github.com/afewyards/ha-adaptive-climate/commit/686fac7064140acd1a69a9af304b9fa66d998862))
 
 
 ## v0.65.0 (2026-05-26)
