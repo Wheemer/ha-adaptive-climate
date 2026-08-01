@@ -39,14 +39,31 @@ from custom_components.adaptive_climate.const import (
 )
 
 
-def _cooling(entity: str = "number.hp_cool") -> dict:
-    return {CONF_WATER_TEMP_TARGET_ENTITY: entity}
+def _cooling(
+    entity: str = "number.hp_cool",
+    *,
+    min_supply_temp: float | None = None,
+    ramp_start: float | None = None,
+) -> dict:
+    block = {CONF_WATER_TEMP_TARGET_ENTITY: entity}
+    if min_supply_temp is not None:
+        block[CONF_WATER_TEMP_MIN_SUPPLY_TEMP] = min_supply_temp
+    if ramp_start is not None:
+        block[CONF_WATER_TEMP_RAMP_START] = ramp_start
+    return block
 
 
-def _heating(entity: str = "number.hp_heat", target: float | None = 35.0) -> dict:
+def _heating(
+    entity: str = "number.hp_heat",
+    target: float | None = 35.0,
+    *,
+    ramp_start: float | None = None,
+) -> dict:
     block = {CONF_WATER_TEMP_TARGET_ENTITY: entity}
     if target is not None:
         block[CONF_WATER_TEMP_TARGET] = target
+    if ramp_start is not None:
+        block[CONF_WATER_TEMP_RAMP_START] = ramp_start
     return block
 
 
@@ -151,6 +168,100 @@ def test_validator_accepts_distinct_target_entities():
         }
     }
     assert validate_water_temp_control(config) is config
+
+
+# --- cross-key validator: ramp_start vs. safety floor / target -------------
+
+
+def test_validator_rejects_cooling_ramp_start_below_min_supply_temp():
+    """A ramp_start below the safety floor would have parks/interlocks write
+    below min_supply_temp — the whole point of the floor."""
+    config = {
+        CONF_WATER_TEMP_CONTROL: {
+            CONF_WATER_TEMP_COOLING: _cooling(min_supply_temp=20.0, ramp_start=19.9),
+        }
+    }
+    with pytest.raises(vol.Invalid, match=r"cooling.ramp_start"):
+        validate_water_temp_control(config)
+
+
+def test_validator_accepts_cooling_ramp_start_equal_to_min_supply_temp():
+    """Equal-value boundary is accepted (>=, not strictly >)."""
+    config = {
+        CONF_WATER_TEMP_CONTROL: {
+            CONF_WATER_TEMP_COOLING: _cooling(min_supply_temp=20.0, ramp_start=20.0),
+        }
+    }
+    assert validate_water_temp_control(config) is config
+
+
+def test_validator_rejects_cooling_ramp_start_below_default_min_supply_temp():
+    """Rule must apply even when min_supply_temp relies on its schema default
+    (validator runs on raw dicts that may not have defaults applied yet)."""
+    config = {
+        CONF_WATER_TEMP_CONTROL: {
+            CONF_WATER_TEMP_COOLING: _cooling(ramp_start=DEFAULT_WATER_TEMP_MIN_SUPPLY_TEMP - 0.1),
+        }
+    }
+    with pytest.raises(vol.Invalid, match=r"cooling.ramp_start"):
+        validate_water_temp_control(config)
+
+
+def test_validator_rejects_heating_ramp_start_above_explicit_target():
+    """A ramp_start above the target would immediately clamp up — the ramp
+    never actually ramps."""
+    config = {
+        CONF_WATER_TEMP_CONTROL: {
+            CONF_WATER_TEMP_HEATING: _heating(target=30.0, ramp_start=30.1),
+        }
+    }
+    with pytest.raises(vol.Invalid, match=r"heating.ramp_start"):
+        validate_water_temp_control(config)
+
+
+def test_validator_accepts_heating_ramp_start_equal_to_target():
+    """Equal-value boundary is accepted (<=, not strictly <)."""
+    config = {
+        CONF_WATER_TEMP_CONTROL: {
+            CONF_WATER_TEMP_HEATING: _heating(target=30.0, ramp_start=30.0),
+        }
+    }
+    assert validate_water_temp_control(config) is config
+
+
+def test_validator_rejects_heating_ramp_start_above_supply_temperature_fallback():
+    """Rule must also cover the supply_temperature fallback path, not just an
+    explicit heating.target."""
+    config = {
+        CONF_SUPPLY_TEMPERATURE: 30.0,
+        CONF_WATER_TEMP_CONTROL: {
+            CONF_WATER_TEMP_HEATING: _heating(target=None, ramp_start=30.1),
+        },
+    }
+    with pytest.raises(vol.Invalid, match=r"heating.ramp_start"):
+        validate_water_temp_control(config)
+
+
+def test_validator_accepts_heating_ramp_start_equal_to_supply_temperature_fallback():
+    config = {
+        CONF_SUPPLY_TEMPERATURE: 30.0,
+        CONF_WATER_TEMP_CONTROL: {
+            CONF_WATER_TEMP_HEATING: _heating(target=None, ramp_start=30.0),
+        },
+    }
+    assert validate_water_temp_control(config) is config
+
+
+def test_validator_rejects_heating_ramp_start_above_default_target():
+    """Rule must apply even when ramp_start relies on its schema default
+    (validator runs on raw dicts that may not have defaults applied yet)."""
+    config = {
+        CONF_WATER_TEMP_CONTROL: {
+            CONF_WATER_TEMP_HEATING: _heating(target=DEFAULT_WATER_TEMP_HEATING_RAMP_START - 0.1),
+        }
+    }
+    with pytest.raises(vol.Invalid, match=r"heating.ramp_start"):
+        validate_water_temp_control(config)
 
 
 # --- voluptuous schema -----------------------------------------------------
@@ -389,4 +500,54 @@ def test_config_schema_wiring_catches_case_variant_duplicate_target_entities():
     }
 
     with pytest.raises(vol.Invalid, match="must differ"):
+        CONFIG_SCHEMA(config)
+
+
+def test_config_schema_wiring_catches_cooling_ramp_start_below_min_supply_temp():
+    """E2E: both fields individually pass WATER_TEMP_CONTROL_SCHEMA's per-field
+    ranges, so only the cross-key validate_water_temp_control() step catches
+    the unsafe combination through the full CONFIG_SCHEMA wiring."""
+    from custom_components.adaptive_climate import CONFIG_SCHEMA
+
+    if CONFIG_SCHEMA is None:
+        pytest.skip("Home Assistant not installed; schema is stubbed to None")
+
+    config = {
+        DOMAIN: {
+            CONF_WATER_TEMP_CONTROL: {
+                CONF_WATER_TEMP_COOLING: {
+                    CONF_WATER_TEMP_TARGET_ENTITY: "number.hp_cool",
+                    CONF_WATER_TEMP_MIN_SUPPLY_TEMP: 25.0,
+                    CONF_WATER_TEMP_RAMP_START: 20.0,
+                },
+            }
+        }
+    }
+
+    with pytest.raises(vol.Invalid, match=r"cooling.ramp_start"):
+        CONFIG_SCHEMA(config)
+
+
+def test_config_schema_wiring_catches_heating_ramp_start_above_target():
+    """E2E: both fields individually pass WATER_TEMP_CONTROL_SCHEMA's per-field
+    ranges, so only the cross-key validate_water_temp_control() step catches
+    the unsafe combination through the full CONFIG_SCHEMA wiring."""
+    from custom_components.adaptive_climate import CONFIG_SCHEMA
+
+    if CONFIG_SCHEMA is None:
+        pytest.skip("Home Assistant not installed; schema is stubbed to None")
+
+    config = {
+        DOMAIN: {
+            CONF_WATER_TEMP_CONTROL: {
+                CONF_WATER_TEMP_HEATING: {
+                    CONF_WATER_TEMP_TARGET_ENTITY: "number.hp_heat",
+                    CONF_WATER_TEMP_TARGET: 30.0,
+                    CONF_WATER_TEMP_RAMP_START: 35.0,
+                },
+            }
+        }
+    }
+
+    with pytest.raises(vol.Invalid, match=r"heating.ramp_start"):
         CONFIG_SCHEMA(config)

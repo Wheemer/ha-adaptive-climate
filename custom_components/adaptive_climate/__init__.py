@@ -199,13 +199,18 @@ def valid_notify_service(value: Any) -> str:
 def validate_water_temp_control(config: dict[str, Any]) -> dict[str, Any]:
     """Validate ``water_temp_control`` against sibling domain keys.
 
-    Runs as a domain-level ``vol.All`` wrapper because two rules reach outside
+    Runs as a domain-level ``vol.All`` wrapper because these rules reach outside
     ``WATER_TEMP_CONTROL_SCHEMA``:
 
     1. ``heating.target`` falls back to the domain-level ``supply_temperature``.
        Neither present is a configuration error.
     2. ``cooling.target_entity`` and ``heating.target_entity`` must differ —
        writing both halves to one entity would make the two controllers fight.
+    3. ``cooling.ramp_start`` must be >= ``cooling.min_supply_temp`` — a lower
+       ramp_start would have the ramp park/interlock below the safety floor.
+    4. ``heating.ramp_start`` must be <= the resolved heating target (explicit
+       or the ``supply_temperature`` fallback) — a higher ramp_start makes the
+       ramp a no-op (it would immediately clamp up to the target).
 
     Args:
         config: The validated ``adaptive_climate:`` domain config dict.
@@ -223,18 +228,43 @@ def validate_water_temp_control(config: dict[str, Any]) -> dict[str, Any]:
     cooling = water_temp.get(CONF_WATER_TEMP_COOLING)
     heating = water_temp.get(CONF_WATER_TEMP_HEATING)
 
-    if heating is not None and heating.get(CONF_WATER_TEMP_TARGET) is None:
-        fallback = config.get(CONF_SUPPLY_TEMPERATURE)
-        if fallback is None:
+    resolved_heating_target: float | None = None
+    if heating is not None:
+        explicit_target = heating.get(CONF_WATER_TEMP_TARGET)
+        if explicit_target is None:
+            fallback = config.get(CONF_SUPPLY_TEMPERATURE)
+            if fallback is None:
+                raise vol.Invalid(
+                    "water_temp_control.heating.target is required when the domain-level "
+                    "supply_temperature is not configured"
+                )
+            if not WATER_TEMP_HEATING_TARGET_MIN <= float(fallback) <= WATER_TEMP_HEATING_TARGET_MAX:
+                raise vol.Invalid(
+                    f"supply_temperature ({fallback}°C) is outside the water_temp_control heating "
+                    f"target range ({WATER_TEMP_HEATING_TARGET_MIN}-{WATER_TEMP_HEATING_TARGET_MAX}°C); "
+                    "set water_temp_control.heating.target explicitly"
+                )
+            resolved_heating_target = float(fallback)
+        else:
+            resolved_heating_target = float(explicit_target)
+
+    if cooling is not None:
+        min_supply_temp = float(cooling.get(CONF_WATER_TEMP_MIN_SUPPLY_TEMP, DEFAULT_WATER_TEMP_MIN_SUPPLY_TEMP))
+        cooling_ramp_start = float(cooling.get(CONF_WATER_TEMP_RAMP_START, DEFAULT_WATER_TEMP_COOLING_RAMP_START))
+        if cooling_ramp_start < min_supply_temp:
             raise vol.Invalid(
-                "water_temp_control.heating.target is required when the domain-level "
-                "supply_temperature is not configured"
+                f"water_temp_control.cooling.ramp_start ({cooling_ramp_start}°C) must be >= "
+                f"cooling.min_supply_temp ({min_supply_temp}°C); a lower ramp_start would park/"
+                "interlock below the safety floor"
             )
-        if not WATER_TEMP_HEATING_TARGET_MIN <= float(fallback) <= WATER_TEMP_HEATING_TARGET_MAX:
+
+    if heating is not None and resolved_heating_target is not None:
+        heating_ramp_start = float(heating.get(CONF_WATER_TEMP_RAMP_START, DEFAULT_WATER_TEMP_HEATING_RAMP_START))
+        if heating_ramp_start > resolved_heating_target:
             raise vol.Invalid(
-                f"supply_temperature ({fallback}°C) is outside the water_temp_control heating "
-                f"target range ({WATER_TEMP_HEATING_TARGET_MIN}-{WATER_TEMP_HEATING_TARGET_MAX}°C); "
-                "set water_temp_control.heating.target explicitly"
+                f"water_temp_control.heating.ramp_start ({heating_ramp_start}°C) must be <= the "
+                f"resolved heating target ({resolved_heating_target}°C); a higher ramp_start makes "
+                "the ramp a no-op"
             )
 
     if cooling is not None and heating is not None:
