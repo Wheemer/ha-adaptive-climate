@@ -335,3 +335,50 @@ class LearningDataStore:
             await self._store.async_save(self._data)
 
             _LOGGER.debug("Saved manifold state: %d manifolds", len(state))
+
+    async def async_load_water_temp_state(self) -> dict[str, Any] | None:
+        """
+        Load water temperature control state from HA Store.
+
+        Returns:
+            Dict with per-mode ramp state and last-written values, or None if
+            no state has been persisted yet.
+        """
+        if self.hass is None:
+            raise RuntimeError("async_load_water_temp_state requires HomeAssistant instance")
+
+        if self._store is None:
+            raise RuntimeError("Store not initialized - call async_load() first")
+
+        # Water temp state is stored at top level, mirroring manifold_state.
+        # This is additive: _validate_data only requires version + zones, so no
+        # STORAGE_VERSION bump is needed.
+        water_temp_state = self._data.get("water_temp_state")
+        if water_temp_state is None:
+            _LOGGER.debug("No water temperature state found in storage")
+            return None
+
+        _LOGGER.info("Loaded water temperature control state")
+        return water_temp_state
+
+    async def async_save_water_temp_state(self, state: dict[str, Any]) -> None:
+        """
+        Save water temperature control state to HA Store.
+
+        Args:
+            state: Dict with per-mode ramp state (ISO timestamps) and the last
+                value written to each target entity.
+        """
+        if self.hass is None:
+            raise RuntimeError("async_save_water_temp_state requires HomeAssistant instance")
+
+        if self._store is None:
+            raise RuntimeError("Store not initialized - call async_load() first")
+
+        if self._save_lock is None:
+            self._save_lock = asyncio.Lock()
+
+        async with self._save_lock:
+            self._data["water_temp_state"] = state
+            await self._store.async_save(self._data)
+            _LOGGER.debug("Saved water temperature control state")
