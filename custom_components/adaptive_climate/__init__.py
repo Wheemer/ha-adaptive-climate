@@ -591,6 +591,30 @@ async def async_send_notification(
         return False
 
 
+async def async_save_water_temp_state_now(hass: HomeAssistant) -> None:
+    """Persist the water temperature controller's state immediately.
+
+    Called on ``homeassistant_stop`` and on unload so a ramp survives a restart.
+    Never raises — a failed save must not block shutdown.
+
+    Args:
+        hass: Home Assistant instance.
+    """
+    domain_data = hass.data.get(DOMAIN, {})
+    coordinator = domain_data.get("coordinator")
+    learning_store = domain_data.get("learning_store")
+    controller = getattr(coordinator, "water_temp_controller", None) if coordinator else None
+
+    if controller is None or learning_store is None:
+        return
+
+    try:
+        await learning_store.async_save_water_temp_state(controller.get_state_for_persistence())
+        _LOGGER.info("Saved water temperature control state")
+    except Exception as err:  # shutdown must not fail on a bad save
+        _LOGGER.error("Failed to save water temperature state: %s", err)
+
+
 async def async_send_persistent_notification(
     hass: HomeAssistant,
     notification_id: str,
@@ -950,9 +974,9 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     # Store unsubscribe callbacks for cleanup during unload
     hass.data[DOMAIN]["unsub_callbacks"] = unsub_callbacks
 
-    # Register shutdown handler for manifold state persistence
-    async def _async_save_manifold_state_on_shutdown(event):
-        """Save manifold state on Home Assistant shutdown."""
+    # Register shutdown handler for manifold + water temperature state persistence
+    async def _async_save_state_on_shutdown(event):
+        """Save manifold and water temperature state on Home Assistant shutdown."""
         manifold_registry = hass.data.get(DOMAIN, {}).get("manifold_registry")
         learning_store = hass.data.get(DOMAIN, {}).get("learning_store")
 
@@ -964,8 +988,10 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
             except Exception as e:
                 _LOGGER.error("Failed to save manifold state on shutdown: %s", e)
 
+        await async_save_water_temp_state_now(hass)
+
     # Listen for HA stop event
-    shutdown_unsub = hass.bus.async_listen_once("homeassistant_stop", _async_save_manifold_state_on_shutdown)
+    shutdown_unsub = hass.bus.async_listen_once("homeassistant_stop", _async_save_state_on_shutdown)
     hass.data[DOMAIN]["shutdown_unsub"] = shutdown_unsub
 
     _LOGGER.info("Adaptive Climate integration setup complete")
@@ -1040,6 +1066,9 @@ async def async_unload(hass: HomeAssistant) -> bool:
             _LOGGER.info("Saved manifold state on unload: %d manifolds", len(manifold_state))
         except Exception as e:
             _LOGGER.error("Failed to save manifold state on unload: %s", e)
+
+    # Save water temperature state on unload
+    await async_save_water_temp_state_now(hass)
 
     # Unregister all services
     async_unregister_services(hass)

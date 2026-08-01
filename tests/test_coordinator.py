@@ -62,6 +62,7 @@ mock_managers = Mock()
 mock_managers.events = _events_mod
 sys.modules["managers"] = mock_managers
 sys.modules["managers.auto_mode_switching"] = Mock()
+sys.modules["managers.water_temp_controller"] = Mock()
 
 # Evict coordinator (and central_controller) from sys.modules so that the
 # subsequent `import coordinator` performs a FRESH import.  If

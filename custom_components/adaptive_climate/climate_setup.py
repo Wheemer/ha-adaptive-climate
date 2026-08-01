@@ -236,6 +236,25 @@ def build_dew_point_zone_data(config: ConfigType) -> dict[str, Any]:
     }
 
 
+async def async_restore_water_temp_state(learning_store: Any, controller: Any) -> None:
+    """Restore water temperature control state from the learning store.
+
+    Mirrors the manifold restore: the coordinator (and therefore the controller)
+    is created in ``async_setup`` before the store exists, so restoration happens
+    here, on first-zone setup.  ``restore_state`` is always called — even with
+    ``None`` — so the controller's ``_restored`` gate opens on first run too.
+
+    Args:
+        learning_store: The LearningDataStore singleton.
+        controller: WaterTempController instance, or None when not configured.
+    """
+    if controller is None:
+        return
+    water_temp_state = await learning_store.async_load_water_temp_state()
+    controller.restore_state(water_temp_state)
+    _LOGGER.info("Restored water temperature control state")
+
+
 async def async_setup_platform(hass: HomeAssistant, config: ConfigType, async_add_entities, discovery_info=None):
     """Set up the generic thermostat platform."""
     # Import here to avoid circular dependency
@@ -268,6 +287,11 @@ async def async_setup_platform(hass: HomeAssistant, config: ConfigType, async_ad
             if manifold_state:
                 manifold_registry.restore_state(manifold_state)
                 _LOGGER.info("Restored manifold state for %d manifolds", len(manifold_state))
+
+        # Restore water temperature control state (same reason as manifold above)
+        coordinator = hass.data[DOMAIN].get("coordinator")
+        if coordinator is not None:
+            await async_restore_water_temp_state(learning_store, coordinator.water_temp_controller)
 
         # M02: Trigger number platform discovery once so LearningWindowNumber exists.
         # Done here (first zone only) because number entities are system-wide, not

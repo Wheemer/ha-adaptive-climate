@@ -17,15 +17,29 @@ from homeassistant.helpers.event import async_call_later, async_track_state_chan
 # Relative imports are used in production (HA loads as a package); the absolute fallback
 # is for running tests without a full HA installation (e.g. pytest with stub modules).
 try:
-    from .const import DOMAIN
+    from .const import (
+        DOMAIN,
+        CONF_SUPPLY_TEMPERATURE,
+        CONF_WATER_TEMP_CONTROL,
+        CONF_WATER_TEMP_COOLING,
+        CONF_WATER_TEMP_HEATING,
+    )
     from .adaptive.sun_position import SunPositionCalculator, ORIENTATION_AZIMUTH
     from .managers.auto_mode_switching import AutoModeSwitchingManager
     from .managers.events import CycleEventDispatcher, CycleEventType, ZoneRegisteredEvent, ZoneUnregisteredEvent
+    from .managers.water_temp_controller import WaterTempController
 except ImportError:
-    from const import DOMAIN  # type: ignore[no-redef]
+    from const import (  # type: ignore[no-redef]
+        DOMAIN,
+        CONF_SUPPLY_TEMPERATURE,
+        CONF_WATER_TEMP_CONTROL,
+        CONF_WATER_TEMP_COOLING,
+        CONF_WATER_TEMP_HEATING,
+    )
     from adaptive.sun_position import SunPositionCalculator, ORIENTATION_AZIMUTH  # type: ignore[no-redef]
     from managers.auto_mode_switching import AutoModeSwitchingManager  # type: ignore[no-redef]
     from managers.events import CycleEventDispatcher, CycleEventType, ZoneRegisteredEvent, ZoneUnregisteredEvent  # type: ignore[no-redef]
+    from managers.water_temp_controller import WaterTempController  # type: ignore[no-redef]
 
 if TYPE_CHECKING:
     from datetime import datetime
@@ -72,6 +86,10 @@ class AdaptiveThermostatCoordinator(DataUpdateCoordinator):
             self._auto_mode_switching = AutoModeSwitchingManager(hass, auto_mode_config, self)
         else:
             self._auto_mode_switching: AutoModeSwitchingManager | None = None
+
+        # Water temperature control (if configured)
+        self._water_temp_controller: WaterTempController | None = None
+        self._setup_water_temp_control()
 
         # Always set up outdoor temp listener when weather entity exists
         # (used for shared EMA filter; also triggers auto mode switching if enabled)
@@ -341,6 +359,47 @@ class AdaptiveThermostatCoordinator(DataUpdateCoordinator):
         if supply_temp is None:
             return None
         return supply_temp + self.cooling_supply_margin
+
+    def _setup_water_temp_control(self) -> None:
+        """Construct the water temperature controller when configured.
+
+        Reads from ``self._config`` (the domain config passed to __init__) rather
+        than ``hass.data[DOMAIN]`` because ``supply_temperature`` is written to
+        hass.data only *after* the coordinator has been constructed.
+        """
+        water_temp_config = self._config.get(CONF_WATER_TEMP_CONTROL)
+        if not water_temp_config:
+            return
+        if not water_temp_config.get(CONF_WATER_TEMP_COOLING) and not water_temp_config.get(CONF_WATER_TEMP_HEATING):
+            return
+
+        self._water_temp_controller = WaterTempController(
+            self.hass,
+            self,
+            water_temp_config,
+            supply_temperature=self._config.get(CONF_SUPPLY_TEMPERATURE),
+        )
+        self._water_temp_controller.async_start()
+        _LOGGER.info("Water temperature control enabled")
+
+    @property
+    def water_temp_controller(self) -> WaterTempController | None:
+        """Return the water temperature controller, or None if not configured."""
+        return self._water_temp_controller
+
+    def water_temp_learning_gate(self, mode: str | None) -> bool:
+        """Return True while water-temp changes should suppress zone learning.
+
+        Args:
+            mode: The zone's HVAC mode ("heat"/"cool"), or None.
+
+        Returns:
+            True when the controller reports an active ramp or a recent large
+            write for that mode.
+        """
+        if self._water_temp_controller is None or mode is None:
+            return False
+        return self._water_temp_controller.learning_gate(mode)
 
     def register_zone(self, zone_id: str, zone_data: dict[str, Any]) -> None:
         """Register a zone with the coordinator.
@@ -867,6 +926,12 @@ class AdaptiveThermostatCoordinator(DataUpdateCoordinator):
             self._outdoor_temp_unsub()
             self._outdoor_temp_unsub = None
             _LOGGER.debug("Cancelled outdoor temperature listener")
+
+        # Cancel water temperature control timers
+        if self._water_temp_controller is not None:
+            self._water_temp_controller.async_cleanup()
+            self._water_temp_controller = None
+            _LOGGER.debug("Cleaned up water temperature controller")
 
 
 class ModeSync:
