@@ -9,6 +9,7 @@ holds for a stabilization window after the condition clears.
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING
 
@@ -19,6 +20,8 @@ if TYPE_CHECKING:
 
     from ..coordinator import AdaptiveThermostatCoordinator
     from .water_temp_controller import ModeRampState
+
+_LOGGER = logging.getLogger(__name__)
 
 
 class CoolingInterlockManager:
@@ -94,7 +97,14 @@ class CoolingInterlockManager:
         # write must land immediately rather than restart a fresh dwell
         # timer stacked on top of the wait we already just observed.
         self.just_cleared = True
-        self._advance_ramp(ramp, now)
+        duration = self._advance_ramp(ramp, now)
+        if duration is not None:
+            _LOGGER.info(
+                "Water temp control: cooling interlock cleared after %.0f min held, resuming normal computation",
+                duration.total_seconds() / 60.0,
+            )
+        else:
+            _LOGGER.info("Water temp control: cooling interlock cleared, resuming normal computation")
         return False
 
     def reset(self) -> None:
@@ -106,10 +116,17 @@ class CoolingInterlockManager:
         months later, the entire off-season gap would be read back as the
         interlock's own held duration, advancing ``last_active`` to ~now
         and masking the genuine idle gap that should restart the ramp.
+
+        Discards an in-progress stabilization window intentionally when
+        cooling deactivates mid-wait: the deactivation park has already
+        written ``ramp_start``, and if cooling resumes, the normal
+        unsafe-direction write dwell re-gates the way back down by the
+        same ~30 minutes regardless.
         """
         self._engaged = False
         self._cleared_at = None
         self._engaged_at = None
+        self.just_cleared = False
 
     @staticmethod
     def park_value(ramp_start: float, dew_target: float) -> float:
@@ -120,18 +137,25 @@ class CoolingInterlockManager:
         """
         return max(ramp_start, dew_target)
 
-    def _advance_ramp(self, ramp: ModeRampState, now: datetime) -> None:
-        """Skip ``ramp`` forward by the held duration since it engaged."""
+    def _advance_ramp(self, ramp: ModeRampState, now: datetime) -> timedelta | None:
+        """Skip ``ramp`` forward by the held duration since it engaged.
+
+        Returns:
+            The held duration, or None if the engagement time was never
+            recorded (defensive; ``_engaged`` and ``_engaged_at`` are always
+            set together, so this shouldn't happen in practice).
+        """
         engaged_at = self._engaged_at
         self._engaged_at = None
         if engaged_at is None:
-            return
+            return None
 
         duration = max(timedelta(0), now - engaged_at)
         if ramp.ramp_started is not None:
             ramp.ramp_started = min(ramp.ramp_started + duration, now)
         if ramp.last_active is not None:
             ramp.last_active = min(ramp.last_active + duration, now)
+        return duration
 
     def _condition_active(self) -> bool:
         """Return True while a raw interlock condition is present."""

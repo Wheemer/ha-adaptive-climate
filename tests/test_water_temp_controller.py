@@ -1232,6 +1232,43 @@ class TestInterlockSeasonalReset:
         assert ramp.ramp_started == later
         assert controller.binding[WATER_TEMP_MODE_COOLING] == WATER_TEMP_BINDING_RAMP
 
+    def test_interlock_clearing_logs_the_held_duration(self, caplog):
+        """R12 note #1: the operator-visible INFO log on the clearing
+        transition must name the duration that was credited to the ramp,
+        not just announce that clearing happened."""
+        states = {COOL_ENTITY: number_state(19.0), "binary_sensor.condensation": binary_state("on")}
+        controller = build_controller(
+            cooling=cooling_config(),
+            zones_in_mode={"cool": {"living": {"climate_entity_id": "climate.living"}}},
+            states=states,
+            condensation_sensor="binary_sensor.condensation",
+        )
+        stub_scan(controller, dew_point=14.0)
+        controller._ramp[WATER_TEMP_MODE_COOLING].last_active = NOW - timedelta(hours=1)
+        controller.compute_targets(NOW)  # interlock engages
+
+        states["binary_sensor.condensation"] = binary_state("off")
+        controller.compute_targets(NOW + timedelta(minutes=10))  # dwell starts
+        with caplog.at_level(logging.INFO):
+            controller.compute_targets(NOW + timedelta(minutes=45))  # clears this cycle
+
+        assert any(
+            "cooling interlock cleared" in record.message.lower() and "min" in record.message.lower()
+            for record in caplog.records
+        )
+
+    def test_interlock_reset_clears_the_just_cleared_flag_too(self):
+        """R12 note #3: reset() must be self-contained -- clearing
+        just_cleared itself rather than relying on the controller's
+        compute_targets() having already zeroed it first (a non-local
+        invariant the reviewer flagged as fragile)."""
+        controller = build_controller(cooling=cooling_config())
+        controller._interlock.just_cleared = True
+
+        controller._interlock.reset()
+
+        assert controller._interlock.just_cleared is False
+
 
 # =============================================================================
 # Learning gate
