@@ -51,7 +51,6 @@ from ..const import (
     WATER_TEMP_BINDING_TARGET,
     WATER_TEMP_BLIND_MIN_SUPPLY,
     WATER_TEMP_GATE_WRITE_DELTA,
-    WATER_TEMP_INTERLOCK_STABILIZATION_SECONDS,
     WATER_TEMP_MODE_COOLING,
     WATER_TEMP_MODE_HEATING,
     WATER_TEMP_SETTLING_MINUTES,
@@ -61,8 +60,15 @@ from ..const import (
 )
 from .heater_service_caller import HeaterServiceCaller
 from .water_temp_blind_zones import merge_unresolvable_zone_readings
+from .water_temp_interlocks import CoolingInterlockManager
 from .water_temp_sources import DewPointScan, DewPointScanner
-from .water_temp_writer import entity_limits, is_safe_direction, round_safe
+from .water_temp_writer import (
+    entity_limit_binds,
+    entity_limits,
+    is_safe_direction,
+    round_safe,
+    warn_entity_limited,
+)
 
 if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
@@ -108,10 +114,9 @@ class WaterTempController:
             hass: Home Assistant instance.
             coordinator: Zone registry, used for per-mode zone lookups.
             config: The validated ``water_temp_control`` sub-dict.
-            supply_temperature: Domain-level ``supply_temperature``, the fallback
-                for ``heating.target``.  Passed in rather than read from
-                ``hass.data`` because the coordinator is constructed before
-                ``hass.data[DOMAIN]["supply_temperature"]`` is written.
+            supply_temperature: Domain-level ``supply_temperature``, the
+                ``heating.target`` fallback. Passed in (not read from
+                ``hass.data``) since the coordinator predates that key.
         """
         self.hass = hass
         self._coordinator = coordinator
@@ -164,10 +169,9 @@ class WaterTempController:
         self._last_write_error: dict[str, datetime] = {}
         self._last_entity_limit_warned: dict[str, datetime] = {}
 
-        self._interlock_engaged = False
-        self._interlock_cleared_at: datetime | None = None
-        self._interlock_engaged_at: datetime | None = None
-        self._interlock_just_cleared = False
+        self._interlock = CoolingInterlockManager(
+            hass, coordinator, self._condensation_sensor, MODE_HVAC_STATE[WATER_TEMP_MODE_COOLING]
+        )
         self._started_unsub: CALLBACK_TYPE | None = None
         self._startup_unsub: CALLBACK_TYPE | None = None
         self._interval_unsub: CALLBACK_TYPE | None = None
@@ -226,9 +230,9 @@ class WaterTempController:
     def restore_state(self, state: dict[str, Any] | None) -> None:
         """Restore ramp and write state from persistence.
 
-        Guards against clock corrections by clamping any future timestamp to
-        "now" — a persisted ``ramp_started`` in the future would otherwise
-        produce a negative elapsed time.
+        Clamps any future timestamp to "now" to guard against clock
+        corrections — a persisted ``ramp_started`` in the future would
+        otherwise produce a negative elapsed time.
 
         Args:
             state: Previously persisted dict, or None on first run.
@@ -285,10 +289,10 @@ class WaterTempController:
 
         targets: dict[str, float] = {}
         self._last_scan = None
-        # Review finding #10: reset here (not only inside _cooling_interlocked)
-        # so a stale True never leaks into a cycle where cooling itself goes
-        # inactive before the interlock check is ever reached.
-        self._interlock_just_cleared = False
+        # #10: reset here too (not just inside evaluate()) so a stale True
+        # can't leak into a cycle where cooling goes inactive before the
+        # interlock is ever reached.
+        self._interlock.just_cleared = False
 
         if self._cooling is not None:
             value = self._compute_cooling(now)
@@ -306,21 +310,24 @@ class WaterTempController:
     def _compute_cooling(self, now: datetime) -> float | None:
         """Compute the effective cooling supply temperature, or None if inactive."""
         if not self._mode_is_active(WATER_TEMP_MODE_COOLING):
+            # N1 (BLOCKER): an interlock means nothing when no zone cools --
+            # reset it so a season-end interlock can't freeze its "engaged
+            # at" timestamp across the off-season.
+            self._interlock.reset()
             return None
 
         cooling = self._cooling or {}
         min_supply = float(cooling.get(CONF_WATER_TEMP_MIN_SUPPLY_TEMP, DEFAULT_WATER_TEMP_MIN_SUPPLY_TEMP))
         margin = float(cooling.get(CONF_WATER_TEMP_DEW_POINT_MARGIN, DEFAULT_WATER_TEMP_DEW_POINT_MARGIN))
 
-        # Scanned (and the blind floor resolved) *before* the interlock check:
-        # the interlock park value needs "current dew target" regardless of
-        # whether we're about to park instead of returning it directly.
+        # Scanned before the interlock check: the park value needs "current
+        # dew target" even when about to park instead of returning it.
         dew_target, binding, scan = self._resolve_cooling_dew_target(now, min_supply, margin)
         self._last_scan = scan
 
-        if self._cooling_interlocked(now):
+        if self._interlock.evaluate(now, self._ramp[WATER_TEMP_MODE_COOLING]):
             self._binding[WATER_TEMP_MODE_COOLING] = WATER_TEMP_BINDING_INTERLOCK
-            return self._interlock_park_value(dew_target)
+            return self._interlock.park_value(self._park_value(WATER_TEMP_MODE_COOLING), dew_target)
 
         self._update_ramp(WATER_TEMP_MODE_COOLING, now, seed_from_entity=False)
         ramp = self._ramp[WATER_TEMP_MODE_COOLING]
@@ -341,18 +348,15 @@ class WaterTempController:
     ) -> tuple[float, str, DewPointScan | None]:
         """Scan for the worst-case dew point and resolve the (unramped) target.
 
-        Shared by the normal compute path and the interlock park value, which
-        per spec must be ``max(ramp_start, current dew target)`` so an
-        interlock can never park the supply *below* what condensation safety
-        currently requires.
+        Shared by the normal compute path and the interlock park value
+        (``max(ramp_start, current dew target)``, so an interlock can never
+        park below what condensation safety currently requires).
 
-        The blind case is a FLOOR layered on top of whatever degraded dew
-        point was actually computed (fallback humidity paired with a real,
-        plausible temperature still produces a usable — if non-"real" —
-        ``scan.dew_point``); it must not flatly replace that value. A hot,
-        humid room reporting on fallback humidity can demand a target above
-        :data:`WATER_TEMP_BLIND_MIN_SUPPLY`. Only a scan with no dew point at
-        all (no sources whatsoever) falls back to the bare floor.
+        The blind case is a FLOOR on top of whatever degraded dew point was
+        actually computed (fallback humidity + a real temperature still
+        produces a usable, if non-"real", ``scan.dew_point``) — not a flat
+        replacement. Only a scan with no dew point at all falls back to the
+        bare floor.
         """
         scan = self._scanner.scan(now) if self._scanner is not None else None
         scan = merge_unresolvable_zone_readings(
@@ -375,16 +379,6 @@ class WaterTempController:
         if with_margin >= min_supply:
             return with_margin, WATER_TEMP_BINDING_DEW_POINT, scan
         return min_supply, WATER_TEMP_BINDING_MIN_SUPPLY, scan
-
-    def _interlock_park_value(self, dew_target: float) -> float:
-        """Return the interlock park value.
-
-        ``max(ramp_start, current dew target)`` — an interlock must never
-        park the supply *below* what condensation safety currently requires.
-        Only the deactivation park (:meth:`_park_value`) uses the bare
-        configured ``ramp_start``.
-        """
-        return max(self._park_value(WATER_TEMP_MODE_COOLING), dew_target)
 
     def _compute_heating(self, now: datetime) -> float | None:
         """Compute the effective heating supply temperature, or None if inactive."""
@@ -414,15 +408,17 @@ class WaterTempController:
     def _update_ramp(self, mode: str, now: datetime, seed_from_entity: bool) -> None:
         """Start (or restart) a ramp when the mode has been idle >= idle_days.
 
-        Restarts even when a ramp is already in progress ("stale" case): a
-        mode that goes inactive mid-ramp (e.g. season ends before the ramp
-        completed) leaves ``ramp_started`` frozen at its old value, since
-        this method isn't called at all while the mode is inactive. Without
-        restarting here, reactivation after the off-season computes an
-        enormous elapsed time against that stale timestamp, the ramp bound
-        stops binding on the very first cycle, and the full step lands in
-        one write instead of a fresh, gradual ramp. An idle gap shorter than
-        ``idle_days`` still preserves the in-progress ramp's own start time.
+        Restarts even mid-ramp ("stale" case): a mode that goes inactive
+        before the ramp completes leaves ``ramp_started`` frozen, since this
+        method isn't called while inactive. Without restarting, reactivation
+        computes an enormous elapsed time against that stale timestamp and
+        the full step lands in one write instead of a fresh ramp. A gap
+        shorter than ``idle_days`` preserves the in-progress ramp's own start.
+
+        By design, ANY gap >= ``idle_days`` between two calls restarts the
+        ramp — ``last_active`` only advances here, so the 5-minute production
+        timer makes a spurious restart (vs. a genuine idle gap) unreachable
+        in practice, and conservative either way.
         """
         ramp = self._ramp[mode]
 
@@ -522,7 +518,7 @@ class WaterTempController:
             if value is not None:
                 self._was_active[mode] = True
                 interlocked = mode == WATER_TEMP_MODE_COOLING and (
-                    self._binding.get(mode) == WATER_TEMP_BINDING_INTERLOCK or self._interlock_just_cleared
+                    self._binding.get(mode) == WATER_TEMP_BINDING_INTERLOCK or self._interlock.just_cleared
                 )
                 await self._async_write(mode, entity_id, value, now=now, force=interlocked)
                 continue
@@ -582,11 +578,13 @@ class WaterTempController:
         rounded = round_safe(value, mode, step)
         final = min(max(rounded, minimum), maximum)
 
-        if self._entity_limit_binds(mode, rounded, minimum, maximum):
+        if entity_limit_binds(mode, rounded, minimum, maximum):
             # Review finding #5: an entity limit that clamps *past* the
             # computed target in the unsafe direction must not be silent.
             self._binding[mode] = WATER_TEMP_BINDING_ENTITY_LIMIT
-            self._warn_entity_limited(mode, entity_id, rounded, final, now)
+            warn_entity_limited(
+                self._last_entity_limit_warned, mode, entity_id, rounded, final, now, WATER_TEMP_WARN_INTERVAL_SECONDS
+            )
 
         last = self._last_written.get(entity_id)
         # Compare the post-clamp, post-round value: comparing the raw value
@@ -601,20 +599,22 @@ class WaterTempController:
                 self._pending[entity_id] = (final, now)
                 return False
 
-            pending_value, drift_started_at = pending
-            if abs(final - pending_value) > 1e-6 and is_safe_direction(mode, final, pending_value):
-                # Direction reversal (e.g. RH noise bounced back toward the
-                # safe side) -- restart the dwell from this new candidate.
+            extreme_value, drift_started_at = pending
+            # Track the running most-unsafe extreme since the anchor, not
+            # just the previous candidate (finding N3) -- otherwise any
+            # safe-direction blip resets the dwell and a genuinely
+            # trending-but-noisy target never accumulates held time.
+            if is_safe_direction(mode, extreme_value, final):
+                extreme_value = final
+
+            # A reversal (finding #6/N3) only counts once final has moved
+            # back toward safety from that extreme by more than one entity
+            # step; anything less is noise, not a genuine direction change.
+            if is_safe_direction(mode, final, extreme_value) and abs(final - extreme_value) > step + 1e-9:
                 self._pending[entity_id] = (final, now)
                 return False
 
-            # Same-direction drift (e.g. a fine-stepped ramp continuing to
-            # descend/ascend): keep the ORIGINAL anchor so a value that
-            # crosses a new rounded step faster than min_write_interval
-            # doesn't restart the dwell forever (review finding #6) -- but
-            # track the latest candidate so the write that eventually lands
-            # uses the freshest value.
-            self._pending[entity_id] = (final, drift_started_at)
+            self._pending[entity_id] = (extreme_value, drift_started_at)
             if (now - drift_started_at).total_seconds() < self._min_write_interval:
                 return False
 
@@ -627,41 +627,9 @@ class WaterTempController:
         self._last_written[entity_id] = final
         return True
 
-    @staticmethod
-    def _entity_limit_binds(mode: str, rounded: float, minimum: float, maximum: float) -> bool:
-        """Return True when the entity's own min/max clamps *past* safety.
-
-        Cooling's unsafe direction is down, so only a ``maximum`` below the
-        computed target matters; heating's unsafe direction is up, so only
-        a ``minimum`` above the computed target matters (review finding #5;
-        mirrors :func:`~.water_temp_writer.is_safe_direction`). A clamp in
-        the *safe* direction (e.g. cooling's minimum forcing the value up)
-        is not flagged -- it can't undercut condensation safety.
-        """
-        if mode == WATER_TEMP_MODE_COOLING:
-            return maximum < rounded
-        return minimum > rounded
-
-    def _warn_entity_limited(self, mode: str, entity_id: str, desired: float, actual: float, now: datetime) -> None:
-        """Log a rate-limited WARNING when an entity limit clamps past the computed target."""
-        last = self._last_entity_limit_warned.get(entity_id)
-        if last is not None and (now - last).total_seconds() < WATER_TEMP_WARN_INTERVAL_SECONDS:
-            return
-        self._last_entity_limit_warned[entity_id] = now
-        _LOGGER.warning(
-            "Water temp control: %s cannot reach %.1f°C for %s (entity limit clamps to %.1f°C)",
-            entity_id,
-            desired,
-            mode,
-            actual,
-        )
-
     async def _async_call_set_value(self, entity_id: str, value: float, now: datetime) -> bool:
-        """Call ``set_value`` on the target entity, handling all error types.
-
-        Mirrors :class:`HeaterServiceCaller` error handling; failures are logged
-        (rate-limited) and simply retried on the next cycle.
-        """
+        """Call ``set_value`` on the target entity, retrying (rate-limited
+        error log) via :class:`HeaterServiceCaller`-style handling."""
         domain = HeaterServiceCaller.get_number_entity_domain(entity_id)
         try:
             await self.hass.services.async_call(
@@ -694,10 +662,7 @@ class WaterTempController:
     # ── timers ───────────────────────────────────────────────────────────────
 
     def async_start(self) -> None:
-        """Register the startup compute and the 5-minute recompute interval.
-
-        Synchronous by design so it can be called from ``coordinator.__init__``.
-        """
+        """Register the startup compute and 5-min recompute interval (sync, for ``coordinator.__init__``)."""
         self._started_unsub = self.hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STARTED, self._async_on_ha_started)
         self._interval_unsub = async_track_time_interval(
             self.hass,
@@ -732,104 +697,16 @@ class WaterTempController:
         except Exception:  # broad: keep the timer alive
             _LOGGER.exception("Water temp control: computation cycle failed")
 
-    # ── interlocks ───────────────────────────────────────────────────────────
-
-    def _cooling_interlocked(self, now: datetime) -> bool:
-        """Return True while cooling must hold at its park value.
-
-        True while the condensation sensor is ON or any COOL zone reports an
-        ``open_window`` / ``contact_open`` override, and for 30 minutes after
-        the last such condition clears.
-        """
-        active = self._interlock_condition_active()
-        self._interlock_just_cleared = False
-
-        if active:
-            if not self._interlock_engaged:
-                self._interlock_engaged_at = now
-            self._interlock_engaged = True
-            self._interlock_cleared_at = None
-            return True
-
-        if not self._interlock_engaged:
-            return False
-
-        if self._interlock_cleared_at is None:
-            self._interlock_cleared_at = now
-        elapsed = (now - self._interlock_cleared_at).total_seconds()
-        if elapsed < WATER_TEMP_INTERLOCK_STABILIZATION_SECONDS:
-            return True
-
-        self._interlock_engaged = False
-        self._interlock_cleared_at = None
-        # The 30-minute stabilization window just elapsed: per spec ("resume
-        # normal computation 30 min after the condition clears"), this cycle's
-        # write must land immediately rather than restart a fresh dwell timer
-        # stacked on top of the wait we already just observed.
-        self._interlock_just_cleared = True
-        self._advance_ramp_for_interlock(WATER_TEMP_MODE_COOLING, now)
-        _LOGGER.info("Water temp control: cooling interlock cleared, resuming normal computation")
-        return False
-
-    def _advance_ramp_for_interlock(self, mode: str, now: datetime) -> None:
-        """Skip the ramp forward by the interlock's held duration once it clears.
-
-        While interlocked the target is parked, not progressing toward the
-        dew target (review finding #8). Without this, the elapsed-time-based
-        ramp calculation would count the entire interlocked span as ramp
-        progress once normal computation resumes (a "fast forward" past days
-        the ramp never actually advanced), and a long-held interlock would
-        look exactly like a seasonal idle gap and spuriously restart the ramp
-        from scratch on the very next cycle.
-        """
-        engaged_at = self._interlock_engaged_at
-        self._interlock_engaged_at = None
-        if engaged_at is None:
-            return
-
-        duration = max(timedelta(0), now - engaged_at)
-        ramp = self._ramp[mode]
-        if ramp.ramp_started is not None:
-            ramp.ramp_started = min(ramp.ramp_started + duration, now)
-        if ramp.last_active is not None:
-            ramp.last_active = min(ramp.last_active + duration, now)
-
-    def _interlock_condition_active(self) -> bool:
-        """Return True while a raw interlock condition is present."""
-        if self._condensation_sensor:
-            state = self.hass.states.get(self._condensation_sensor)
-            if state is not None and state.state == "on":
-                return True
-
-        for zone_data in self._coordinator.get_zones_in_mode(MODE_HVAC_STATE[WATER_TEMP_MODE_COOLING]).values():
-            climate_entity_id = zone_data.get("climate_entity_id")
-            if not climate_entity_id:
-                continue
-            state = self.hass.states.get(climate_entity_id)
-            if state is None:
-                continue
-            status = state.attributes.get("status") or {}
-            for override in status.get("overrides", []) or []:
-                if override.get("type") in ("open_window", "contact_open"):
-                    return True
-
-        return False
-
     # ── learning gate ────────────────────────────────────────────────────────
 
     def learning_gate(self, mode: str | None) -> bool:
-        """Return True while learning must be suppressed for the given mode.
+        """Return True while learning must be suppressed for ``mode``.
 
-        Water-temperature changes move the plant gain under the adaptive
-        learner (zone gain ~ T_room - T_water); a multi-day ramp looks exactly
-        like the UndershootDetector failure signature.
-
-        Args:
-            mode: HVAC state ("heat"/"cool") or internal key ("heating"/"cooling").
-
-        Returns:
-            True while a ramp is active for that mode, or within one settling
-            window of a write that moved the value by >= 1.0 °C.
+        Water-temp changes move the plant gain under the adaptive learner
+        (zone gain ~ T_room - T_water); a multi-day ramp looks exactly like
+        the UndershootDetector failure signature. True while a ramp is
+        active for ``mode`` (HVAC state or internal key), or within one
+        settling window of a write that moved the value by >= 1.0 °C.
         """
         key = self._normalize_mode(mode)
         if key is None or key not in self.enabled_modes:

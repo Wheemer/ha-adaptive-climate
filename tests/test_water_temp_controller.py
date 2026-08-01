@@ -841,6 +841,42 @@ class TestWritePolicy:
         assert values[-1] < values[0]  # monotonically toward the safe-side floor, never frozen
 
     @pytest.mark.asyncio
+    async def test_oscillating_but_trending_target_does_not_starve_the_dwell(self):
+        """Review finding N3: comparing a new candidate against only the
+        immediately-preceding one (not the worst value seen since the
+        anchor) lets ANY safe-direction blip reset the dwell -- a target
+        that's genuinely trending in the unsafe direction but noisy (e.g.
+        dew point wobbling while trending down) then never accumulates 30
+        held minutes and freezes after its first write forever (verified:
+        a downward trend with a same-magnitude bounce every other sample
+        produces exactly one write under the old logic). Reversal must
+        instead require moving back from the running most-unsafe extreme
+        by more than one entity step, not just from the previous sample.
+        """
+        controller = build_controller(
+            cooling=cooling_config(min_supply_temp=1.0),
+            zones_in_mode={"cool": {"living": {}}},
+            states={COOL_ENTITY: number_state(21.0, step=0.5, minimum=1.0, maximum=45.0)},
+        )
+        controller._ramp[WATER_TEMP_MODE_COOLING].last_active = NOW - timedelta(hours=1)
+
+        stub_scan(controller, dew_point=19.0)  # 21.0 -- first write, no baseline
+        await controller.async_apply(NOW)
+
+        # Trend down (big step -1.0) with a noise bounce (+0.3) every other
+        # 5-min tick -- net progress every cycle, but each bounce is well
+        # under one entity step (0.5) from the running extreme so far.
+        dew_point = 18.0  # -> final 20.0
+        for tick in range(1, 17):  # 5..80 min
+            stub_scan(controller, dew_point=dew_point)
+            await controller.async_apply(NOW + timedelta(minutes=5 * tick))
+            dew_point += 0.3 if tick % 2 else -1.3
+
+        values = written_values(controller)
+        assert len(values) >= 3  # more than just the initial write + a single unfreeze
+        assert values[-1] < values[0]
+
+    @pytest.mark.asyncio
     async def test_no_dither_at_a_step_boundary_under_rh_noise(self):
         """+-1% RH noise around a rounding boundary must produce one write."""
         controller = build_controller(
@@ -1079,10 +1115,10 @@ class TestInterlocks:
     @pytest.mark.asyncio
     async def test_interlock_just_cleared_flag_does_not_leak_into_a_cycle_where_cooling_is_inactive(self):
         """Review finding #10: the one-shot force-write flag must be reset
-        at the top of every compute_targets() cycle, not only inside
-        _cooling_interlocked() -- which is never reached once cooling itself
-        goes inactive, and would otherwise leave a stale True flag lying
-        around indefinitely."""
+        at the top of every compute_targets() cycle, not only inside the
+        interlock manager's own evaluate() -- which is never reached once
+        cooling itself goes inactive, and would otherwise leave a stale
+        True flag lying around indefinitely."""
         zones = {"cool": {"living": {"climate_entity_id": "climate.living"}}}
         states = {COOL_ENTITY: number_state(19.0), "binary_sensor.condensation": binary_state("on")}
         controller = build_controller(
@@ -1098,12 +1134,12 @@ class TestInterlocks:
         states["binary_sensor.condensation"] = binary_state("off")
         await controller.async_apply(NOW + timedelta(minutes=10))  # dwell starts, still holding
         await controller.async_apply(NOW + timedelta(minutes=45))  # dwell elapses -> clears this cycle
-        assert controller._interlock_just_cleared is True
+        assert controller._interlock.just_cleared is True
 
         zones["cool"] = {}  # cooling itself goes inactive the very next cycle
         await controller.async_apply(NOW + timedelta(minutes=50))
 
-        assert controller._interlock_just_cleared is False
+        assert controller._interlock.just_cleared is False
 
     @pytest.mark.asyncio
     async def test_heating_is_unaffected_by_cooling_interlocks(self):
@@ -1125,6 +1161,76 @@ class TestInterlocks:
         await controller.async_apply(NOW)
 
         assert 35.0 in written_values(controller)
+
+
+# =============================================================================
+# N1 (BLOCKER): interlock state reset when cooling goes inactive
+# =============================================================================
+
+
+class TestInterlockSeasonalReset:
+    """N1 (BLOCKER): interlock bookkeeping must reset when cooling goes
+    inactive, or an interlock engaged right at season end freezes the
+    interlock's "engaged at" timestamp -- on reactivation months later the
+    off-season gap gets misread as the interlock's own held duration,
+    last_active gets advanced to ~now, and the seasonal ramp restart (task
+    #22 finding #2) is skipped with a force-write past the dwell.
+
+    Control-vs-interlock pair (mandatory per re-review): whether or not an
+    interlock happened to be engaged right when the season ended, both must
+    resume identically -- on a fresh ramp, from the configured ramp_start.
+    """
+
+    def _run_to_reactivation(self, *, interlock_at_end: bool):
+        zones = {"cool": {"living": {"climate_entity_id": "climate.living"}}}
+        states = {COOL_ENTITY: number_state(22.0), "binary_sensor.condensation": binary_state("off")}
+        controller = build_controller(
+            cooling=cooling_config(),
+            zones_in_mode=zones,
+            states=states,
+            condensation_sensor="binary_sensor.condensation",
+        )
+        stub_scan(controller, dew_point=14.0)  # dew_target floors to min_supply=18.0
+        controller._ramp[WATER_TEMP_MODE_COOLING].last_active = NOW - timedelta(hours=1)
+
+        controller.compute_targets(NOW)  # normal cooling cycle, no ramp needed yet
+
+        if interlock_at_end:
+            states["binary_sensor.condensation"] = binary_state("on")
+            controller.compute_targets(NOW + timedelta(minutes=5))  # interlock engages, still active
+
+        # Season ends: zones leave cool mode (and, incidentally, whatever
+        # triggered the interlock clears too).
+        states["binary_sensor.condensation"] = binary_state("off")
+        zones["cool"] = {}
+        controller.compute_targets(NOW + timedelta(minutes=10))  # one inactive cycle
+
+        zones["cool"] = {"living": {"climate_entity_id": "climate.living"}}
+
+        later = NOW + timedelta(days=180)
+        controller.compute_targets(later)  # reactivation
+        # A second cycle lets any stale interlock "clear" run its full
+        # course (30-min stabilization) -- the fullest exercise of the bug.
+        controller.compute_targets(later + timedelta(minutes=31))
+        return controller, later
+
+    def test_control_resumes_on_a_fresh_ramp_without_an_interlock(self):
+        controller, later = self._run_to_reactivation(interlock_at_end=False)
+
+        ramp = controller.ramp_state[WATER_TEMP_MODE_COOLING]
+        assert ramp.ramp_started == later
+        assert controller.binding[WATER_TEMP_MODE_COOLING] == WATER_TEMP_BINDING_RAMP
+
+    def test_interlock_at_season_end_still_resumes_on_the_same_fresh_ramp(self):
+        """The bound actually binds: without the N1 reset, this diverges
+        from the control -- the ~180-day off-season gap gets counted as
+        the interlock's held duration instead of a genuine idle gap, and
+        the seasonal ramp restart never fires."""
+        controller, later = self._run_to_reactivation(interlock_at_end=True)
+
+        ramp = controller.ramp_state[WATER_TEMP_MODE_COOLING]
+        assert ramp.ramp_started == later
+        assert controller.binding[WATER_TEMP_MODE_COOLING] == WATER_TEMP_BINDING_RAMP
 
 
 # =============================================================================
