@@ -12,6 +12,8 @@ from custom_components.adaptive_climate.const import (
     CONF_WATER_TEMP_CONTROL,
     CONF_WATER_TEMP_COOLING,
     CONF_WATER_TEMP_DEW_POINT_MARGIN,
+    CONF_WATER_TEMP_EXTRA_SENSORS,
+    CONF_WATER_TEMP_FALLBACK_HUMIDITY,
     CONF_WATER_TEMP_HEATING,
     CONF_WATER_TEMP_IDLE_DAYS,
     CONF_WATER_TEMP_MIN_SUPPLY_TEMP,
@@ -23,11 +25,15 @@ from custom_components.adaptive_climate.const import (
     DEFAULT_WATER_TEMP_COOLING_RAMP_RATE,
     DEFAULT_WATER_TEMP_COOLING_RAMP_START,
     DEFAULT_WATER_TEMP_DEW_POINT_MARGIN,
+    DEFAULT_WATER_TEMP_FALLBACK_HUMIDITY,
     DEFAULT_WATER_TEMP_HEATING_RAMP_RATE,
     DEFAULT_WATER_TEMP_HEATING_RAMP_START,
     DEFAULT_WATER_TEMP_IDLE_DAYS,
     DEFAULT_WATER_TEMP_MIN_SUPPLY_TEMP,
     DEFAULT_WATER_TEMP_MIN_WRITE_INTERVAL,
+    DOMAIN,
+    WATER_TEMP_HEATING_TARGET_MAX,
+    WATER_TEMP_HEATING_TARGET_MIN,
     WATER_TEMP_MODE_COOLING,
     WATER_TEMP_MODE_HEATING,
 )
@@ -53,6 +59,7 @@ def test_spec_defaults_are_the_user_approved_values():
     assert DEFAULT_WATER_TEMP_MIN_WRITE_INTERVAL == 1800
     assert DEFAULT_WATER_TEMP_MIN_SUPPLY_TEMP == 18.0
     assert DEFAULT_WATER_TEMP_DEW_POINT_MARGIN == 2.0
+    assert DEFAULT_WATER_TEMP_FALLBACK_HUMIDITY == 65
     assert DEFAULT_WATER_TEMP_COOLING_RAMP_START == 22.0
     assert DEFAULT_WATER_TEMP_COOLING_RAMP_RATE == 1.0
     assert DEFAULT_WATER_TEMP_HEATING_RAMP_START == 25.0
@@ -170,9 +177,10 @@ def test_schema_applies_all_defaults():
     cooling = result[CONF_WATER_TEMP_COOLING]
     assert cooling[CONF_WATER_TEMP_MIN_SUPPLY_TEMP] == DEFAULT_WATER_TEMP_MIN_SUPPLY_TEMP
     assert cooling[CONF_WATER_TEMP_DEW_POINT_MARGIN] == DEFAULT_WATER_TEMP_DEW_POINT_MARGIN
+    assert cooling[CONF_WATER_TEMP_FALLBACK_HUMIDITY] == DEFAULT_WATER_TEMP_FALLBACK_HUMIDITY
     assert cooling[CONF_WATER_TEMP_RAMP_START] == DEFAULT_WATER_TEMP_COOLING_RAMP_START
     assert cooling[CONF_WATER_TEMP_RAMP_RATE] == DEFAULT_WATER_TEMP_COOLING_RAMP_RATE
-    assert cooling["extra_sensors"] == []
+    assert cooling[CONF_WATER_TEMP_EXTRA_SENSORS] == []
     heating = result[CONF_WATER_TEMP_HEATING]
     assert heating[CONF_WATER_TEMP_RAMP_START] == DEFAULT_WATER_TEMP_HEATING_RAMP_START
     assert heating[CONF_WATER_TEMP_RAMP_RATE] == DEFAULT_WATER_TEMP_HEATING_RAMP_RATE
@@ -222,3 +230,163 @@ def test_schema_parses_extra_sensor_pairs():
     pair = result[CONF_WATER_TEMP_COOLING]["extra_sensors"][0]
     assert pair["humidity"] == "sensor.manifold_rh"
     assert pair["temperature"] == "sensor.manifold_temp"
+
+
+def test_extra_sensors_accepts_a_single_mapping_not_wrapped_in_a_list():
+    """YAML shorthand: one pair need not be wrapped in a list."""
+    from custom_components.adaptive_climate import WATER_TEMP_CONTROL_SCHEMA
+
+    if WATER_TEMP_CONTROL_SCHEMA is None:
+        pytest.skip("Home Assistant not installed; schema is stubbed to None")
+
+    result = WATER_TEMP_CONTROL_SCHEMA(
+        {
+            CONF_WATER_TEMP_COOLING: {
+                CONF_WATER_TEMP_TARGET_ENTITY: "number.hp_cool",
+                CONF_WATER_TEMP_EXTRA_SENSORS: {
+                    "humidity": "sensor.manifold_rh",
+                    "temperature": "sensor.manifold_temp",
+                },
+            }
+        }
+    )
+    pair = result[CONF_WATER_TEMP_COOLING][CONF_WATER_TEMP_EXTRA_SENSORS][0]
+    assert pair["humidity"] == "sensor.manifold_rh"
+    assert pair["temperature"] == "sensor.manifold_temp"
+
+
+# --- heating target range boundaries ---------------------------------------
+
+
+def test_heating_target_bounds_constants_are_20_to_45():
+    assert WATER_TEMP_HEATING_TARGET_MIN == 20.0
+    assert WATER_TEMP_HEATING_TARGET_MAX == 45.0
+
+
+def test_schema_accepts_heating_target_at_range_boundaries():
+    from custom_components.adaptive_climate import WATER_TEMP_CONTROL_SCHEMA
+
+    if WATER_TEMP_CONTROL_SCHEMA is None:
+        pytest.skip("Home Assistant not installed; schema is stubbed to None")
+
+    for boundary in (WATER_TEMP_HEATING_TARGET_MIN, WATER_TEMP_HEATING_TARGET_MAX):
+        result = WATER_TEMP_CONTROL_SCHEMA(
+            {
+                CONF_WATER_TEMP_HEATING: {
+                    CONF_WATER_TEMP_TARGET_ENTITY: "number.hp_heat",
+                    CONF_WATER_TEMP_TARGET: boundary,
+                }
+            }
+        )
+        assert result[CONF_WATER_TEMP_HEATING][CONF_WATER_TEMP_TARGET] == boundary
+
+
+def test_schema_rejects_heating_target_just_outside_range_boundaries():
+    from custom_components.adaptive_climate import WATER_TEMP_CONTROL_SCHEMA
+
+    if WATER_TEMP_CONTROL_SCHEMA is None:
+        pytest.skip("Home Assistant not installed; schema is stubbed to None")
+
+    for boundary in (WATER_TEMP_HEATING_TARGET_MIN - 0.1, WATER_TEMP_HEATING_TARGET_MAX + 0.1):
+        with pytest.raises(vol.Invalid):
+            WATER_TEMP_CONTROL_SCHEMA(
+                {
+                    CONF_WATER_TEMP_HEATING: {
+                        CONF_WATER_TEMP_TARGET_ENTITY: "number.hp_heat",
+                        CONF_WATER_TEMP_TARGET: boundary,
+                    }
+                }
+            )
+
+
+# --- _water_temp_entity_id ---------------------------------------------------
+
+
+def test_entity_id_validator_lowercases_the_value():
+    """Case must be normalized so distinctness checks can't be bypassed by case."""
+    from custom_components.adaptive_climate import _water_temp_entity_id
+
+    assert _water_temp_entity_id("number.HP") == "number.hp"
+    assert _water_temp_entity_id("Number.Hp_Cool") == "number.hp_cool"
+
+
+def test_entity_id_validator_rejects_non_string():
+    from custom_components.adaptive_climate import _water_temp_entity_id
+
+    with pytest.raises(vol.Invalid):
+        _water_temp_entity_id(123)
+
+
+@pytest.mark.parametrize(
+    "bad_entity_id",
+    [
+        "not_an_entity_id",
+        "number.",
+        ".hp",
+        "num ber.hp",
+        "number..hp",
+        "_number.hp",
+        "number._hp",
+        "number.hp_",
+        "number.hp__x",
+        "",
+    ],
+)
+def test_entity_id_validator_rejects_malformed_ids(bad_entity_id):
+    from custom_components.adaptive_climate import _water_temp_entity_id
+
+    with pytest.raises(vol.Invalid):
+        _water_temp_entity_id(bad_entity_id)
+
+
+# --- _water_temp_ensure_list -------------------------------------------------
+
+
+def test_ensure_list_wraps_a_single_mapping():
+    from custom_components.adaptive_climate import _water_temp_ensure_list
+
+    pair = {"humidity": "sensor.manifold_rh", "temperature": "sensor.manifold_temp"}
+    assert _water_temp_ensure_list(pair) == [pair]
+
+
+def test_ensure_list_passes_through_a_list():
+    from custom_components.adaptive_climate import _water_temp_ensure_list
+
+    assert _water_temp_ensure_list([1, 2]) == [1, 2]
+
+
+def test_ensure_list_treats_none_as_empty():
+    from custom_components.adaptive_climate import _water_temp_ensure_list
+
+    assert _water_temp_ensure_list(None) == []
+
+
+# --- E2E: CONFIG_SCHEMA wiring ----------------------------------------------
+
+
+def test_config_schema_wiring_catches_case_variant_duplicate_target_entities():
+    """E2E: CONFIG_SCHEMA must run WATER_TEMP_CONTROL_SCHEMA (which lowercases
+    entity IDs) before validate_water_temp_control's distinctness check fires,
+    so a case-variant duplicate (number.HP vs number.hp) is still caught by
+    the full vol.All(vol.Schema(...), validate_water_temp_control) wiring —
+    not just by calling either piece in isolation.
+    """
+    from custom_components.adaptive_climate import CONFIG_SCHEMA
+
+    if CONFIG_SCHEMA is None:
+        pytest.skip("Home Assistant not installed; schema is stubbed to None")
+
+    config = {
+        DOMAIN: {
+            CONF_WATER_TEMP_CONTROL: {
+                CONF_WATER_TEMP_COOLING: {CONF_WATER_TEMP_TARGET_ENTITY: "number.HP"},
+                CONF_WATER_TEMP_HEATING: {
+                    CONF_WATER_TEMP_TARGET_ENTITY: "number.hp",
+                    CONF_WATER_TEMP_TARGET: 35.0,
+                },
+            }
+        }
+    }
+
+    with pytest.raises(vol.Invalid, match="must differ"):
+        CONFIG_SCHEMA(config)

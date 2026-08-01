@@ -319,13 +319,18 @@ if HAS_HOMEASSISTANT:
         """Validate an entity ID, same semantics as ``cv.entity_id``.
 
         Defined locally (rather than using ``cv.entity_id`` directly) so the
-        validated value is the original string in every environment this
-        schema is exercised in.
+        validated value is stable in every environment this schema is
+        exercised in. Lowercases the input and enforces Home Assistant's real
+        entity-id pattern (``domain.object_id``, no leading/trailing/double
+        underscores) so that e.g. ``number.HP`` and ``number.hp`` normalize to
+        the same string — required for the cooling/heating ``target_entity``
+        distinctness check in ``validate_water_temp_control()`` to actually
+        catch case-variant duplicates.
         """
         if not isinstance(value, str):
             raise vol.Invalid(f"entity ID must be a string, got {type(value).__name__}")
-        domain, sep, object_id = value.partition(".")
-        if not sep or not domain or not object_id:
+        value = value.lower()
+        if not re.fullmatch(r"(?!.+__)(?!_)[\da-z_]+(?<!_)\.(?!_)[\da-z_]+(?<!_)", value):
             raise vol.Invalid(f"{value!r} is not a valid entity ID")
         return value
 
