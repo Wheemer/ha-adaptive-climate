@@ -11,10 +11,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 import logging
-import math
 from typing import TYPE_CHECKING, Any
 
+from homeassistant.const import EVENT_HOMEASSISTANT_STARTED
+from homeassistant.core import CALLBACK_TYPE
 from homeassistant.exceptions import HomeAssistantError, ServiceNotFound
+from homeassistant.helpers.event import async_call_later, async_track_time_interval
 from homeassistant.util import dt as dt_util
 
 from ..const import (
@@ -40,23 +42,25 @@ from ..const import (
     DEFAULT_WATER_TEMP_IDLE_DAYS,
     DEFAULT_WATER_TEMP_MIN_SUPPLY_TEMP,
     DEFAULT_WATER_TEMP_MIN_WRITE_INTERVAL,
-    DEFAULT_WATER_TEMP_STEP,
-    SUPPLY_TEMP_MAX,
-    SUPPLY_TEMP_MIN,
     WATER_TEMP_BINDING_BLIND,
     WATER_TEMP_BINDING_DEW_POINT,
+    WATER_TEMP_BINDING_INTERLOCK,
     WATER_TEMP_BINDING_MIN_SUPPLY,
     WATER_TEMP_BINDING_RAMP,
     WATER_TEMP_BINDING_TARGET,
     WATER_TEMP_BLIND_MIN_SUPPLY,
     WATER_TEMP_GATE_WRITE_DELTA,
+    WATER_TEMP_INTERLOCK_STABILIZATION_SECONDS,
     WATER_TEMP_MODE_COOLING,
     WATER_TEMP_MODE_HEATING,
     WATER_TEMP_SETTLING_MINUTES,
+    WATER_TEMP_STARTUP_DELAY_SECONDS,
+    WATER_TEMP_UPDATE_INTERVAL_SECONDS,
     WATER_TEMP_WARN_INTERVAL_SECONDS,
 )
 from .heater_service_caller import HeaterServiceCaller
 from .water_temp_sources import DewPointScan, DewPointScanner
+from .water_temp_writer import entity_limits, is_safe_direction, round_safe
 
 if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
@@ -156,6 +160,13 @@ class WaterTempController:
             WATER_TEMP_MODE_HEATING: False,
         }
         self._last_write_error: dict[str, datetime] = {}
+
+        self._interlock_engaged = False
+        self._interlock_cleared_at: datetime | None = None
+        self._interlock_just_cleared = False
+        self._started_unsub: CALLBACK_TYPE | None = None
+        self._startup_unsub: CALLBACK_TYPE | None = None
+        self._interval_unsub: CALLBACK_TYPE | None = None
 
     # ── introspection ────────────────────────────────────────────────────────
 
@@ -288,6 +299,10 @@ class WaterTempController:
         """Compute the effective cooling supply temperature, or None if inactive."""
         if not self._mode_is_active(WATER_TEMP_MODE_COOLING):
             return None
+
+        if self._cooling_interlocked(now):
+            self._binding[WATER_TEMP_MODE_COOLING] = WATER_TEMP_BINDING_INTERLOCK
+            return self._park_value(WATER_TEMP_MODE_COOLING)
 
         cooling = self._cooling or {}
         min_supply = float(cooling.get(CONF_WATER_TEMP_MIN_SUPPLY_TEMP, DEFAULT_WATER_TEMP_MIN_SUPPLY_TEMP))
@@ -444,7 +459,10 @@ class WaterTempController:
             value = targets.get(mode)
             if value is not None:
                 self._was_active[mode] = True
-                await self._async_write(mode, entity_id, value, now=now)
+                interlocked = mode == WATER_TEMP_MODE_COOLING and (
+                    self._binding.get(mode) == WATER_TEMP_BINDING_INTERLOCK or self._interlock_just_cleared
+                )
+                await self._async_write(mode, entity_id, value, now=now, force=interlocked)
                 continue
 
             if self._was_active[mode]:
@@ -488,8 +506,8 @@ class WaterTempController:
         Returns:
             True when a service call was issued and accepted.
         """
-        minimum, maximum, step = self._entity_limits(entity_id)
-        final = min(max(self._round_safe(value, mode, step), minimum), maximum)
+        minimum, maximum, step = entity_limits(self.hass.states.get(entity_id))
+        final = min(max(round_safe(value, mode, step), minimum), maximum)
 
         last = self._last_written.get(entity_id)
         # Compare the post-clamp, post-round value: comparing the raw value
@@ -498,7 +516,7 @@ class WaterTempController:
             self._pending.pop(entity_id, None)
             return False
 
-        if not force and last is not None and not self._is_safe_direction(mode, final, last):
+        if not force and last is not None and not is_safe_direction(mode, final, last):
             pending = self._pending.get(entity_id)
             if pending is None or abs(pending[0] - final) > 1e-6:
                 self._pending[entity_id] = (final, now)
@@ -514,49 +532,6 @@ class WaterTempController:
             self._gate_until[mode] = now + timedelta(minutes=WATER_TEMP_SETTLING_MINUTES)
         self._last_written[entity_id] = final
         return True
-
-    @staticmethod
-    def _is_safe_direction(mode: str, new_value: float, last_value: float) -> bool:
-        """Return True when the change moves in the condensation-safe direction.
-
-        Cooling: warmer water is safer (up).  Heating: cooler water is safer (down).
-        """
-        if mode == WATER_TEMP_MODE_COOLING:
-            return new_value > last_value
-        return new_value < last_value
-
-    @staticmethod
-    def _round_safe(value: float, mode: str, step: float) -> float:
-        """Round to the entity step, always toward the safe side."""
-        if step <= 0:
-            return round(value, 3)
-        if mode == WATER_TEMP_MODE_COOLING:
-            return round(math.ceil(value / step - 1e-9) * step, 3)
-        return round(math.floor(value / step + 1e-9) * step, 3)
-
-    def _entity_limits(self, entity_id: str) -> tuple[float, float, float]:
-        """Return the target entity's (min, max, step), with safe fallbacks."""
-        state = self.hass.states.get(entity_id)
-        if state is None:
-            return SUPPLY_TEMP_MIN, SUPPLY_TEMP_MAX, DEFAULT_WATER_TEMP_STEP
-
-        attributes = state.attributes or {}
-        step = self._coerce(attributes.get("step"), DEFAULT_WATER_TEMP_STEP)
-        if step <= 0:
-            step = DEFAULT_WATER_TEMP_STEP
-        minimum = self._coerce(attributes.get("min"), SUPPLY_TEMP_MIN)
-        maximum = self._coerce(attributes.get("max"), SUPPLY_TEMP_MAX)
-        if minimum > maximum:
-            minimum, maximum = maximum, minimum
-        return minimum, maximum, step
-
-    @staticmethod
-    def _coerce(value: Any, default: float) -> float:
-        """Coerce an attribute to float, falling back to a default."""
-        try:
-            return float(value)
-        except (TypeError, ValueError):
-            return default
 
     async def _async_call_set_value(self, entity_id: str, value: float, now: datetime) -> bool:
         """Call ``set_value`` on the target entity, handling all error types.
@@ -592,3 +567,205 @@ class WaterTempController:
             return
         self._last_write_error[entity_id] = now
         _LOGGER.error("Water temp control: failed to write %s — " + message, entity_id, *args)
+
+    # ── timers ───────────────────────────────────────────────────────────────
+
+    def async_start(self) -> None:
+        """Register the startup compute and the 5-minute recompute interval.
+
+        Synchronous by design so it can be called from ``coordinator.__init__``.
+        """
+        self._started_unsub = self.hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STARTED, self._async_on_ha_started)
+        self._interval_unsub = async_track_time_interval(
+            self.hass,
+            self._async_timer_tick,
+            timedelta(seconds=WATER_TEMP_UPDATE_INTERVAL_SECONDS),
+        )
+        _LOGGER.debug("Water temp control: timers registered")
+
+    def async_cleanup(self) -> None:
+        """Cancel every registered listener.  Called from coordinator cleanup."""
+        for name in ("_started_unsub", "_startup_unsub", "_interval_unsub"):
+            unsub = getattr(self, name)
+            if unsub is not None:
+                unsub()
+                setattr(self, name, None)
+        _LOGGER.debug("Water temp control: timers cancelled")
+
+    async def _async_on_ha_started(self, _event: Any) -> None:
+        """Schedule the first computation after a short startup delay."""
+        self._started_unsub = None
+        self._startup_unsub = async_call_later(self.hass, WATER_TEMP_STARTUP_DELAY_SECONDS, self._async_startup_compute)
+
+    async def _async_startup_compute(self, _now: Any) -> None:
+        """Run the first computation once zones have registered and state restored."""
+        self._startup_unsub = None
+        await self._async_timer_tick(None)
+
+    async def _async_timer_tick(self, _now: Any) -> None:
+        """Timer body — one bad cycle must never kill the interval."""
+        try:
+            await self.async_apply(self._utcnow())
+        except Exception:  # broad: keep the timer alive
+            _LOGGER.exception("Water temp control: computation cycle failed")
+
+    # ── interlocks ───────────────────────────────────────────────────────────
+
+    def _cooling_interlocked(self, now: datetime) -> bool:
+        """Return True while cooling must hold at its park value.
+
+        True while the condensation sensor is ON or any COOL zone reports an
+        ``open_window`` / ``contact_open`` override, and for 30 minutes after
+        the last such condition clears.
+        """
+        active = self._interlock_condition_active()
+        self._interlock_just_cleared = False
+
+        if active:
+            self._interlock_engaged = True
+            self._interlock_cleared_at = None
+            return True
+
+        if not self._interlock_engaged:
+            return False
+
+        if self._interlock_cleared_at is None:
+            self._interlock_cleared_at = now
+        elapsed = (now - self._interlock_cleared_at).total_seconds()
+        if elapsed < WATER_TEMP_INTERLOCK_STABILIZATION_SECONDS:
+            return True
+
+        self._interlock_engaged = False
+        self._interlock_cleared_at = None
+        # The 30-minute stabilization window just elapsed: per spec ("resume
+        # normal computation 30 min after the condition clears"), this cycle's
+        # write must land immediately rather than restart a fresh dwell timer
+        # stacked on top of the wait we already just observed.
+        self._interlock_just_cleared = True
+        _LOGGER.info("Water temp control: cooling interlock cleared, resuming normal computation")
+        return False
+
+    def _interlock_condition_active(self) -> bool:
+        """Return True while a raw interlock condition is present."""
+        if self._condensation_sensor:
+            state = self.hass.states.get(self._condensation_sensor)
+            if state is not None and state.state == "on":
+                return True
+
+        for zone_data in self._coordinator.get_zones_in_mode(MODE_HVAC_STATE[WATER_TEMP_MODE_COOLING]).values():
+            climate_entity_id = zone_data.get("climate_entity_id")
+            if not climate_entity_id:
+                continue
+            state = self.hass.states.get(climate_entity_id)
+            if state is None:
+                continue
+            status = state.attributes.get("status") or {}
+            for override in status.get("overrides", []) or []:
+                if override.get("type") in ("open_window", "contact_open"):
+                    return True
+
+        return False
+
+    # ── learning gate ────────────────────────────────────────────────────────
+
+    def learning_gate(self, mode: str | None) -> bool:
+        """Return True while learning must be suppressed for the given mode.
+
+        Water-temperature changes move the plant gain under the adaptive
+        learner (zone gain ~ T_room - T_water); a multi-day ramp looks exactly
+        like the UndershootDetector failure signature.
+
+        Args:
+            mode: HVAC state ("heat"/"cool") or internal key ("heating"/"cooling").
+
+        Returns:
+            True while a ramp is active for that mode, or within one settling
+            window of a write that moved the value by >= 1.0 °C.
+        """
+        key = self._normalize_mode(mode)
+        if key is None or key not in self.enabled_modes:
+            return False
+
+        if self._ramp[key].ramp_started is not None:
+            return True
+
+        until = self._gate_until.get(key)
+        return until is not None and self._utcnow() < until
+
+    @staticmethod
+    def _normalize_mode(mode: str | None) -> str | None:
+        """Map an HVAC state or internal key to an internal mode key."""
+        if mode in (WATER_TEMP_MODE_COOLING, WATER_TEMP_MODE_HEATING):
+            return mode
+        if mode == "cool":
+            return WATER_TEMP_MODE_COOLING
+        if mode == "heat":
+            return WATER_TEMP_MODE_HEATING
+        return None
+
+    # ── diagnostics ──────────────────────────────────────────────────────────
+
+    def diagnostics(self) -> dict[str, Any]:
+        """Return the diagnostic sensor payload."""
+        mode: str | None = None
+        for candidate in (WATER_TEMP_MODE_COOLING, WATER_TEMP_MODE_HEATING):
+            if candidate in self._effective:
+                mode = candidate
+                break
+
+        if mode is None:
+            return {
+                "mode": None,
+                "effective": None,
+                "dew_point": self._last_scan.dew_point if self._last_scan else None,
+                "binding_constraint": None,
+                "ramp_active": False,
+                "days_remaining": None,
+                "worst_source": self._last_scan.worst_source if self._last_scan else None,
+            }
+
+        ramp = self._ramp[mode]
+        return {
+            "mode": mode,
+            "effective": self._effective.get(mode),
+            "dew_point": self._last_scan.dew_point if self._last_scan else None,
+            "binding_constraint": self._binding.get(mode),
+            "ramp_active": ramp.ramp_started is not None,
+            "days_remaining": self._days_remaining(mode),
+            "worst_source": self._last_scan.worst_source if self._last_scan else None,
+        }
+
+    def _days_remaining(self, mode: str) -> float | None:
+        """Return days left on an active ramp, or None."""
+        ramp = self._ramp[mode]
+        if ramp.ramp_started is None:
+            return None
+        current = self._effective.get(mode)
+        if current is None:
+            return None
+
+        config = self._heating if mode == WATER_TEMP_MODE_HEATING else self._cooling
+        default_rate = (
+            DEFAULT_WATER_TEMP_HEATING_RAMP_RATE
+            if mode == WATER_TEMP_MODE_HEATING
+            else DEFAULT_WATER_TEMP_COOLING_RAMP_RATE
+        )
+        rate = float((config or {}).get(CONF_WATER_TEMP_RAMP_RATE, default_rate))
+        if rate <= 0:
+            return None
+
+        if mode == WATER_TEMP_MODE_HEATING:
+            if self._heating_target is None:
+                return None
+            remaining = self._heating_target - current
+        else:
+            floor = float((config or {}).get(CONF_WATER_TEMP_MIN_SUPPLY_TEMP, DEFAULT_WATER_TEMP_MIN_SUPPLY_TEMP))
+            dew_target = floor
+            if self._last_scan is not None and self._last_scan.dew_point is not None and not self._last_scan.blind:
+                margin = float(
+                    (config or {}).get(CONF_WATER_TEMP_DEW_POINT_MARGIN, DEFAULT_WATER_TEMP_DEW_POINT_MARGIN)
+                )
+                dew_target = max(self._last_scan.dew_point + margin, floor)
+            remaining = current - dew_target
+
+        return round(max(0.0, remaining) / rate, 2)

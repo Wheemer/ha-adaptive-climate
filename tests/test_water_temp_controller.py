@@ -682,5 +682,271 @@ class TestWritePolicy:
         assert controller._last_written[COOL_ENTITY] == pytest.approx(19.0)
 
 
+# =============================================================================
+# Interlocks
+# =============================================================================
+
+
+def binary_state(value):
+    state = MagicMock()
+    state.state = value
+    state.attributes = {}
+    return state
+
+
+class TestInterlocks:
+    @pytest.mark.asyncio
+    async def test_condensation_sensor_on_parks_immediately(self):
+        """A strapped-on pipe sensor is a measurement; dew point is an inference."""
+        states = {COOL_ENTITY: number_state(19.0), "binary_sensor.condensation": binary_state("on")}
+        controller = build_controller(
+            cooling=cooling_config(),
+            zones_in_mode={"cool": {"living": {"climate_entity_id": "climate.living"}}},
+            states=states,
+            condensation_sensor="binary_sensor.condensation",
+        )
+        stub_scan(controller, dew_point=17.0)
+        controller._ramp[WATER_TEMP_MODE_COOLING].last_active = NOW - timedelta(hours=1)
+
+        await controller.async_apply(NOW)
+
+        assert written_values(controller) == [22.0]
+
+    @pytest.mark.asyncio
+    async def test_interlock_park_bypasses_the_dwell_window(self):
+        states = {COOL_ENTITY: number_state(19.0), "binary_sensor.condensation": binary_state("off")}
+        controller = build_controller(
+            cooling=cooling_config(),
+            zones_in_mode={"cool": {"living": {"climate_entity_id": "climate.living"}}},
+            states=states,
+            condensation_sensor="binary_sensor.condensation",
+        )
+        stub_scan(controller, dew_point=17.0)
+        controller._ramp[WATER_TEMP_MODE_COOLING].last_active = NOW - timedelta(hours=1)
+        await controller.async_apply(NOW)  # writes 19.0
+
+        states["binary_sensor.condensation"] = binary_state("on")
+        await controller.async_apply(NOW + timedelta(minutes=1))
+
+        assert written_values(controller) == [19.0, 22.0]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("override_type", ["open_window", "contact_open"])
+    async def test_cool_zone_window_override_forces_a_park(self, override_type):
+        """Humid night air onto a cold slab is the top condensation event."""
+        states = {
+            COOL_ENTITY: number_state(19.0),
+            "climate.living": climate_state("cool", [{"type": override_type}]),
+        }
+        controller = build_controller(
+            cooling=cooling_config(),
+            zones_in_mode={"cool": {"living": {"climate_entity_id": "climate.living"}}},
+            states=states,
+        )
+        stub_scan(controller, dew_point=17.0)
+        controller._ramp[WATER_TEMP_MODE_COOLING].last_active = NOW - timedelta(hours=1)
+
+        await controller.async_apply(NOW)
+
+        assert written_values(controller) == [22.0]
+        assert controller.diagnostics()["binding_constraint"] == "interlock"
+
+    @pytest.mark.asyncio
+    async def test_normal_computation_resumes_thirty_minutes_after_clear(self):
+        states = {COOL_ENTITY: number_state(22.0), "binary_sensor.condensation": binary_state("on")}
+        controller = build_controller(
+            cooling=cooling_config(),
+            zones_in_mode={"cool": {"living": {"climate_entity_id": "climate.living"}}},
+            states=states,
+            condensation_sensor="binary_sensor.condensation",
+        )
+        stub_scan(controller, dew_point=17.0)
+        controller._ramp[WATER_TEMP_MODE_COOLING].last_active = NOW - timedelta(hours=1)
+        await controller.async_apply(NOW)
+
+        states["binary_sensor.condensation"] = binary_state("off")
+        await controller.async_apply(NOW + timedelta(minutes=10))
+        assert written_values(controller) == [22.0]  # still holding
+
+        await controller.async_apply(NOW + timedelta(minutes=45))
+        assert written_values(controller) == [22.0, 19.0]
+
+    @pytest.mark.asyncio
+    async def test_heating_is_unaffected_by_cooling_interlocks(self):
+        states = {
+            HEAT_ENTITY: number_state(30.0),
+            COOL_ENTITY: number_state(22.0),
+            "binary_sensor.condensation": binary_state("on"),
+        }
+        controller = build_controller(
+            cooling=cooling_config(),
+            heating=heating_config(),
+            zones_in_mode={"cool": {}, "heat": {"living": {}}},
+            states=states,
+            condensation_sensor="binary_sensor.condensation",
+        )
+        stub_scan(controller, dew_point=17.0)
+        controller._ramp[WATER_TEMP_MODE_HEATING].last_active = NOW - timedelta(hours=1)
+
+        await controller.async_apply(NOW)
+
+        assert 35.0 in written_values(controller)
+
+
+# =============================================================================
+# Learning gate
+# =============================================================================
+
+
+class TestLearningGate:
+    def test_gate_is_open_while_a_ramp_is_active(self):
+        controller = build_controller(
+            cooling=cooling_config(),
+            zones_in_mode={"cool": {"living": {}}},
+            states={COOL_ENTITY: number_state(22.0)},
+        )
+        stub_scan(controller, dew_point=14.0)
+        controller.compute_targets(NOW)
+
+        assert controller.learning_gate("cool") is True
+        assert controller.learning_gate(WATER_TEMP_MODE_COOLING) is True
+        assert controller.learning_gate("heat") is False
+
+    @pytest.mark.asyncio
+    async def test_gate_opens_for_one_settling_window_after_a_large_write(self):
+        controller = build_controller(
+            cooling=cooling_config(),
+            zones_in_mode={"cool": {"living": {}}},
+            states={COOL_ENTITY: number_state(21.0)},
+        )
+        controller._ramp[WATER_TEMP_MODE_COOLING].last_active = NOW - timedelta(hours=1)
+
+        stub_scan(controller, dew_point=17.0)
+        await controller.async_apply(NOW)  # 19.0, first write, no baseline
+        stub_scan(controller, dew_point=19.5)
+        await controller.async_apply(NOW + timedelta(minutes=5))  # 21.5, +2.5 degC
+
+        controller._utcnow = lambda: NOW + timedelta(minutes=30)
+        assert controller.learning_gate("cool") is True
+
+        controller._utcnow = lambda: NOW + timedelta(minutes=120)
+        assert controller.learning_gate("cool") is False
+
+    @pytest.mark.asyncio
+    async def test_small_writes_do_not_open_the_gate(self):
+        controller = build_controller(
+            cooling=cooling_config(),
+            zones_in_mode={"cool": {"living": {}}},
+            states={COOL_ENTITY: number_state(19.0)},
+        )
+        controller._ramp[WATER_TEMP_MODE_COOLING].last_active = NOW - timedelta(hours=1)
+
+        stub_scan(controller, dew_point=17.0)
+        await controller.async_apply(NOW)  # 19.0
+        stub_scan(controller, dew_point=17.4)
+        await controller.async_apply(NOW + timedelta(minutes=5))  # 19.5, +0.5 degC
+
+        controller._utcnow = lambda: NOW + timedelta(minutes=10)
+        assert controller.learning_gate("cool") is False
+
+    def test_gate_is_closed_for_unconfigured_modes_and_none(self):
+        controller = build_controller(cooling=cooling_config())
+
+        assert controller.learning_gate("heat") is False
+        assert controller.learning_gate(None) is False
+        assert controller.learning_gate("off") is False
+
+
+# =============================================================================
+# Diagnostics
+# =============================================================================
+
+
+class TestDiagnostics:
+    def test_reports_the_active_cooling_state(self):
+        controller = build_controller(
+            cooling=cooling_config(),
+            zones_in_mode={"cool": {"living": {}}},
+            states={COOL_ENTITY: number_state(22.0)},
+        )
+        stub_scan(controller, dew_point=14.0, worst_source="kitchen")
+        controller.compute_targets(NOW)
+
+        diagnostics = controller.diagnostics()
+
+        assert diagnostics["mode"] == WATER_TEMP_MODE_COOLING
+        assert diagnostics["effective"] == pytest.approx(22.0)
+        assert diagnostics["dew_point"] == pytest.approx(14.0)
+        assert diagnostics["binding_constraint"] == WATER_TEMP_BINDING_RAMP
+        assert diagnostics["ramp_active"] is True
+        # dew_point(14.0) + margin(2.0) = 16.0, but min_supply_temp(18.0) floors
+        # it — the ramp actually hands off to MIN_SUPPLY at 18.0, not 16.0, so
+        # days_remaining = (22.0 ramp_start - 18.0 floor) / 1.0 ramp_rate = 4.0.
+        assert diagnostics["days_remaining"] == pytest.approx(4.0)
+        assert diagnostics["worst_source"] == "kitchen"
+
+    def test_reports_nothing_when_no_mode_is_active(self):
+        controller = build_controller(cooling=cooling_config(), zones_in_mode={"cool": {}})
+        stub_scan(controller, dew_point=14.0)
+        controller.compute_targets(NOW)
+
+        diagnostics = controller.diagnostics()
+
+        assert diagnostics["mode"] is None
+        assert diagnostics["effective"] is None
+        assert diagnostics["ramp_active"] is False
+
+
+# =============================================================================
+# Timers
+# =============================================================================
+
+
+class TestTimers:
+    def test_start_registers_a_started_listener_and_an_interval(self, monkeypatch):
+        controller = build_controller(cooling=cooling_config())
+        tracked = {}
+
+        def fake_interval(_hass, action, interval):
+            tracked["action"] = action
+            tracked["interval"] = interval
+            return lambda: tracked.update(interval_cancelled=True)
+
+        monkeypatch.setattr(
+            "custom_components.adaptive_climate.managers.water_temp_controller.async_track_time_interval",
+            fake_interval,
+        )
+        controller.hass.bus.async_listen_once = MagicMock(return_value=lambda: tracked.update(once_cancelled=True))
+
+        controller.async_start()
+
+        assert tracked["interval"] == timedelta(seconds=300)
+        controller.hass.bus.async_listen_once.assert_called_once()
+
+    def test_cleanup_cancels_every_registered_handle(self, monkeypatch):
+        controller = build_controller(cooling=cooling_config())
+        cancelled = []
+
+        monkeypatch.setattr(
+            "custom_components.adaptive_climate.managers.water_temp_controller.async_track_time_interval",
+            lambda _hass, _action, _interval: lambda: cancelled.append("interval"),
+        )
+        controller.hass.bus.async_listen_once = MagicMock(return_value=lambda: cancelled.append("once"))
+
+        controller.async_start()
+        controller.async_cleanup()
+
+        assert sorted(cancelled) == ["interval", "once"]
+
+    @pytest.mark.asyncio
+    async def test_a_failing_cycle_does_not_kill_the_timer(self):
+        controller = build_controller(cooling=cooling_config())
+        controller.async_apply = AsyncMock(side_effect=RuntimeError("boom"))
+
+        await controller._async_timer_tick(None)  # must not raise
+
+        controller.async_apply.assert_awaited_once()
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
