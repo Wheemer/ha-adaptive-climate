@@ -253,12 +253,16 @@ configured `ramp_start`. Heating and cooling track idle/ramp state independently
 **Write policy:** round to the entity's `step` toward the safe side (cooling up,
 heating down), clamp to the entity's min/max, compare the post-clamp value.
 Safe-direction changes write immediately; unsafe-direction changes must persist
-for `min_write_interval`. Mode deactivation parks at `ramp_start`. Pure rounding/
-clamping/direction-safety helpers live in `managers/water_temp_writer.py`.
+for `min_write_interval`. No write while the target entity has no state (the
+5-min timer retries). An entity min/max clamp past the mode's safe bound sets
+`binding_constraint: entity_limit` and logs a rate-limited warning. Mode
+deactivation parks at `ramp_start`. Pure rounding/clamping/direction-safety
+helpers live in `managers/water_temp_writer.py`.
 
 **Interlocks (cooling):** the condensation sensor being ON, or any COOL zone
-reporting `open_window` / `contact_open`, forces an immediate park and holds for
-30 minutes after the condition clears.
+reporting `open_window` / `contact_open`, forces an immediate park — never below
+the current dew target (`max(ramp_start, dew_target)`) — and holds for 30
+minutes after the condition clears.
 
 **Learning protection:** `coordinator.water_temp_learning_gate(mode)` is true
 while a ramp is active and for one 60-min settling window after any write of
@@ -277,7 +281,7 @@ ramp-start per mode, plus the last value written per entity.
 
 **Diagnostic sensor:** `sensor.water_supply_temperature_target` — state is the
 effective supply temp; attributes are `mode`, `dew_point`, `binding_constraint`
-(`dew_point` / `min_supply` / `ramp` / `target` / `interlock` / `blind`),
+(`dew_point` / `min_supply` / `ramp` / `target` / `interlock` / `blind` / `entity_limit`),
 `ramp_active`, `days_remaining`, `worst_source`.
 
 ### Open Window Detection

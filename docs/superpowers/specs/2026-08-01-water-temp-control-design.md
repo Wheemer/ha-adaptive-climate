@@ -90,6 +90,8 @@ Then: `dew_target = max(max(dew_points) + dew_point_margin, min_supply_temp)`.
 - Clamp to the target entity's own min/max attributes; compare the **post-clamp, post-round** value against the last written value (comparing pre-clamp values re-issues identical calls forever when out of range).
 - **Asymmetric throttling:** safe-direction changes (cooling: up, heating: down) write immediately on change. Unsafe-direction changes require the rounded change to persist for `min_write_interval` (default 1800 s) — prevents RH-noise dither and heat pump setpoint hunting.
 - Service calls follow the `HeaterServiceCaller` shape (`get_number_entity_domain` resolves `number` vs `input_number`; ServiceNotFound/HomeAssistantError handling); failures logged (rate-limited) and retried next cycle.
+- No write while the target entity has no state at all (startup ordering, rename, removal) — the 5-minute timer retries once it loads. Never fall back to unrelated bounds.
+- When the entity's own min/max clamps the value past the mode's safe bound (cooling: max below the dew target; heating: min above the target), the clamped write proceeds but `binding_constraint` becomes `entity_limit` and a rate-limited WARNING is logged.
 - Compute once at `EVENT_HOMEASSISTANT_STARTED` (after a short startup delay so zones have registered and persisted state is restored), then every 5 min via `async_track_time_interval`. Callback body wrapped in try/except so one bad cycle can't kill the timer.
 - **Mode deactivation:** park the entity at that mode's `ramp_start` value (one final write) rather than leaving the most aggressive value latched for the next season.
 
@@ -125,7 +127,7 @@ Today `min_cooling_target = cooling_supply_temp + cooling_supply_margin` (static
 | Wiring | `coordinator.py` | Constructed in `coordinator.__init__` from `self._config.get(...)` (NOT `hass.data` — `supply_temperature` lands there only after the coordinator exists). Footprint ~15 lines (file is over the 800-line ceiling). Timer unsub cancelled in `async_cleanup()` |
 | Zone data | `climate_setup.py` | Add `humidity_sensor` + `exclude_from_dew_point` to `register_zone` zone_data (config already read there) |
 | Persistence | `adaptive/persistence.py` | Mirror `manifold_state`: top-level `water_temp_state` key in the learning store (`async_load/save_water_temp_state`), saved on stop + unload. Additive — no STORAGE_VERSION bump. Persist ISO timestamps: last_active per mode, ramp_started per mode, last_written per entity. Gate compute on a `_restored` flag |
-| Diagnostics | `sensor.py` | One system-wide sensor: state = current effective supply temp; attributes: mode, dew_point, binding_constraint (dew_point / min_supply / ramp / target / interlock / blind), ramp_active, days_remaining, worst_source |
+| Diagnostics | `sensor.py` | One system-wide sensor: state = current effective supply temp; attributes: mode, dew_point, binding_constraint (dew_point / min_supply / ramp / target / interlock / blind / entity_limit), ramp_active, days_remaining, worst_source |
 
 ## Testing
 
