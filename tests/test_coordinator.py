@@ -1472,5 +1472,88 @@ async def test_mode_sync_disabled_originator_deliberate_switch_does_not_propagat
     assert mode_sync._zone_modes.get("zone_b") == "cool"
 
 
+class TestZoneModeHelpers:
+    """get_zones_in_mode / get_zone_current_temp read hass.states, not demand state."""
+
+    @staticmethod
+    def _coordinator_with_zones(zones):
+        from unittest.mock import MagicMock
+
+        from custom_components.adaptive_climate.coordinator import (
+            AdaptiveThermostatCoordinator,
+        )
+
+        coordinator = AdaptiveThermostatCoordinator.__new__(AdaptiveThermostatCoordinator)
+        coordinator._zones = zones
+        coordinator._demand_states = {}
+        coordinator.hass = MagicMock()
+        return coordinator
+
+    @staticmethod
+    def _state(state_value, attributes=None):
+        from unittest.mock import MagicMock
+
+        state = MagicMock()
+        state.state = state_value
+        state.attributes = attributes or {}
+        return state
+
+    def test_returns_only_zones_whose_entity_state_matches(self):
+        coordinator = self._coordinator_with_zones(
+            {
+                "living": {"climate_entity_id": "climate.living"},
+                "bedroom": {"climate_entity_id": "climate.bedroom"},
+                "attic": {"climate_entity_id": "climate.attic"},
+            }
+        )
+        states = {
+            "climate.living": self._state("cool"),
+            "climate.bedroom": self._state("cool"),
+            "climate.attic": self._state("off"),
+        }
+        coordinator.hass.states.get = states.get
+
+        result = coordinator.get_zones_in_mode("cool")
+        assert set(result) == {"living", "bedroom"}
+
+    def test_includes_satisfied_zones_that_have_no_demand(self):
+        """Demand is irrelevant — a satisfied COOL zone still counts."""
+        coordinator = self._coordinator_with_zones({"living": {"climate_entity_id": "climate.living"}})
+        coordinator._demand_states = {"living": {"demand": False, "mode": "cool"}}
+        coordinator.hass.states.get = {"climate.living": self._state("cool")}.get
+
+        assert "living" in coordinator.get_zones_in_mode("cool")
+
+    def test_skips_zones_with_missing_state_or_entity_id(self):
+        coordinator = self._coordinator_with_zones(
+            {
+                "ghost": {"climate_entity_id": "climate.ghost"},
+                "nameless": {},
+            }
+        )
+        coordinator.hass.states.get = lambda _entity_id: None
+
+        assert coordinator.get_zones_in_mode("cool") == {}
+
+    def test_get_zone_current_temp_reads_entity_attribute(self):
+        coordinator = self._coordinator_with_zones({"living": {"climate_entity_id": "climate.living"}})
+        coordinator.hass.states.get = {"climate.living": self._state("cool", {"current_temperature": 23.4})}.get
+
+        assert coordinator.get_zone_current_temp("living") == 23.4
+
+    def test_get_zone_current_temp_returns_none_for_missing_data(self):
+        coordinator = self._coordinator_with_zones({"living": {"climate_entity_id": "climate.living"}})
+        coordinator.hass.states.get = {"climate.living": self._state("cool", {})}.get
+
+        assert coordinator.get_zone_current_temp("living") is None
+        assert coordinator.get_zone_current_temp("nope") is None
+
+    def test_get_zone_current_temp_rejects_non_numeric_attribute(self):
+        coordinator = self._coordinator_with_zones({"living": {"climate_entity_id": "climate.living"}})
+        coordinator.hass.states.get = {"climate.living": self._state("cool", {"current_temperature": "unknown"})}.get
+
+        assert coordinator.get_zone_current_temp("living") is None
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

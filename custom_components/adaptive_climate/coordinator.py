@@ -564,6 +564,58 @@ class AdaptiveThermostatCoordinator(DataUpdateCoordinator):
 
         return active_zones
 
+    def get_zones_in_mode(self, hvac_mode: str) -> dict[str, dict[str, Any]]:
+        """Get zones whose climate entity is currently in the given HVAC mode.
+
+        Unlike :meth:`get_active_zones` this does **not** filter on live demand,
+        so a COOL zone that is momentarily satisfied is still returned.  Reading
+        the entity state (rather than ``_demand_states``) is also valid
+        immediately after a restart, before any demand update has arrived.
+
+        Args:
+            hvac_mode: HVAC mode string to match ("heat", "cool", "off").
+
+        Returns:
+            Dictionary of zone_id -> zone_data for matching zones.
+        """
+        zones_in_mode: dict[str, dict[str, Any]] = {}
+        for zone_id, zone_data in self._zones.items():
+            climate_entity_id = zone_data.get("climate_entity_id")
+            if not climate_entity_id:
+                continue
+            state = self.hass.states.get(climate_entity_id)
+            if state is None or state.state != hvac_mode:
+                continue
+            zones_in_mode[zone_id] = zone_data
+        return zones_in_mode
+
+    def get_zone_current_temp(self, zone_id: str) -> float | None:
+        """Get a zone's current temperature from its climate entity attribute.
+
+        ``update_zone_temp`` has no production callers, so the registry's
+        ``current_temp`` map is empty outside tests.  The entity's
+        ``current_temperature`` attribute is the authoritative source.
+
+        Args:
+            zone_id: Unique identifier for the zone.
+
+        Returns:
+            Current temperature in °C, or None when unavailable/non-numeric.
+        """
+        zone_data = self._zones.get(zone_id)
+        if zone_data is None:
+            return None
+        climate_entity_id = zone_data.get("climate_entity_id")
+        if not climate_entity_id:
+            return None
+        state = self.hass.states.get(climate_entity_id)
+        if state is None:
+            return None
+        temp = state.attributes.get("current_temperature")
+        if isinstance(temp, bool) or not isinstance(temp, (int, float)):
+            return None
+        return float(temp)
+
     def get_zone_temps(self) -> dict[str, float]:
         """Get current temperatures for all zones.
 
