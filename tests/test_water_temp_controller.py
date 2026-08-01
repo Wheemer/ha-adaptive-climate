@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock
 
@@ -10,6 +11,7 @@ import pytest
 from custom_components.adaptive_climate.const import (
     WATER_TEMP_BINDING_BLIND,
     WATER_TEMP_BINDING_DEW_POINT,
+    WATER_TEMP_BINDING_ENTITY_LIMIT,
     WATER_TEMP_BINDING_MIN_SUPPLY,
     WATER_TEMP_BINDING_RAMP,
     WATER_TEMP_BINDING_TARGET,
@@ -588,6 +590,34 @@ class TestWritePolicy:
         assert written_values(controller) == [35.0]
 
     @pytest.mark.asyncio
+    async def test_heating_unsafe_direction_upward_change_requires_the_dwell_window(self):
+        """Review finding #9 leftover: heating's unsafe direction is UP
+        (cooler is safer for heating per is_safe_direction) -- mirrors
+        test_unsafe_direction_change_requires_the_dwell_window for cooling,
+        which only ever exercised the downward (cooling) case."""
+        controller = build_controller(
+            heating=heating_config(target=35.0, ramp_rate=2.0),
+            zones_in_mode={"heat": {"living": {}}},
+            states={HEAT_ENTITY: number_state(25.0, step=0.5)},
+        )
+        ramp = controller.ramp_state[WATER_TEMP_MODE_HEATING]
+        ramp.ramp_started = NOW
+        ramp.ramp_start_value = 25.0
+        ramp.last_active = NOW
+
+        await controller.async_apply(NOW)  # ramp_value=25.0, first write, no baseline
+        assert written_values(controller) == [25.0]
+
+        await controller.async_apply(NOW + timedelta(hours=6))  # ramp_value=25.5, upward, held
+        assert written_values(controller) == [25.0]
+
+        await controller.async_apply(NOW + timedelta(hours=6, minutes=29))  # < 30 min since held
+        assert written_values(controller) == [25.0]
+
+        await controller.async_apply(NOW + timedelta(hours=6, minutes=31))  # >= 30 min -> writes
+        assert written_values(controller) == [25.0, 25.5]
+
+    @pytest.mark.asyncio
     async def test_missing_step_attribute_falls_back_to_half_a_degree(self):
         state = number_state(20.0)
         state.attributes = {"min": 15.0, "max": 45.0}
@@ -635,6 +665,67 @@ class TestWritePolicy:
         assert written_values(controller) == [16.0]
 
     @pytest.mark.asyncio
+    async def test_target_entity_with_no_state_skips_the_write(self):
+        """Review finding #4: an entity with no state at all (not yet
+        loaded, renamed) must be skipped entirely -- not clamped against
+        the heating-shaped SUPPLY_TEMP_MIN/MAX (25/80) fallback, which
+        would poison _last_written with a bogus value and could mask the
+        real target once the entity actually loads. The 5-min timer
+        retries on the next cycle."""
+        controller = build_controller(
+            cooling=cooling_config(),
+            zones_in_mode={"cool": {"living": {}}},
+            states={},  # COOL_ENTITY deliberately absent -> hass.states.get returns None
+        )
+        stub_scan(controller, dew_point=17.0)
+        controller._ramp[WATER_TEMP_MODE_COOLING].last_active = NOW - timedelta(hours=1)
+
+        await controller.async_apply(NOW)
+
+        controller.hass.services.async_call.assert_not_awaited()
+        assert controller._last_written.get(COOL_ENTITY) is None
+
+    @pytest.mark.asyncio
+    async def test_entity_maximum_below_dew_target_is_flagged_as_entity_limited(self, caplog):
+        """Review finding #5: a maximum-clamp that lands the cooling write
+        BELOW the dew target must not be silent -- rate-limited WARNING
+        plus binding_constraint='entity_limit'. The bound actually binds:
+        the entity's max(21.0) is below dew_target(27.0)."""
+        controller = build_controller(
+            cooling=cooling_config(),
+            zones_in_mode={"cool": {"living": {"climate_entity_id": "climate.living"}}},
+            states={COOL_ENTITY: number_state(20.0, minimum=15.0, maximum=21.0)},
+        )
+        stub_scan(controller, dew_point=25.0)  # dew_target = 25.0 + 2.0 margin = 27.0 > max(21.0)
+        controller._ramp[WATER_TEMP_MODE_COOLING].last_active = NOW - timedelta(hours=1)
+
+        with caplog.at_level(logging.WARNING):
+            await controller.async_apply(NOW)
+
+        assert written_values(controller) == [21.0]
+        assert controller.diagnostics()["binding_constraint"] == WATER_TEMP_BINDING_ENTITY_LIMIT
+        assert any("entity limit" in record.message.lower() for record in caplog.records)
+
+    @pytest.mark.asyncio
+    async def test_entity_minimum_above_heating_target_is_flagged_as_entity_limited(self, caplog):
+        """Mirror of the cooling case for heating: a minimum-clamp that
+        lands the write ABOVE the heating target (the unsafe direction for
+        heating) must also warn and surface binding_constraint='entity_limit'."""
+        controller = build_controller(
+            heating=heating_config(target=30.0),
+            zones_in_mode={"heat": {"living": {}}},
+            states={HEAT_ENTITY: number_state(30.0, minimum=32.0, maximum=45.0)},
+        )
+        controller._ramp[WATER_TEMP_MODE_HEATING].last_active = NOW - timedelta(hours=1)
+
+        with caplog.at_level(logging.WARNING):
+            await controller.async_apply(NOW)
+
+        assert written_values(controller) == [32.0]
+        assert controller.diagnostics()["binding_constraint"] == WATER_TEMP_BINDING_ENTITY_LIMIT
+        assert any("entity limit" in record.message.lower() for record in caplog.records)
+
+    @pytest.mark.asyncio
     async def test_safe_direction_change_writes_immediately(self):
         """Cooling upward is the safe direction — no dwell required."""
         controller = build_controller(
@@ -670,7 +761,14 @@ class TestWritePolicy:
         assert written_values(controller) == [21.0, 19.0]
 
     @pytest.mark.asyncio
-    async def test_dwell_timer_restarts_when_the_pending_value_changes(self):
+    async def test_continued_same_direction_drift_keeps_the_original_dwell_anchor(self):
+        """Review finding #6: a value that keeps drifting further in the
+        same (unsafe) direction must NOT restart the dwell -- only the
+        elapsed time since the *original* anchor (when the drift first
+        left the last-written band) matters. Held here only because 20 min
+        have passed since that original anchor at minute 20, not because
+        anything "restarted" (a genuine reversal restarting the dwell is
+        covered by test_dwell_only_resets_on_a_genuine_direction_reversal)."""
         controller = build_controller(
             cooling=cooling_config(),
             zones_in_mode={"cool": {"living": {}}},
@@ -679,14 +777,68 @@ class TestWritePolicy:
         controller._ramp[WATER_TEMP_MODE_COOLING].last_active = NOW - timedelta(hours=1)
 
         stub_scan(controller, dew_point=19.0)
-        await controller.async_apply(NOW)
+        await controller.async_apply(NOW)  # writes 21.0, first write
         stub_scan(controller, dew_point=17.0)
-        await controller.async_apply(NOW + timedelta(minutes=20))
-        stub_scan(controller, dew_point=16.0)  # different pending value, timer restarts
+        await controller.async_apply(NOW + timedelta(minutes=20))  # 19.0 -- dwell anchor starts here
+        stub_scan(controller, dew_point=16.0)  # 18.0 -- further in the same unsafe direction
         await controller.async_apply(NOW + timedelta(minutes=25))
-        await controller.async_apply(NOW + timedelta(minutes=40))  # only 15 min on the new value
+        await controller.async_apply(NOW + timedelta(minutes=40))  # 20 min since the anchor at minute 20
 
         assert written_values(controller) == [21.0]
+
+    @pytest.mark.asyncio
+    async def test_dwell_only_resets_on_a_genuine_direction_reversal(self):
+        """Review finding #6: unlike continued same-direction drift, a
+        value that reverses back toward the safe side (e.g. RH noise
+        bouncing the reading back up) DOES restart the dwell from the
+        reversal point."""
+        controller = build_controller(
+            cooling=cooling_config(),
+            zones_in_mode={"cool": {"living": {}}},
+            states={COOL_ENTITY: number_state(21.0)},
+        )
+        controller._ramp[WATER_TEMP_MODE_COOLING].last_active = NOW - timedelta(hours=1)
+
+        stub_scan(controller, dew_point=19.0)
+        await controller.async_apply(NOW)  # writes 21.0, first write
+        stub_scan(controller, dew_point=17.0)
+        await controller.async_apply(NOW + timedelta(minutes=5))  # 19.0 -- drift starts (unsafe)
+        stub_scan(controller, dew_point=18.0)  # 20.0 -- a reversal back toward the safe side
+        await controller.async_apply(NOW + timedelta(minutes=10))
+
+        # Reversal restarted the dwell at minute 10 -- only 25 min have
+        # passed by minute 35, short of the 30-min window.
+        await controller.async_apply(NOW + timedelta(minutes=35))
+        assert written_values(controller) == [21.0]
+
+        await controller.async_apply(NOW + timedelta(minutes=41))  # 31 min since the reversal
+        assert written_values(controller) == [21.0, 20.0]
+
+    @pytest.mark.asyncio
+    async def test_fine_stepped_ramp_does_not_starve_the_unsafe_direction_dwell_forever(self):
+        """Review finding #6: at the reviewer's boundary (entity step=0.1,
+        ramp_rate=5.0/day), the rounded value crosses to a new step every
+        ~1728s -- just under the 1800s min_write_interval. The old dwell
+        logic restarted its timer on every such crossing (any pending-value
+        change), so writes would freeze at their initial value forever.
+        Ticks every 5 min, matching the real recompute cadence."""
+        controller = build_controller(
+            cooling=cooling_config(ramp_start=22.0, ramp_rate=5.0, min_supply_temp=1.0),
+            zones_in_mode={"cool": {"living": {}}},
+            states={COOL_ENTITY: number_state(22.0, step=0.1, minimum=1.0, maximum=45.0)},
+        )
+        # dew_target floors to min_supply=1.0 -- the ramp binds for the
+        # entire test window, well before it would ever reach that floor.
+        stub_scan(controller, dew_point=-10.0)
+
+        await controller.async_apply(NOW)  # first write, no baseline -> writes 22.0 immediately
+        for tick in range(1, 19):  # every 5 min out to 90 min
+            await controller.async_apply(NOW + timedelta(minutes=5 * tick))
+
+        values = written_values(controller)
+        assert len(values) >= 2  # the ramp must have progressed past its first write
+        assert values[0] == pytest.approx(22.0)
+        assert values[-1] < values[0]  # monotonically toward the safe-side floor, never frozen
 
     @pytest.mark.asyncio
     async def test_no_dither_at_a_step_boundary_under_rh_noise(self):

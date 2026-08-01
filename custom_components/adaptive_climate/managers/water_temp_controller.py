@@ -44,6 +44,7 @@ from ..const import (
     DEFAULT_WATER_TEMP_MIN_WRITE_INTERVAL,
     WATER_TEMP_BINDING_BLIND,
     WATER_TEMP_BINDING_DEW_POINT,
+    WATER_TEMP_BINDING_ENTITY_LIMIT,
     WATER_TEMP_BINDING_INTERLOCK,
     WATER_TEMP_BINDING_MIN_SUPPLY,
     WATER_TEMP_BINDING_RAMP,
@@ -161,6 +162,7 @@ class WaterTempController:
             WATER_TEMP_MODE_HEATING: False,
         }
         self._last_write_error: dict[str, datetime] = {}
+        self._last_entity_limit_warned: dict[str, datetime] = {}
 
         self._interlock_engaged = False
         self._interlock_cleared_at: datetime | None = None
@@ -566,8 +568,25 @@ class WaterTempController:
         Returns:
             True when a service call was issued and accepted.
         """
-        minimum, maximum, step = entity_limits(self.hass.states.get(entity_id))
-        final = min(max(round_safe(value, mode, step), minimum), maximum)
+        state = self.hass.states.get(entity_id)
+        if state is None:
+            # Entity not loaded yet (renamed, still starting up, etc.) --
+            # skip this write rather than clamping against the
+            # heating-shaped SUPPLY_TEMP_MIN/MAX fallback (25/80), which
+            # would poison _last_written with a bogus value (review finding
+            # #4). The 5-minute timer retries once the entity is available.
+            _LOGGER.debug("Water temp control: %s has no state yet, skipping write", entity_id)
+            return False
+
+        minimum, maximum, step = entity_limits(state)
+        rounded = round_safe(value, mode, step)
+        final = min(max(rounded, minimum), maximum)
+
+        if self._entity_limit_binds(mode, rounded, minimum, maximum):
+            # Review finding #5: an entity limit that clamps *past* the
+            # computed target in the unsafe direction must not be silent.
+            self._binding[mode] = WATER_TEMP_BINDING_ENTITY_LIMIT
+            self._warn_entity_limited(mode, entity_id, rounded, final, now)
 
         last = self._last_written.get(entity_id)
         # Compare the post-clamp, post-round value: comparing the raw value
@@ -578,10 +597,25 @@ class WaterTempController:
 
         if not force and last is not None and not is_safe_direction(mode, final, last):
             pending = self._pending.get(entity_id)
-            if pending is None or abs(pending[0] - final) > 1e-6:
+            if pending is None:
                 self._pending[entity_id] = (final, now)
                 return False
-            if (now - pending[1]).total_seconds() < self._min_write_interval:
+
+            pending_value, drift_started_at = pending
+            if abs(final - pending_value) > 1e-6 and is_safe_direction(mode, final, pending_value):
+                # Direction reversal (e.g. RH noise bounced back toward the
+                # safe side) -- restart the dwell from this new candidate.
+                self._pending[entity_id] = (final, now)
+                return False
+
+            # Same-direction drift (e.g. a fine-stepped ramp continuing to
+            # descend/ascend): keep the ORIGINAL anchor so a value that
+            # crosses a new rounded step faster than min_write_interval
+            # doesn't restart the dwell forever (review finding #6) -- but
+            # track the latest candidate so the write that eventually lands
+            # uses the freshest value.
+            self._pending[entity_id] = (final, drift_started_at)
+            if (now - drift_started_at).total_seconds() < self._min_write_interval:
                 return False
 
         if not await self._async_call_set_value(entity_id, final, now):
@@ -592,6 +626,35 @@ class WaterTempController:
             self._gate_until[mode] = now + timedelta(minutes=WATER_TEMP_SETTLING_MINUTES)
         self._last_written[entity_id] = final
         return True
+
+    @staticmethod
+    def _entity_limit_binds(mode: str, rounded: float, minimum: float, maximum: float) -> bool:
+        """Return True when the entity's own min/max clamps *past* safety.
+
+        Cooling's unsafe direction is down, so only a ``maximum`` below the
+        computed target matters; heating's unsafe direction is up, so only
+        a ``minimum`` above the computed target matters (review finding #5;
+        mirrors :func:`~.water_temp_writer.is_safe_direction`). A clamp in
+        the *safe* direction (e.g. cooling's minimum forcing the value up)
+        is not flagged -- it can't undercut condensation safety.
+        """
+        if mode == WATER_TEMP_MODE_COOLING:
+            return maximum < rounded
+        return minimum > rounded
+
+    def _warn_entity_limited(self, mode: str, entity_id: str, desired: float, actual: float, now: datetime) -> None:
+        """Log a rate-limited WARNING when an entity limit clamps past the computed target."""
+        last = self._last_entity_limit_warned.get(entity_id)
+        if last is not None and (now - last).total_seconds() < WATER_TEMP_WARN_INTERVAL_SECONDS:
+            return
+        self._last_entity_limit_warned[entity_id] = now
+        _LOGGER.warning(
+            "Water temp control: %s cannot reach %.1f°C for %s (entity limit clamps to %.1f°C)",
+            entity_id,
+            desired,
+            mode,
+            actual,
+        )
 
     async def _async_call_set_value(self, entity_id: str, value: float, now: datetime) -> bool:
         """Call ``set_value`` on the target entity, handling all error types.

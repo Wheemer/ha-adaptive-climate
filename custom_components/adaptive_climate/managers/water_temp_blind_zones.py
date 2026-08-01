@@ -105,6 +105,6 @@ def _unresolvable_cool_zone_readings(
         # Reuses the scanner's own blind-reading construction (pinned to
         # WATER_TEMP_BLIND_MIN_SUPPLY) so an unresolvable-mode zone is
         # handled identically to a resolved zone with no usable temperature.
-        readings.append(scanner._blind_zone_reading(zone_id, humidity_entity_id, now))
+        readings.append(scanner.blind_zone_reading(zone_id, humidity_entity_id, now))
 
     return readings

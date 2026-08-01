@@ -171,7 +171,7 @@ class DewPointScanner:
                     # worst-source selection but never forces the whole scan
                     # blind on its own. A present-but-implausible reading (a
                     # likely sensor fault, handled below) stays dropped.
-                    readings.append(self._blind_zone_reading(zone_id, humidity_entity_id, now))
+                    readings.append(self.blind_zone_reading(zone_id, humidity_entity_id, now))
                 continue
 
             reading = self._build_reading(zone_id, humidity_entity_id, temp_c, temp_source, now)
@@ -332,8 +332,12 @@ class DewPointScanner:
             temp_source=temp_source,
         )
 
-    def _blind_zone_reading(self, zone_id: str, humidity_entity_id: str, now: datetime) -> SourceReading:
+    def blind_zone_reading(self, zone_id: str, humidity_entity_id: str, now: datetime) -> SourceReading:
         """Build a conservative stand-in reading for a COOL zone with no usable temperature.
+
+        Public (review finding #11): reused by
+        :mod:`.water_temp_blind_zones` for registered zones whose HVAC mode
+        can't be resolved at all, not just an internal scanner detail.
 
         Review finding #8: dropping such a zone entirely would exclude its
         humidity signal from the scan.  Instead it contributes the system's

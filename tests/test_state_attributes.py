@@ -1491,6 +1491,34 @@ class TestStatusAttribute:
         assert status_attr["overrides"][0]["type"] == "humidity"
         assert "resume_at" in status_attr["overrides"][0]
 
+    def test_status_active_water_temp_learning_gate(self):
+        """Water-temp ramp/settling gate must surface a learning_grace
+        override on its own, independent of night setback -- every other
+        test in this file pins water_temp_learning_gate_active=False, so
+        this path (the water-temp branch of the OR in _build_status_attribute)
+        was genuinely untested (review finding #9 leftover)."""
+        from custom_components.adaptive_climate.managers.state_attributes import (
+            _build_status_attribute,
+        )
+
+        thermostat = MagicMock()
+        thermostat.water_temp_learning_gate_active = True
+        thermostat._contact_sensor_handler = None
+        thermostat._humidity_detector = None
+        thermostat._night_setback_controller = None
+        thermostat._heater_controller = None
+        thermostat.hvac_mode = "off"
+        thermostat.hass = MagicMock()
+        thermostat.hass.data = {}
+
+        status_attr = _build_status_attribute(thermostat)
+
+        assert len(status_attr["overrides"]) == 1
+        assert status_attr["overrides"][0]["type"] == "learning_grace"
+        # The water-temp path never populates `until` (only the night-setback
+        # path does) -- build_override() omits the key entirely when None.
+        assert "until" not in status_attr["overrides"][0]
+
 
 class TestStatusAttributeIntegration:
     """Integration tests for status attribute with full thermostat scenarios."""
