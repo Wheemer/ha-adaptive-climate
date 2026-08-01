@@ -1531,7 +1531,21 @@ class TestZoneModeHelpers:
                 "nameless": {},
             }
         )
-        coordinator.hass.states.get = lambda _entity_id: None
+
+        def states_get(entity_id):
+            if entity_id == "climate.ghost":
+                # A real state exists but does not match the requested mode --
+                # pins the state-mismatch branch (as opposed to state is None).
+                return self._state("off")
+            if entity_id is None:
+                # zone_data.get("climate_entity_id") for "nameless" is None. If the
+                # missing-entity-id guard were removed, this lookup would return a
+                # MATCHING state, so "nameless" would incorrectly be included below.
+                # This pins the entity-id guard as load-bearing.
+                return self._state("cool")
+            return None
+
+        coordinator.hass.states.get = states_get
 
         assert coordinator.get_zones_in_mode("cool") == {}
 
@@ -1553,6 +1567,16 @@ class TestZoneModeHelpers:
         coordinator.hass.states.get = {"climate.living": self._state("cool", {"current_temperature": "unknown"})}.get
 
         assert coordinator.get_zone_current_temp("living") is None
+
+    def test_get_zone_current_temp_rejects_nan_and_infinity(self):
+        coordinator = self._coordinator_with_zones({"living": {"climate_entity_id": "climate.living"}})
+
+        for bad_value in (float("nan"), float("inf"), float("-inf")):
+            coordinator.hass.states.get = {
+                "climate.living": self._state("cool", {"current_temperature": bad_value})
+            }.get
+
+            assert coordinator.get_zone_current_temp("living") is None
 
 
 if __name__ == "__main__":

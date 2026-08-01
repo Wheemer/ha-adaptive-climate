@@ -614,7 +614,10 @@ class AdaptiveThermostatCoordinator(DataUpdateCoordinator):
         temp = state.attributes.get("current_temperature")
         if isinstance(temp, bool) or not isinstance(temp, (int, float)):
             return None
-        return float(temp)
+        value = float(temp)
+        if not math.isfinite(value):
+            return None
+        return value
 
     def get_zone_temps(self) -> dict[str, float]:
         """Get current temperatures for all zones.
