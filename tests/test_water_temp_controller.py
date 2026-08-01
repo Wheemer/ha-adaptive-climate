@@ -179,6 +179,27 @@ class TestCoolingTarget:
 
         assert targets[WATER_TEMP_MODE_COOLING] == pytest.approx(24.0)
 
+    def test_blind_mode_dew_target_floors_rather_than_replaces_a_high_degraded_reading(self):
+        """Blind mode is a FLOOR on the degraded (fallback-humidity) dew point,
+        not a flat replacement of it (review finding: blind path). The bound
+        actually binds here: dew_point(21.0) + margin(2.0) = 23.0, which is
+        ABOVE both min_supply_temp(18.0) and WATER_TEMP_BLIND_MIN_SUPPLY(20.0)
+        — the old code discarded this and returned 20.0, an unsafe target
+        colder than condensation safety actually requires.
+        """
+        controller = build_controller(
+            cooling=cooling_config(),
+            zones_in_mode={"cool": {"living": {}}},
+            states={COOL_ENTITY: number_state(24.0)},
+        )
+        stub_scan(controller, dew_point=21.0, blind=True)
+        controller._ramp[WATER_TEMP_MODE_COOLING].last_active = NOW - timedelta(hours=1)
+
+        targets = controller.compute_targets(NOW)
+
+        assert targets[WATER_TEMP_MODE_COOLING] == pytest.approx(23.0)
+        assert controller.binding[WATER_TEMP_MODE_COOLING] == WATER_TEMP_BINDING_BLIND
+
     def test_no_cool_zones_means_no_cooling_target(self):
         controller = build_controller(
             cooling=cooling_config(),
@@ -272,6 +293,12 @@ class TestRamps:
         stub_scan(controller, dew_point=14.0)
         controller.compute_targets(NOW)
 
+        # Intermediate ticks (production recomputes every 5 min, always well
+        # under idle_days=7) keep last_active fresh so this multi-day jump
+        # doesn't itself look like a fresh idle gap and spuriously restart
+        # the ramp (the stale-ramp fix is keyed on last_active staleness).
+        for day in (3, 6, 9):
+            controller.compute_targets(NOW + timedelta(days=day))
         later = controller.compute_targets(NOW + timedelta(days=10))
 
         assert later[WATER_TEMP_MODE_COOLING] == pytest.approx(18.0)
@@ -286,6 +313,8 @@ class TestRamps:
         controller.compute_targets(NOW)
 
         assert controller.compute_targets(NOW + timedelta(days=2))[WATER_TEMP_MODE_HEATING] == pytest.approx(29.0)
+        # Intermediate tick (see comment above) before the jump to day 10.
+        controller.compute_targets(NOW + timedelta(days=6))
         assert controller.compute_targets(NOW + timedelta(days=10))[WATER_TEMP_MODE_HEATING] == pytest.approx(35.0)
         assert controller.ramp_state[WATER_TEMP_MODE_HEATING].ramp_started is None
 
@@ -351,6 +380,60 @@ class TestRamps:
         started = controller.ramp_state[WATER_TEMP_MODE_COOLING].ramp_started
 
         controller.compute_targets(NOW + timedelta(days=1))
+
+        assert controller.ramp_state[WATER_TEMP_MODE_COOLING].ramp_started == started
+
+    def test_stale_ramp_restarts_after_a_mid_ramp_idle_gap_instead_of_completing_in_one_step(self):
+        """Review finding: a ramp interrupted mid-flight by a long idle gap
+        (mode deactivated before the ramp finished, off-season passes,
+        reactivated) must restart fresh, not compute an enormous elapsed
+        time against the stale ramp_started and land the full step in one
+        write. The bound actually binds: ramp_started is 40 days stale here,
+        vastly exceeding idle_days(7), so the old code's
+        ``ramp.ramp_started is None`` guard incorrectly skipped the restart.
+        """
+        controller = build_controller(
+            cooling=cooling_config(),
+            zones_in_mode={"cool": {"living": {}}},
+            states={COOL_ENTITY: number_state(18.0)},
+        )
+        stub_scan(controller, dew_point=14.0)  # dew_target floors to min_supply=18.0
+
+        ramp = controller.ramp_state[WATER_TEMP_MODE_COOLING]
+        # A ramp started 40 days ago, but the mode went inactive only 1 day
+        # in -- last_active is frozen there since _update_ramp is never
+        # called while inactive.
+        ramp.ramp_started = NOW - timedelta(days=40)
+        ramp.ramp_start_value = 22.0
+        ramp.last_active = NOW - timedelta(days=39)
+
+        targets = controller.compute_targets(NOW)
+
+        # Restarted fresh from "now" (old code would instead have jumped
+        # straight to dew_target=18.0 in one write, with ramp_started left
+        # None and binding=min_supply).
+        assert controller.ramp_state[WATER_TEMP_MODE_COOLING].ramp_started == NOW
+        assert targets[WATER_TEMP_MODE_COOLING] == pytest.approx(22.0)
+        assert controller.binding[WATER_TEMP_MODE_COOLING] == WATER_TEMP_BINDING_RAMP
+
+    def test_idle_shorter_than_idle_days_preserves_an_in_progress_ramps_own_start(self):
+        """Preserve the < idle_days continue-from-own-start behavior even
+        with the stale-ramp restart fix: a short gap must not restart an
+        already in-progress ramp."""
+        controller = build_controller(
+            cooling=cooling_config(),
+            zones_in_mode={"cool": {"living": {}}},
+            states={COOL_ENTITY: number_state(20.0)},
+        )
+        stub_scan(controller, dew_point=14.0)
+
+        ramp = controller.ramp_state[WATER_TEMP_MODE_COOLING]
+        started = NOW - timedelta(days=2)
+        ramp.ramp_started = started
+        ramp.ramp_start_value = 22.0
+        ramp.last_active = NOW - timedelta(days=1)  # idle 1 day, well under idle_days=7
+
+        controller.compute_targets(NOW)
 
         assert controller.ramp_state[WATER_TEMP_MODE_COOLING].ramp_started == started
 
@@ -785,6 +868,92 @@ class TestInterlocks:
         assert written_values(controller) == [22.0, 19.0]
 
     @pytest.mark.asyncio
+    async def test_interlock_park_never_lowers_supply_below_the_current_dew_target(self):
+        """Spec amendment: interlock park = max(ramp_start, current dew
+        target), so an interlock can never LOWER the supply temperature. The
+        bound actually binds here: dew_point(25.0) + margin(2.0) = 27.0 is
+        ABOVE ramp_start(22.0) -- parking at the bare ramp_start would
+        command water colder than condensation safety currently requires.
+        """
+        states = {COOL_ENTITY: number_state(19.0), "binary_sensor.condensation": binary_state("on")}
+        controller = build_controller(
+            cooling=cooling_config(),  # ramp_start=22.0, min_supply=18.0, margin=2.0
+            zones_in_mode={"cool": {"living": {"climate_entity_id": "climate.living"}}},
+            states=states,
+            condensation_sensor="binary_sensor.condensation",
+        )
+        stub_scan(controller, dew_point=25.0)  # 25.0 + 2.0 margin = 27.0 > ramp_start(22.0)
+        controller._ramp[WATER_TEMP_MODE_COOLING].last_active = NOW - timedelta(hours=1)
+
+        await controller.async_apply(NOW)
+
+        assert written_values(controller) == [27.0]
+
+    def test_interlock_does_not_fast_forward_an_in_progress_ramp(self):
+        """Review finding #8: while interlocked the target is parked, not
+        progressing -- once the interlock clears, the ramp must resume from
+        where it actually was, not from a days_since(ramp_started)
+        calculation that counts the entire interlocked span as ramp
+        progress. The bound actually binds: without the fix the ramp would
+        appear to have advanced ~6 days instead of the real ~1 day and would
+        already have ended.
+        """
+        states = {COOL_ENTITY: number_state(22.0), "binary_sensor.condensation": binary_state("off")}
+        controller = build_controller(
+            cooling=cooling_config(),  # ramp_start=22.0, ramp_rate=1.0/day
+            zones_in_mode={"cool": {"living": {"climate_entity_id": "climate.living"}}},
+            states=states,
+            condensation_sensor="binary_sensor.condensation",
+        )
+        stub_scan(controller, dew_point=14.0)  # dew_target floors at min_supply=18.0
+
+        controller.compute_targets(NOW)  # ramp starts fresh (first run)
+        assert controller.ramp_state[WATER_TEMP_MODE_COOLING].ramp_started == NOW
+
+        states["binary_sensor.condensation"] = binary_state("on")
+        controller.compute_targets(NOW + timedelta(days=1))  # interlock engages after 1 real ramp day
+
+        states["binary_sensor.condensation"] = binary_state("off")
+        controller.compute_targets(NOW + timedelta(days=6))  # first "off" reading starts the dwell
+        cleared_cycle = NOW + timedelta(days=6, minutes=31)  # dwell (30 min) elapses -> clears
+        controller.compute_targets(cleared_cycle)
+
+        ramp = controller.ramp_state[WATER_TEMP_MODE_COOLING]
+        assert controller.binding[WATER_TEMP_MODE_COOLING] == WATER_TEMP_BINDING_RAMP
+        assert ramp.ramp_started is not None
+        days_elapsed = (cleared_cycle - ramp.ramp_started).total_seconds() / 86400.0
+        assert days_elapsed == pytest.approx(1.0, abs=0.01)
+
+    @pytest.mark.asyncio
+    async def test_interlock_just_cleared_flag_does_not_leak_into_a_cycle_where_cooling_is_inactive(self):
+        """Review finding #10: the one-shot force-write flag must be reset
+        at the top of every compute_targets() cycle, not only inside
+        _cooling_interlocked() -- which is never reached once cooling itself
+        goes inactive, and would otherwise leave a stale True flag lying
+        around indefinitely."""
+        zones = {"cool": {"living": {"climate_entity_id": "climate.living"}}}
+        states = {COOL_ENTITY: number_state(19.0), "binary_sensor.condensation": binary_state("on")}
+        controller = build_controller(
+            cooling=cooling_config(),
+            zones_in_mode=zones,
+            states=states,
+            condensation_sensor="binary_sensor.condensation",
+        )
+        stub_scan(controller, dew_point=17.0)
+        controller._ramp[WATER_TEMP_MODE_COOLING].last_active = NOW - timedelta(hours=1)
+        await controller.async_apply(NOW)  # parks, interlock engaged
+
+        states["binary_sensor.condensation"] = binary_state("off")
+        await controller.async_apply(NOW + timedelta(minutes=10))  # dwell starts, still holding
+        await controller.async_apply(NOW + timedelta(minutes=45))  # dwell elapses -> clears this cycle
+        assert controller._interlock_just_cleared is True
+
+        zones["cool"] = {}  # cooling itself goes inactive the very next cycle
+        await controller.async_apply(NOW + timedelta(minutes=50))
+
+        assert controller._interlock_just_cleared is False
+
+    @pytest.mark.asyncio
     async def test_heating_is_unaffected_by_cooling_interlocks(self):
         states = {
             HEAT_ENTITY: number_state(30.0),
@@ -861,6 +1030,33 @@ class TestLearningGate:
 
         controller._utcnow = lambda: NOW + timedelta(minutes=10)
         assert controller.learning_gate("cool") is False
+
+    def test_gate_reengages_then_closes_after_a_stale_ramp_reseeds(self):
+        """Reviewer 2b: once a stale ramp re-seeds on reactivation, the gate
+        must reflect the fresh ramp (open while it runs, closing once it
+        legitimately completes) rather than staying wedged on the stale
+        pre-off-season state."""
+        controller = build_controller(
+            cooling=cooling_config(),
+            zones_in_mode={"cool": {"living": {}}},
+            states={COOL_ENTITY: number_state(18.0)},
+        )
+        stub_scan(controller, dew_point=14.0)  # dew_target floors to min_supply=18.0
+
+        ramp = controller.ramp_state[WATER_TEMP_MODE_COOLING]
+        ramp.ramp_started = NOW - timedelta(days=40)
+        ramp.ramp_start_value = 22.0
+        ramp.last_active = NOW - timedelta(days=39)
+
+        controller.compute_targets(NOW)
+        assert controller.learning_gate("cool") is True  # fresh ramp just (re)started
+
+        # Past the new ~4-day ramp (22.0 -> 18.0 at 1.0/day), but the gap
+        # itself stays well under idle_days=7 so it can't look like *another*
+        # fresh idle gap (production ticks every 5 min; see comment on the
+        # ramp-completion tests above).
+        controller.compute_targets(NOW + timedelta(days=5))
+        assert controller.learning_gate("cool") is False  # closes once the new ramp legitimately ends
 
     def test_gate_is_closed_for_unconfigured_modes_and_none(self):
         controller = build_controller(cooling=cooling_config())
@@ -992,7 +1188,16 @@ class TestUnresolvableModeZones:
 
         targets = controller.compute_targets(NOW)
 
-        assert targets[WATER_TEMP_MODE_COOLING] == pytest.approx(WATER_TEMP_BLIND_MIN_SUPPLY)
+        # The unresolvable-zone placeholder pins temp=dew_point=
+        # WATER_TEMP_BLIND_MIN_SUPPLY (worst case: 100% RH at the floor
+        # temperature) -- the fixed blind-path formula (review finding:
+        # the blind floor must be a FLOOR, not a flat replacement) still
+        # layers dew_point_margin on top of that worst-case estimate like
+        # any other source, landing at floor + margin rather than the bare
+        # floor. Still strictly safer (never lower) than the old behavior.
+        assert targets[WATER_TEMP_MODE_COOLING] == pytest.approx(
+            WATER_TEMP_BLIND_MIN_SUPPLY + cooling_config()["dew_point_margin"]
+        )
         assert controller.diagnostics()["worst_source"] == "attic"
 
     def test_resolvable_but_non_cool_zone_does_not_contribute(self):

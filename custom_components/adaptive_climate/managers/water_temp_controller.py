@@ -164,6 +164,7 @@ class WaterTempController:
 
         self._interlock_engaged = False
         self._interlock_cleared_at: datetime | None = None
+        self._interlock_engaged_at: datetime | None = None
         self._interlock_just_cleared = False
         self._started_unsub: CALLBACK_TYPE | None = None
         self._startup_unsub: CALLBACK_TYPE | None = None
@@ -282,6 +283,10 @@ class WaterTempController:
 
         targets: dict[str, float] = {}
         self._last_scan = None
+        # Review finding #10: reset here (not only inside _cooling_interlocked)
+        # so a stale True never leaks into a cycle where cooling itself goes
+        # inactive before the interlock check is ever reached.
+        self._interlock_just_cleared = False
 
         if self._cooling is not None:
             value = self._compute_cooling(now)
@@ -301,34 +306,19 @@ class WaterTempController:
         if not self._mode_is_active(WATER_TEMP_MODE_COOLING):
             return None
 
-        if self._cooling_interlocked(now):
-            self._binding[WATER_TEMP_MODE_COOLING] = WATER_TEMP_BINDING_INTERLOCK
-            return self._park_value(WATER_TEMP_MODE_COOLING)
-
         cooling = self._cooling or {}
         min_supply = float(cooling.get(CONF_WATER_TEMP_MIN_SUPPLY_TEMP, DEFAULT_WATER_TEMP_MIN_SUPPLY_TEMP))
         margin = float(cooling.get(CONF_WATER_TEMP_DEW_POINT_MARGIN, DEFAULT_WATER_TEMP_DEW_POINT_MARGIN))
 
-        scan = self._scanner.scan(now) if self._scanner is not None else None
-        scan = merge_unresolvable_zone_readings(
-            scan,
-            hass=self.hass,
-            coordinator=self._coordinator,
-            scanner=self._scanner,
-            cool_hvac_state=MODE_HVAC_STATE[WATER_TEMP_MODE_COOLING],
-            now=now,
-        )
+        # Scanned (and the blind floor resolved) *before* the interlock check:
+        # the interlock park value needs "current dew target" regardless of
+        # whether we're about to park instead of returning it directly.
+        dew_target, binding, scan = self._resolve_cooling_dew_target(now, min_supply, margin)
         self._last_scan = scan
 
-        if scan is None or scan.blind or scan.dew_point is None:
-            dew_target = max(min_supply, WATER_TEMP_BLIND_MIN_SUPPLY)
-            binding = WATER_TEMP_BINDING_BLIND
-        else:
-            with_margin = scan.dew_point + margin
-            if with_margin >= min_supply:
-                dew_target, binding = with_margin, WATER_TEMP_BINDING_DEW_POINT
-            else:
-                dew_target, binding = min_supply, WATER_TEMP_BINDING_MIN_SUPPLY
+        if self._cooling_interlocked(now):
+            self._binding[WATER_TEMP_MODE_COOLING] = WATER_TEMP_BINDING_INTERLOCK
+            return self._interlock_park_value(dew_target)
 
         self._update_ramp(WATER_TEMP_MODE_COOLING, now, seed_from_entity=False)
         ramp = self._ramp[WATER_TEMP_MODE_COOLING]
@@ -343,6 +333,56 @@ class WaterTempController:
 
         self._binding[WATER_TEMP_MODE_COOLING] = binding
         return dew_target
+
+    def _resolve_cooling_dew_target(
+        self, now: datetime, min_supply: float, margin: float
+    ) -> tuple[float, str, DewPointScan | None]:
+        """Scan for the worst-case dew point and resolve the (unramped) target.
+
+        Shared by the normal compute path and the interlock park value, which
+        per spec must be ``max(ramp_start, current dew target)`` so an
+        interlock can never park the supply *below* what condensation safety
+        currently requires.
+
+        The blind case is a FLOOR layered on top of whatever degraded dew
+        point was actually computed (fallback humidity paired with a real,
+        plausible temperature still produces a usable — if non-"real" —
+        ``scan.dew_point``); it must not flatly replace that value. A hot,
+        humid room reporting on fallback humidity can demand a target above
+        :data:`WATER_TEMP_BLIND_MIN_SUPPLY`. Only a scan with no dew point at
+        all (no sources whatsoever) falls back to the bare floor.
+        """
+        scan = self._scanner.scan(now) if self._scanner is not None else None
+        scan = merge_unresolvable_zone_readings(
+            scan,
+            hass=self.hass,
+            coordinator=self._coordinator,
+            scanner=self._scanner,
+            cool_hvac_state=MODE_HVAC_STATE[WATER_TEMP_MODE_COOLING],
+            now=now,
+        )
+
+        if scan is None or scan.dew_point is None:
+            return max(min_supply, WATER_TEMP_BLIND_MIN_SUPPLY), WATER_TEMP_BINDING_BLIND, scan
+
+        if scan.blind:
+            floored = max(scan.dew_point + margin, min_supply, WATER_TEMP_BLIND_MIN_SUPPLY)
+            return floored, WATER_TEMP_BINDING_BLIND, scan
+
+        with_margin = scan.dew_point + margin
+        if with_margin >= min_supply:
+            return with_margin, WATER_TEMP_BINDING_DEW_POINT, scan
+        return min_supply, WATER_TEMP_BINDING_MIN_SUPPLY, scan
+
+    def _interlock_park_value(self, dew_target: float) -> float:
+        """Return the interlock park value.
+
+        ``max(ramp_start, current dew target)`` — an interlock must never
+        park the supply *below* what condensation safety currently requires.
+        Only the deactivation park (:meth:`_park_value`) uses the bare
+        configured ``ramp_start``.
+        """
+        return max(self._park_value(WATER_TEMP_MODE_COOLING), dew_target)
 
     def _compute_heating(self, now: datetime) -> float | None:
         """Compute the effective heating supply temperature, or None if inactive."""
@@ -370,7 +410,18 @@ class WaterTempController:
     # ── ramp lifecycle ───────────────────────────────────────────────────────
 
     def _update_ramp(self, mode: str, now: datetime, seed_from_entity: bool) -> None:
-        """Start a ramp when the mode resumes after >= idle_days inactive."""
+        """Start (or restart) a ramp when the mode has been idle >= idle_days.
+
+        Restarts even when a ramp is already in progress ("stale" case): a
+        mode that goes inactive mid-ramp (e.g. season ends before the ramp
+        completed) leaves ``ramp_started`` frozen at its old value, since
+        this method isn't called at all while the mode is inactive. Without
+        restarting here, reactivation after the off-season computes an
+        enormous elapsed time against that stale timestamp, the ramp bound
+        stops binding on the very first cycle, and the full step lands in
+        one write instead of a fresh, gradual ramp. An idle gap shorter than
+        ``idle_days`` still preserves the in-progress ramp's own start time.
+        """
         ramp = self._ramp[mode]
 
         if ramp.last_active is None:
@@ -378,7 +429,7 @@ class WaterTempController:
         else:
             idle_days = max(0.0, self._days_since(ramp.last_active, now))
 
-        if ramp.ramp_started is None and idle_days >= self._idle_days:
+        if idle_days >= self._idle_days:
             ramp.ramp_started = now
             ramp.ramp_start_value = self._seed_ramp_start(mode, seed_from_entity)
             _LOGGER.info(
@@ -631,6 +682,8 @@ class WaterTempController:
         self._interlock_just_cleared = False
 
         if active:
+            if not self._interlock_engaged:
+                self._interlock_engaged_at = now
             self._interlock_engaged = True
             self._interlock_cleared_at = None
             return True
@@ -651,8 +704,32 @@ class WaterTempController:
         # write must land immediately rather than restart a fresh dwell timer
         # stacked on top of the wait we already just observed.
         self._interlock_just_cleared = True
+        self._advance_ramp_for_interlock(WATER_TEMP_MODE_COOLING, now)
         _LOGGER.info("Water temp control: cooling interlock cleared, resuming normal computation")
         return False
+
+    def _advance_ramp_for_interlock(self, mode: str, now: datetime) -> None:
+        """Skip the ramp forward by the interlock's held duration once it clears.
+
+        While interlocked the target is parked, not progressing toward the
+        dew target (review finding #8). Without this, the elapsed-time-based
+        ramp calculation would count the entire interlocked span as ramp
+        progress once normal computation resumes (a "fast forward" past days
+        the ramp never actually advanced), and a long-held interlock would
+        look exactly like a seasonal idle gap and spuriously restart the ramp
+        from scratch on the very next cycle.
+        """
+        engaged_at = self._interlock_engaged_at
+        self._interlock_engaged_at = None
+        if engaged_at is None:
+            return
+
+        duration = max(timedelta(0), now - engaged_at)
+        ramp = self._ramp[mode]
+        if ramp.ramp_started is not None:
+            ramp.ramp_started = min(ramp.ramp_started + duration, now)
+        if ramp.last_active is not None:
+            ramp.last_active = min(ramp.last_active + duration, now)
 
     def _interlock_condition_active(self) -> bool:
         """Return True while a raw interlock condition is present."""
