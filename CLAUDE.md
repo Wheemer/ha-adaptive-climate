@@ -78,6 +78,7 @@ pre-commit run --all-files                  # all checks
 | `DewPointScanner` | Worst-case indoor dew point across zones and extra sensors |
 | `water_temp_writer.py` | Pure write-policy helpers: rounding, clamping, direction safety |
 | `water_temp_blind_zones.py` | Blind-reading fallback for zones with unresolvable HVAC mode |
+| `water_temp_interlocks.py` | Cooling interlock state machine (condensation/open-window park) |
 
 ### Data Flow
 
