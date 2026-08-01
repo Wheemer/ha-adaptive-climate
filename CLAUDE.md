@@ -57,6 +57,8 @@ pre-commit run --all-files                  # all checks
 | `adaptive/physics.py` | Thermal time constant, Ziegler-Nichols init |
 | `adaptive/floor_physics.py` | Floor thermal properties, slab calculations |
 | `sensor.py` | Performance/learning sensors |
+| `helpers/dew_point.py` | Pure Magnus-Tetens dew point calculation |
+| `sensors/water_temp.py` | Water supply temperature diagnostic sensor |
 
 ### Managers (`managers/`)
 
@@ -72,6 +74,10 @@ pre-commit run --all-files                  # all checks
 | `NightSetbackCalculator` | Preheat timing |
 | `NightSetbackLearningGate` | Suppresses night setback until tuned |
 | `pid_gains_manager.py` | Centralized PID gain mutations, auto-history |
+| `WaterTempController` | Supply water temp targets, ramps, write policy, interlocks |
+| `DewPointScanner` | Worst-case indoor dew point across zones and extra sensors |
+| `water_temp_writer.py` | Pure write-policy helpers: rounding, clamping, direction safety |
+| `water_temp_blind_zones.py` | Blind-reading fallback for zones with unresolvable HVAC mode |
 
 ### Data Flow
 
@@ -188,6 +194,91 @@ climate:
 
 **Committed heat tracking:**
 When transport delay exists, tracks in-flight heat and subtracts from next cycle's duty calculation. Learning splits overshoot into controllable vs committed portions.
+
+### Water Temperature Control
+
+Drives the heat pump's supply water temperature setpoints. Cooling is computed
+from the worst-case indoor dew point; heating pushes a configured target. Both
+ramp gradually when a mode resumes after a long idle period.
+
+**Configuration (domain-level):**
+```yaml
+adaptive_climate:
+  water_temp_control:
+    idle_days: 7                    # ramp restarts after this many days inactive
+    min_write_interval: 1800        # s between unsafe-direction writes
+    condensation_sensor: binary_sensor.manifold_condensation
+    cooling:
+      target_entity: number.heatpump_cool_supply
+      min_supply_temp: 18.0
+      dew_point_margin: 2.0
+      fallback_humidity: 65
+      ramp_start: 22.0
+      ramp_rate: 1.0
+      extra_sensors:
+        - humidity: sensor.manifold_rh
+          temperature: sensor.manifold_temp
+    heating:
+      target_entity: number.heatpump_heat_supply
+      target: 35.0                  # Range(20, 45); defaults to supply_temperature
+      ramp_start: 25.0
+      ramp_rate: 2.0
+```
+
+**Entity-level:** `exclude_from_dew_point: true` omits a zone's humidity from the scan.
+
+**Warnings:**
+- The heating half **overrides a heat pump's own weather-compensation curve** — only configure it if the pump runs a fixed setpoint.
+- `supply_temperature` also feeds physics-based PID init; changing it changes both.
+- Insulated supply pipework and manifold are a prerequisite for radiant cooling near the dew point.
+
+**Dew point sources:** every COOL-mode zone with a `humidity_sensor` (minus
+`exclude_from_dew_point` zones and zones whose HumidityDetector is
+paused/stabilizing), plus configured `extra_sensors` pairs. A registered zone
+whose HVAC mode can't be resolved (climate entity not yet loaded, renamed,
+unavailable) still contributes a conservative blind reading instead of being
+silently dropped (`managers/water_temp_blind_zones.py`). Worst (highest) dew
+point wins. RH is smoothed with a 20-min EMA per source. Implausible RH falls
+back to `fallback_humidity`; implausible/missing temperature drops the source;
+stale readings use `max(last_ema, fallback)`. With no real reading anywhere the
+system is blind and floors at `max(min_supply_temp, 20.0)`.
+
+**Targets:** `cooling = max(dew_point + margin, min_supply_temp)`,
+`heating = target`. While a ramp is active the ramp bound applies instead.
+
+**Ramps:** start when a mode becomes active after ≥ `idle_days` inactive. Heating
+seeds from `max(ramp_start, current entity value)`; cooling always uses the
+configured `ramp_start`. Heating and cooling track idle/ramp state independently.
+
+**Write policy:** round to the entity's `step` toward the safe side (cooling up,
+heating down), clamp to the entity's min/max, compare the post-clamp value.
+Safe-direction changes write immediately; unsafe-direction changes must persist
+for `min_write_interval`. Mode deactivation parks at `ramp_start`. Pure rounding/
+clamping/direction-safety helpers live in `managers/water_temp_writer.py`.
+
+**Interlocks (cooling):** the condensation sensor being ON, or any COOL zone
+reporting `open_window` / `contact_open`, forces an immediate park and holds for
+30 minutes after the condition clears.
+
+**Learning protection:** `coordinator.water_temp_learning_gate(mode)` is true
+while a ramp is active and for one 60-min settling window after any write of
+≥ 1.0 °C. While true, affected zones suppress cycle recording and undershoot
+detection, surfaced as the existing `learning_grace` override.
+
+**Cooling clamp:** `coordinator.min_cooling_target` reads the controller's live
+effective supply temp (+ `cooling_supply_margin`), falling back to the static
+`cooling_supply_temp` before the first computation. Setup logs a warning
+(`check_cooling_supply_conflict`) when a configured static `cooling_supply_temp`
+disagrees with `water_temp_control.cooling.min_supply_temp`.
+
+**Persistence:** top-level `water_temp_state` key in the learning store
+(additive, no `STORAGE_VERSION` bump). ISO timestamps for last-active and
+ramp-start per mode, plus the last value written per entity.
+
+**Diagnostic sensor:** `sensor.water_supply_temperature_target` — state is the
+effective supply temp; attributes are `mode`, `dew_point`, `binding_constraint`
+(`dew_point` / `min_supply` / `ramp` / `target` / `interlock` / `blind`),
+`ramp_active`, `days_remaining`, `worst_source`.
 
 ### Open Window Detection
 
@@ -510,4 +601,4 @@ Exposed via `extra_state_attributes`. Structure: flat restoration fields + group
 
 ## Tests
 
-`test_pid_controller.py`, `test_physics.py`, `test_learning.py`, `test_cycle_tracker.py`, `test_integration_cycle_learning.py`, `test_coordinator.py`, `test_central_controller.py`, `test_thermal_groups.py`, `test_night_setback.py`, `test_contact_sensors.py`, `test_preheat_learner.py`, `test_humidity_detector.py`, `test_setpoint_boost.py`, `test_auto_mode_switching.py`, `test_undershoot_detector.py`, `test_cycle_weight.py`, `test_confidence_contribution.py`, `test_auto_learning_setback.py`, `test_integration_weighted_learning.py`
+`test_pid_controller.py`, `test_physics.py`, `test_learning.py`, `test_cycle_tracker.py`, `test_integration_cycle_learning.py`, `test_coordinator.py`, `test_central_controller.py`, `test_thermal_groups.py`, `test_night_setback.py`, `test_contact_sensors.py`, `test_preheat_learner.py`, `test_humidity_detector.py`, `test_setpoint_boost.py`, `test_auto_mode_switching.py`, `test_undershoot_detector.py`, `test_cycle_weight.py`, `test_confidence_contribution.py`, `test_auto_learning_setback.py`, `test_integration_weighted_learning.py`, `test_dew_point.py`, `test_water_temp_config.py`, `test_water_temp_sources.py`, `test_water_temp_controller.py`, `test_water_temp_persistence.py`, `test_water_temp_wiring.py`, `test_water_temp_learning_gate.py`, `test_water_temp_clamp.py`, `test_water_temp_sensor.py`
