@@ -60,12 +60,13 @@ class FakeWorld:
         if humidity is not None:
             self.states_map[humidity] = make_state(str(rh), last_updated=rh_updated)
 
-    def scanner(self, extra_sensors=None, fallback_humidity=65.0):
+    def scanner(self, extra_sensors=None, fallback_humidity=65.0, dew_point_margin=2.0):
         return DewPointScanner(
             self.hass,
             self.coordinator,
             extra_sensors=extra_sensors or [],
             fallback_humidity=fallback_humidity,
+            dew_point_margin=dew_point_margin,
         )
 
 
@@ -320,9 +321,13 @@ def test_not_blind_when_at_least_one_real_reading_exists():
 def test_zone_with_unresolvable_temperature_contributes_a_blind_reading():
     """A registered COOL zone whose temperature can't be resolved (renamed/suffixed
     entity, unavailable sensor, ...) must still contribute — as a non-real reading
-    pinned to the system's blind floor — rather than being silently skipped, which
-    would drop that room's humidity signal from the scan entirely and could let the
-    supply water run below its actual dew point.
+    that lands the target on the system's blind floor — rather than being silently
+    skipped, which would drop that room's humidity signal from the scan entirely
+    and could let the supply water run below its actual dew point.
+
+    The stand-in is expressed as a dew point, so it sits ``dew_point_margin``
+    *below* the floor: consumers add the margin back on.  Pinning the raw floor
+    here made the target overshoot it by exactly one margin on every blind scan.
     """
     world = FakeWorld()
     world.add_zone("living", humidity="sensor.living_rh", rh=50.0, room_temp=24.0)
@@ -331,14 +336,14 @@ def test_zone_with_unresolvable_temperature_contributes_a_blind_reading():
     # there is no device-paired temperature sensor either.
     world.add_zone("kitchen", humidity="sensor.kitchen_rh", rh=90.0, room_temp=None)
 
-    scanner = world.scanner()
+    scanner = world.scanner(dew_point_margin=1.5)
     scanner._find_paired_temp_entity = lambda _entity_id: None
     scan = scanner.scan(NOW)
 
     assert {r.key for r in scan.readings} == {"living", "kitchen"}
     kitchen_reading = next(r for r in scan.readings if r.key == "kitchen")
     assert kitchen_reading.real is False
-    assert kitchen_reading.dew_point_c == pytest.approx(WATER_TEMP_BLIND_MIN_SUPPLY)
+    assert kitchen_reading.dew_point_c + 1.5 == pytest.approx(WATER_TEMP_BLIND_MIN_SUPPLY)
     assert kitchen_reading.temp_source == "climate"
 
 
@@ -359,16 +364,17 @@ def test_unresolvable_zone_temperature_does_not_force_blind_when_another_zone_is
 
 def test_unresolvable_zone_temperature_can_win_worst_source():
     """When every other zone's dew point is below the blind floor, the unresolvable
-    zone's conservative floor value must still be able to win worst-source selection
-    — this is what actually protects the supply water from running too cold.
+    zone's conservative stand-in must still be able to win worst-source selection
+    — this is what actually protects the supply water from running too cold.  Its
+    dew point plus the margin lands exactly on the floor, never above it.
     """
     world = FakeWorld()
     world.add_zone("living", humidity="sensor.living_rh", rh=30.0, room_temp=18.0)
     world.add_zone("kitchen", humidity="sensor.kitchen_rh", rh=90.0, room_temp=None)
 
-    scanner = world.scanner()
+    scanner = world.scanner(dew_point_margin=1.5)
     scanner._find_paired_temp_entity = lambda _entity_id: None
     scan = scanner.scan(NOW)
 
     assert scan.worst_source == "kitchen"
-    assert scan.dew_point == pytest.approx(WATER_TEMP_BLIND_MIN_SUPPLY)
+    assert scan.dew_point + 1.5 == pytest.approx(WATER_TEMP_BLIND_MIN_SUPPLY)

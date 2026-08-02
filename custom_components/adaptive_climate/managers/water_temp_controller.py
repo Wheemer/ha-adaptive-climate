@@ -149,6 +149,9 @@ class WaterTempController:
                 fallback_humidity=float(
                     self._cooling.get(CONF_WATER_TEMP_FALLBACK_HUMIDITY, DEFAULT_WATER_TEMP_FALLBACK_HUMIDITY)
                 ),
+                dew_point_margin=float(
+                    self._cooling.get(CONF_WATER_TEMP_DEW_POINT_MARGIN, DEFAULT_WATER_TEMP_DEW_POINT_MARGIN)
+                ),
             )
 
         self._ramp: dict[str, ModeRampState] = {

@@ -16,6 +16,7 @@ import math
 from typing import TYPE_CHECKING, Any
 
 from ..const import (
+    DEFAULT_WATER_TEMP_DEW_POINT_MARGIN,
     WATER_TEMP_AIR_TEMP_MAX,
     WATER_TEMP_AIR_TEMP_MIN,
     WATER_TEMP_BLIND_MIN_SUPPLY,
@@ -79,6 +80,7 @@ class DewPointScanner:
         coordinator: AdaptiveThermostatCoordinator,
         extra_sensors: list[dict[str, str]],
         fallback_humidity: float,
+        dew_point_margin: float = DEFAULT_WATER_TEMP_DEW_POINT_MARGIN,
         ema_window_minutes: float = WATER_TEMP_EMA_WINDOW_MINUTES,
         stale_after_minutes: float = WATER_TEMP_STALE_MINUTES,
     ) -> None:
@@ -89,6 +91,9 @@ class DewPointScanner:
             coordinator: Zone registry, used for COOL-mode zones and zone temps.
             extra_sensors: List of ``{"humidity": ..., "temperature": ...}`` pairs.
             fallback_humidity: RH in % used when a source has no usable reading.
+            dew_point_margin: The caller's ``dew_point_margin``, needed only so
+                :meth:`blind_zone_reading` can express its floor as a dew point
+                (the caller adds the margin back on).
             ema_window_minutes: Time constant of the per-source RH EMA.
             stale_after_minutes: ``state.last_updated`` age past which RH is stale.
         """
@@ -96,6 +101,7 @@ class DewPointScanner:
         self._coordinator = coordinator
         self._extra_sensors = extra_sensors
         self._fallback_humidity = fallback_humidity
+        self._dew_point_margin = dew_point_margin
         self._ema_window_minutes = ema_window_minutes
         self._stale_after_minutes = stale_after_minutes
 
@@ -340,19 +346,29 @@ class DewPointScanner:
         can't be resolved at all, not just an internal scanner detail.
 
         Review finding #8: dropping such a zone entirely would exclude its
-        humidity signal from the scan.  Instead it contributes the system's
-        blind floor (:data:`WATER_TEMP_BLIND_MIN_SUPPLY`) as its dew point —
-        conservative because it can still win worst-source selection and pull
-        the effective target up to the floor, but (being non-real) never by
-        itself forces the whole scan blind when another zone has a genuine
-        reading.
+        humidity signal from the scan.  Instead it contributes a dew point that
+        pulls the effective target up to exactly the system's blind floor
+        (:data:`WATER_TEMP_BLIND_MIN_SUPPLY`) — conservative because it can
+        still win worst-source selection, but (being non-real) never by itself
+        forces the whole scan blind when another zone has a genuine reading.
+
+        The stand-in is ``floor - dew_point_margin``, not the floor itself:
+        every consumer adds ``dew_point_margin`` to whatever dew point the scan
+        reports, and :data:`WATER_TEMP_BLIND_MIN_SUPPLY` is already a *supply
+        water* bound rather than a room air measurement.  Pinning the raw floor
+        here fed it through that same ``+ margin`` step and landed the target a
+        full margin above the floor, so a zone with no usable temperature
+        demanded warmer water than a system with no dew point information at
+        all (which returns the bare floor).  Less information must not change
+        the answer in either direction.
         """
         rh_pct = self._resolve_humidity(zone_id, humidity_entity_id, now)[0]
+        stand_in_c = WATER_TEMP_BLIND_MIN_SUPPLY - self._dew_point_margin
         return SourceReading(
             key=zone_id,
             rh_pct=rh_pct,
-            temp_c=WATER_TEMP_BLIND_MIN_SUPPLY,
-            dew_point_c=WATER_TEMP_BLIND_MIN_SUPPLY,
+            temp_c=stand_in_c,
+            dew_point_c=stand_in_c,
             real=False,
             temp_source=TEMP_SOURCE_CLIMATE,
         )

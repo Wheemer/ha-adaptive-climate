@@ -1581,16 +1581,15 @@ class TestUnresolvableModeZones:
 
         targets = controller.compute_targets(NOW)
 
-        # The unresolvable-zone placeholder pins temp=dew_point=
-        # WATER_TEMP_BLIND_MIN_SUPPLY (worst case: 100% RH at the floor
-        # temperature) -- the fixed blind-path formula (review finding:
-        # the blind floor must be a FLOOR, not a flat replacement) still
-        # layers dew_point_margin on top of that worst-case estimate like
-        # any other source, landing at floor + margin rather than the bare
-        # floor. Still strictly safer (never lower) than the old behavior.
-        assert targets[WATER_TEMP_MODE_COOLING] == pytest.approx(
-            WATER_TEMP_BLIND_MIN_SUPPLY + cooling_config()["dew_point_margin"]
-        )
+        # The placeholder must land on WATER_TEMP_BLIND_MIN_SUPPLY exactly --
+        # the same floor test_resolvable_but_non_cool_zone_does_not_contribute
+        # asserts for the no-sources-at-all path. The constant is a *supply
+        # water* floor, not a room air temperature, so layering
+        # dew_point_margin on top of it double-counts: it made an unknown
+        # zone demand a WARMER supply (floor + margin) than a system with no
+        # dew point information whatsoever (floor). Less information must
+        # never buy a colder-looking answer, nor a needlessly warmer one.
+        assert targets[WATER_TEMP_MODE_COOLING] == pytest.approx(WATER_TEMP_BLIND_MIN_SUPPLY)
         assert controller.diagnostics()["worst_source"] == "attic"
 
     def test_resolvable_but_non_cool_zone_does_not_contribute(self):
@@ -1632,5 +1631,63 @@ class TestUnresolvableModeZones:
         assert WATER_TEMP_MODE_COOLING not in controller.compute_targets(NOW)
 
 
-if __name__ == "__main__":
-    pytest.main([__file__, "-v"])
+# =============================================================================
+# Post-restart blind scan (field report: setpoint spikes on every reboot)
+# =============================================================================
+
+
+class TestPostRestartBlindScan:
+    """First compute after a restart runs before any zone temperature resolves.
+
+    Field report, 2026-08-02: on every HA restart the cooling setpoint was
+    written at 21.5 degC and then corrected to 20.0 degC on the next 5-minute
+    tick.  At WATER_TEMP_STARTUP_DELAY_SECONDS after ``homeassistant_started``
+    no zone's ``current_temperature`` has resolved yet, so every COOL zone
+    falls to ``blind_zone_reading`` -- and the placeholder dew point then had
+    ``dew_point_margin`` layered on top of it, landing margin degrees above
+    the blind floor the constant defines.  Uses the REAL DewPointScanner and
+    the reporter's production numbers.
+    """
+
+    def _controller(self):
+        zones = {
+            zone_id: {
+                "climate_entity_id": f"climate.{zone_id}",
+                "humidity_sensor": f"sensor.{zone_id}_humidity",
+            }
+            for zone_id in ("gf", "kitchen", "living_room", "bedroom", "study")
+        }
+        controller = build_controller(
+            cooling=cooling_config(min_supply_temp=18.5, dew_point_margin=1.5, ramp_start=20.0, ramp_rate=0.5),
+            zones_in_mode={"cool": zones},
+            all_zones=zones,
+            states={COOL_ENTITY: number_state(20.0)},
+        )
+        # Every zone is registered and cooling, but no temperature has
+        # arrived yet -- exactly the state the scanner logged five times
+        # with "no temperature available for zone X".
+        controller._coordinator.get_zone_current_temp = lambda zone_id: None
+        controller._ramp[WATER_TEMP_MODE_COOLING].last_active = NOW - timedelta(hours=1)
+        return controller
+
+    def test_all_zones_temperature_blind_lands_on_the_floor_not_floor_plus_margin(self):
+        controller = self._controller()
+
+        targets = controller.compute_targets(NOW)
+
+        assert controller.binding[WATER_TEMP_MODE_COOLING] == WATER_TEMP_BINDING_BLIND
+        assert targets[WATER_TEMP_MODE_COOLING] == pytest.approx(WATER_TEMP_BLIND_MIN_SUPPLY)
+
+    @pytest.mark.asyncio
+    async def test_restart_does_not_push_the_setpoint_above_the_last_written_value(self):
+        """The reported symptom: a spurious upward write, then a correction.
+
+        20.0 degC was the value persisted before the restart, so a blind
+        first cycle must not move the entity at all.
+        """
+        controller = self._controller()
+        controller.restore_state({"last_written": {COOL_ENTITY: 20.0}})
+
+        await controller.async_apply(NOW)
+
+        controller.hass.services.async_call.assert_not_called()
