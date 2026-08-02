@@ -1,6 +1,49 @@
 # CHANGELOG
 
 
+## v0.66.1 (2026-08-02)
+
+### Bug Fixes
+
+- **watertemp**: Derive ramp origin from live config, persist only heating seed
+  ([`34a83e1`](https://github.com/afewyards/ha-adaptive-climate/commit/34a83e1553cdc3e11d8ef05c539a44eedf0e7fff))
+
+Cooling's ramp origin was captured at seed time and persisted (ramp_start_value), so a mid-ramp edit
+  to ramp_start required manual .storage surgery to take effect. Cooling now reads ramp_start live
+  from config every compute cycle instead. Heating keeps a persisted seed (the entity value captured
+  at ramp start, for the backup-heater trap) but the live configured ramp_start now wins whenever
+  it's higher than that seed. Old-format stores that persisted ramp_start_value for both modes
+  migrate transparently: cooling's stored value is ignored, heating's is still used as the seed. No
+  storage version bump.
+
+Extracted configured_ramp_start/configured_ramp_rate/elapsed_days/ ramp_origin as pure helpers into
+  managers/water_temp_writer.py to de-duplicate logic shared across ramp seeding, per-cycle
+  computation, park value, and the days-remaining diagnostic, and to keep water_temp_controller.py
+  under the project's 800-line ceiling.
+
+- **watertemp**: Stop blind zone stand-in double-counting the dew point margin
+  ([`d8bca35`](https://github.com/afewyards/ha-adaptive-climate/commit/d8bca356e05a3d52761a56e5ef6f1d505bbfca06))
+
+blind_zone_reading() pinned a zone's dew point to WATER_TEMP_BLIND_MIN_SUPPLY, but that constant is
+  a supply-water floor, not a room air measurement. _resolve_cooling_dew_target() then added
+  dew_point_margin on top, landing the target a full margin above the floor -- so a zone with no
+  usable temperature demanded warmer water than a system with no dew point information at all, which
+  returns the bare floor.
+
+Field symptom: on every HA restart the cooling setpoint was written at 21.5C and corrected to 20.0C
+  on the next 5-minute tick. At WATER_TEMP_STARTUP_DELAY_SECONDS after homeassistant_started no
+  zone's current_temperature has resolved yet, so every COOL zone falls to the stand-in reading and
+  the whole scan goes blind: max(20.0 + 1.5, 18.5, 20.0) = 21.5.
+
+Express the stand-in as a dew point (floor - margin) so the uniform "+ margin" step lands it exactly
+  on the floor, matching the no-sources path. The margin is threaded into DewPointScanner from the
+  cooling config.
+
+test_unresolvable_mode_zone_pulls_target_to_blind_floor_while_another_zone_cools asserted the old
+  floor + margin behaviour; updated to the bare floor. Adds TestPostRestartBlindScan covering the
+  reported restart sequence.
+
+
 ## v0.66.0 (2026-08-01)
 
 ### Chores
