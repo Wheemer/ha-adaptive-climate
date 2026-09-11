@@ -60,6 +60,7 @@ from .const import (
     CONF_BOOST_TEMP,
     CONF_COMFORT_TEMP,
     CONF_HOME_TEMP,
+    CONF_SLEEP_TEMP,
     CONF_ACTIVITY_TEMP,
     CONF_PRESET_SYNC_MODE,
     CONF_BOOST_PID_OFF,
@@ -508,6 +509,7 @@ if HAS_HOMEASSISTANT:
                         vol.Optional(CONF_BOOST_TEMP): vol.Coerce(float),
                         vol.Optional(CONF_COMFORT_TEMP): vol.Coerce(float),
                         vol.Optional(CONF_HOME_TEMP): vol.Coerce(float),
+                        vol.Optional(CONF_SLEEP_TEMP): vol.Coerce(float),
                         vol.Optional(CONF_ACTIVITY_TEMP): vol.Coerce(float),
                         vol.Optional(CONF_PRESET_SYNC_MODE, default=DEFAULT_PRESET_SYNC_MODE): vol.In(["sync", "none"]),
                         vol.Optional(CONF_BOOST_PID_OFF, default=False): cv.boolean,
@@ -933,6 +935,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     hass.data[DOMAIN]["boost_temp"] = domain_config.get(CONF_BOOST_TEMP)
     hass.data[DOMAIN]["comfort_temp"] = domain_config.get(CONF_COMFORT_TEMP)
     hass.data[DOMAIN]["home_temp"] = domain_config.get(CONF_HOME_TEMP)
+    hass.data[DOMAIN]["sleep_temp"] = domain_config.get(CONF_SLEEP_TEMP)
     hass.data[DOMAIN]["activity_temp"] = domain_config.get(CONF_ACTIVITY_TEMP)
     hass.data[DOMAIN]["preset_sync_mode"] = domain_config.get(CONF_PRESET_SYNC_MODE, DEFAULT_PRESET_SYNC_MODE)
     hass.data[DOMAIN]["boost_pid_off"] = domain_config.get(CONF_BOOST_PID_OFF, False)

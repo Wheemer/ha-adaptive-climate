@@ -1,3 +1,68 @@
+set_preset_temp:
+  name: Set preset temperatures
+  description: Update preset temperatures for the selected thermostats.
+  target:
+    entity:
+      integration: adaptive_climate
+      domain: climate
+  fields:
+    away_temp:
+      name: Away temperature
+      selector:
+        number:
+          min: 7
+          max: 35
+          step: 0.1
+          mode: box
+    eco_temp:
+      name: Eco temperature
+      selector:
+        number:
+          min: 7
+          max: 35
+          step: 0.1
+          mode: box
+    boost_temp:
+      name: Boost temperature
+      selector:
+        number:
+          min: 7
+          max: 35
+          step: 0.1
+          mode: box
+    comfort_temp:
+      name: Comfort temperature
+      selector:
+        number:
+          min: 7
+          max: 35
+          step: 0.1
+          mode: box
+    home_temp:
+      name: Home temperature
+      selector:
+        number:
+          min: 7
+          max: 35
+          step: 0.1
+          mode: box
+    sleep_temp:
+      name: Sleep temperature
+      selector:
+        number:
+          min: 7
+          max: 35
+          step: 0.1
+          mode: box
+    activity_temp:
+      name: Activity temperature
+      selector:
+        number:
+          min: 7
+          max: 35
+          step: 0.1
+          mode: box
+
 reset_pid_to_physics:
   name: Reset PID to Physics Defaults
   description: >-

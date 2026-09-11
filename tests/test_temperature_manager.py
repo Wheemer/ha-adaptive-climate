@@ -71,6 +71,14 @@ class TestTemperatureManagerCallbackOnly:
         assert manager.preset_mode == PRESET_NONE
         assert manager.saved_target_temp is None
 
+    @pytest.mark.asyncio
+    async def test_updated_sleep_preset_is_selectable(self, manager, mock_callbacks):
+        await manager.async_set_preset_temp(sleep_temp=20.2)
+        assert manager.get_preset_temperature(PRESET_SLEEP) == 20.2
+        await manager.async_set_preset_mode(PRESET_SLEEP)
+        assert mock_callbacks["target_temp"] == 20.2
+        assert manager.preset_mode == PRESET_SLEEP
+
     def test_preset_modes_listing(self, manager):
         """Test that preset modes list correctly via property."""
         modes = manager.preset_modes

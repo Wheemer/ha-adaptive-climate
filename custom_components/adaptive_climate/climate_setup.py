@@ -530,6 +530,22 @@ async def async_setup_platform(hass: HomeAssistant, config: ConfigType, async_ad
         )
 
     # Register public entity services (always available)
+    platform.async_register_entity_service(
+        "set_preset_temp",
+        {
+            vol.Optional(key): vol.Coerce(float)
+            for key in (
+                const.CONF_AWAY_TEMP,
+                const.CONF_ECO_TEMP,
+                const.CONF_BOOST_TEMP,
+                const.CONF_COMFORT_TEMP,
+                const.CONF_HOME_TEMP,
+                const.CONF_SLEEP_TEMP,
+                const.CONF_ACTIVITY_TEMP,
+            )
+        },
+        "async_set_preset_temp",
+    )
     platform.async_register_entity_service(  # type: ignore
         "delete_pid_history",
         {
