@@ -10,6 +10,25 @@ from custom_components.adaptive_climate.climate_setup import async_setup_platfor
 from custom_components.adaptive_climate.const import DOMAIN
 
 
+def test_preset_capabilities_before_manager_initialization():
+    from custom_components.adaptive_climate.climate import AdaptiveThermostat
+
+    entity = MagicMock()
+    entity._temperature_manager = None
+    for mode in ("away", "eco", "boost", "comfort", "home", "activity"):
+        setattr(entity, f"_{mode}_temp", None)
+    entity._sleep_temp = 20.2
+    assert AdaptiveThermostat.preset_modes.fget(entity) == ["none", "sleep"]
+
+
+def test_preset_capabilities_delegate_after_initialization():
+    from custom_components.adaptive_climate.climate import AdaptiveThermostat
+
+    entity = MagicMock()
+    entity._temperature_manager.preset_modes = ["none", "sleep", "home"]
+    assert AdaptiveThermostat.preset_modes.fget(entity) == ["none", "sleep", "home"]
+
+
 def test_sleep_temperature_accepted_by_domain_schema():
     config = CONFIG_SCHEMA({DOMAIN: {"sleep_temp": "20.2"}})
     assert config[DOMAIN]["sleep_temp"] == 20.2

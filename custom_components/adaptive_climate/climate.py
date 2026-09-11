@@ -932,6 +932,13 @@ class AdaptiveThermostat(
     @property
     def preset_modes(self):
         """Return a list of available preset modes."""
+        # HA reads capabilities before async_added_to_hass initializes managers.
+        if self._temperature_manager is None:
+            return ["none"] + [
+                mode
+                for mode in ("away", "eco", "boost", "comfort", "home", "sleep", "activity")
+                if getattr(self, f"_{mode}_temp") is not None
+            ]
         return self._temperature_manager.preset_modes
 
     @property
